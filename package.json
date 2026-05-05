@@ -1,0 +1,103 @@
+{
+  "name": "@moraya/markdown-core",
+  "version": "0.1.0",
+  "description": "Shared markdown editor core for Moraya desktop and Moraya Web. ProseMirror schema, markdown-it parser, prosemirror-markdown serializer, plugins, and editor lifecycle factories. Pure ESM, host-agnostic, dependency-injected.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./schema": {
+      "import": "./dist/schema.js",
+      "types": "./dist/schema.d.ts"
+    },
+    "./markdown": {
+      "import": "./dist/markdown.js",
+      "types": "./dist/markdown.d.ts"
+    },
+    "./commands": {
+      "import": "./dist/commands.js",
+      "types": "./dist/commands.d.ts"
+    },
+    "./doc-cache": {
+      "import": "./dist/doc-cache.js",
+      "types": "./dist/doc-cache.d.ts"
+    },
+    "./types": {
+      "import": "./dist/types.js",
+      "types": "./dist/types.d.ts"
+    },
+    "./style": "./dist/style.css",
+    "./plugins/*": {
+      "import": "./dist/plugins/*.js",
+      "types": "./dist/plugins/*.d.ts"
+    },
+    "./adapters/*": {
+      "import": "./dist/adapters/*.js",
+      "types": "./dist/adapters/*.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zouwei/moraya-markdown-core.git"
+  },
+  "license": "PolyForm-Internal-Use-1.0.0",
+  "sideEffects": [
+    "./dist/style.css"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src --ext .ts",
+    "prepublishOnly": "npm run build && npm run test"
+  },
+  "peerDependencies": {
+    "highlight.js": "^11.11.0",
+    "katex": "^0.16.28",
+    "markdown-it": "^14.0.0",
+    "prosemirror-markdown": "^1.13.0",
+    "prosemirror-model": "^1.20.0",
+    "prosemirror-state": "^1.4.0",
+    "prosemirror-view": "^1.33.0"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^20.0.0",
+    "happy-dom": "^20.9.0",
+    "highlight.js": "^11.11.1",
+    "katex": "^0.16.28",
+    "markdown-it": "^14.1.1",
+    "prosemirror-commands": "^1.7.1",
+    "prosemirror-history": "^1.5.0",
+    "prosemirror-inputrules": "^1.5.1",
+    "prosemirror-keymap": "^1.2.3",
+    "prosemirror-markdown": "^1.13.4",
+    "prosemirror-model": "^1.25.4",
+    "prosemirror-schema-list": "^1.5.1",
+    "prosemirror-state": "^1.4.4",
+    "prosemirror-tables": "^1.8.5",
+    "prosemirror-view": "^1.41.6",
+    "tsup": "^8.3.0",
+    "typescript": "~5.6.2",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

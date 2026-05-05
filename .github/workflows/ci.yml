@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: typecheck + test + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test (vitest)
+        run: pnpm test
+
+      - name: Build (tsup ESM + d.ts)
+        run: pnpm build
+
+      # v0.60.0-pre §1.1.4 — frontend purity gates
+      - name: Gate 1 — Forbid Node API
+        run: |
+          if grep -rE "from ['\"](fs|path|crypto|os|child_process|stream|http|https|net|util|events)['\"]" dist/ ; then
+            echo "::error::dist/ contains Node API import"
+            exit 1
+          fi
+
+      - name: Gate 2 — Forbid CommonJS require()
+        run: |
+          if grep -rE "require\(['\"][^'\"]+['\"]\)" dist/*.js ; then
+            echo "::error::dist/ contains require() call"
+            exit 1
+          fi
+
+      - name: Gate 3 — Forbid host-specific imports
+        run: |
+          if grep -rE "@tauri-apps|@capacitor|cordova|electron" dist/*.js ; then
+            echo "::error::dist/ contains host-specific import"
+            exit 1
+          fi
+
+      - name: Gate 4 — Bundle budget (≤ 80KB gzipped main entry)
+        run: |
+          GZIP_SIZE=$(gzip -c dist/index.js | wc -c)
+          echo "Main entry: $GZIP_SIZE bytes gzipped (limit 81920)"
+          if [ "$GZIP_SIZE" -gt 81920 ]; then
+            echo "::error::Main entry $GZIP_SIZE > 80KB gzipped"
+            exit 1
+          fi
