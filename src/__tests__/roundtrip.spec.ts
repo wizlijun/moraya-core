@@ -93,6 +93,95 @@ describe('roundtrip data traps (§4.4)', () => {
   })
 })
 
+describe('§4.4 schema-critical data traps', () => {
+  test('block math $$..$$ must not degrade to inline $..$', () => {
+    const input = '$$\nE = mc^2\n$$\n'
+    const out = serializeMarkdown(parseMarkdown(input))
+    expect(out).toContain('$$')
+    // After roundtrip, the energy formula should remain in a $$ block, not collapse
+    // to a single $E = mc^2$ inline expression on a single line.
+    expect(out).not.toMatch(/^[^$\n]*\$E = mc\^2\$[^$\n]*$/)
+  })
+
+  test('raw HTML <font> tag preserved verbatim (not converted to markdown)', () => {
+    const input = '<font color="red">important</font>\n'
+    const out = serializeMarkdown(parseMarkdown(input))
+    expect(out).toContain('<font color="red">')
+    expect(out).toContain('</font>')
+    expect(out).toContain('important')
+  })
+
+  test('paired raw HTML inline tags round-trip with html_mark', () => {
+    const input = 'Text with <sub>subscript</sub> in line.\n'
+    const out = serializeMarkdown(parseMarkdown(input))
+    // Second pass must be byte-stable
+    const out2 = serializeMarkdown(parseMarkdown(out))
+    expect(out2).toBe(out)
+    expect(out2).toContain('<sub>')
+    expect(out2).toContain('</sub>')
+  })
+
+  test('GFM table preserves header row separately from data rows (table_header_row fix)', () => {
+    const input = '| H1 | H2 |\n| --- | --- |\n| a | b |\n'
+    const doc = parseMarkdown(input)
+    // Find the table node and confirm first child is table_header_row, second is table_row
+    let table: import('prosemirror-model').Node | undefined
+    doc.descendants((n) => {
+      if (n.type.name === 'table') { table = n; return false }
+      return undefined
+    })
+    expect(table).toBeDefined()
+    expect(table!.firstChild!.type.name).toBe('table_header_row')
+    expect(table!.firstChild!.childCount).toBe(2) // 2 header cells
+    expect(table!.child(1).type.name).toBe('table_row')
+  })
+
+  test('GFM table cells use paragraph-wrapped content (not bare text)', () => {
+    const input = '| A | B |\n| --- | --- |\n| 1 | 2 |\n'
+    const doc = parseMarkdown(input)
+    let firstHeaderCell: import('prosemirror-model').Node | undefined
+    doc.descendants((n) => {
+      if (n.type.name === 'table_header' && !firstHeaderCell) {
+        firstHeaderCell = n
+        return false
+      }
+      return undefined
+    })
+    expect(firstHeaderCell).toBeDefined()
+    // Schema requires `paragraph+` in cells; a successful parse means the cell isn't empty
+    expect(firstHeaderCell!.firstChild!.type.name).toBe('paragraph')
+    expect(firstHeaderCell!.firstChild!.textContent).toBe('A')
+  })
+
+  test('task list checkbox attrs are recovered from inline content', () => {
+    const input = '- [x] done\n- [ ] todo\n'
+    const doc = parseMarkdown(input)
+    const items: import('prosemirror-model').Node[] = []
+    doc.descendants((n) => {
+      if (n.type.name === 'list_item') items.push(n)
+      return undefined
+    })
+    expect(items.length).toBe(2)
+    expect(items[0]!.attrs.checked).toBe(true)
+    expect(items[1]!.attrs.checked).toBe(false)
+    // The `[x]` / `[ ]` literal should have been stripped from the rendered text
+    expect(items[0]!.textContent).toBe('done')
+    expect(items[1]!.textContent).toBe('todo')
+  })
+
+  test('definition list parses to defList / defListTerm / defListDescription', () => {
+    const input = 'Term\n:   Definition.\n'
+    const doc = parseMarkdown(input)
+    let defList: import('prosemirror-model').Node | undefined
+    doc.descendants((n) => {
+      if (n.type.name === 'defList') { defList = n; return false }
+      return undefined
+    })
+    expect(defList).toBeDefined()
+    expect(defList!.firstChild!.type.name).toBe('defListTerm')
+  })
+})
+
 describe('§4.6 first-pass normalization whitelist', () => {
   test('`_em_` is normalized to `*em*` on first roundtrip', () => {
     const input = '_italic_\n'

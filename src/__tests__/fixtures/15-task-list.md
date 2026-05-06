@@ -1,0 +1,3 @@
+- [ ] First item, unchecked
+- [x] Second item, checked
+- [ ] Third item, unchecked
