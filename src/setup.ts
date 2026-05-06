@@ -1,5 +1,5 @@
 /**
- * Editor lifecycle factory for `@moraya/markdown-core`.
+ * Editor lifecycle factory for `@zouwei/moraya-core`.
  *
  * Faithful 1:1 migration from Moraya desktop `src/lib/editor/setup.ts`,
  * with the following DI changes (v0.60.0-pre §F2.5 / §F2.6):
@@ -716,7 +716,7 @@ export async function createEditorPlugins(
 ): Promise<Plugin[]> {
   if (!opts.mediaResolver) {
     throw new TypeError(
-      '@moraya/markdown-core: createEditorPlugins() requires a MediaResolver in opts.mediaResolver',
+      '@zouwei/moraya-core: createEditorPlugins() requires a MediaResolver in opts.mediaResolver',
     )
   }
 
@@ -818,12 +818,12 @@ export async function createEditorPlugins(
 export async function createEditor(opts: CreateEditorOptions): Promise<MorayaEditorInstance> {
   if (!opts.container) {
     throw new TypeError(
-      '@moraya/markdown-core: createEditor() requires opts.container (HTMLElement)',
+      '@zouwei/moraya-core: createEditor() requires opts.container (HTMLElement)',
     )
   }
   if (!opts.mediaResolver) {
     throw new TypeError(
-      '@moraya/markdown-core: createEditor() requires opts.mediaResolver',
+      '@zouwei/moraya-core: createEditor() requires opts.mediaResolver',
     )
   }
 

@@ -1,5 +1,5 @@
 {
-  "name": "@moraya/markdown-core",
+  "name": "@zouwei/moraya-core",
   "version": "0.1.0",
   "description": "Shared markdown editor core for Moraya desktop and Moraya Web. ProseMirror schema, markdown-it parser, prosemirror-markdown serializer, plugins, and editor lifecycle factories. Pure ESM, host-agnostic, dependency-injected.",
   "type": "module",
@@ -52,7 +52,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zouwei/moraya-markdown-core.git"
+    "url": "git+https://github.com/zouwei/moraya-core.git"
   },
   "license": "PolyForm-Internal-Use-1.0.0",
   "sideEffects": [

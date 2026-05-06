@@ -1,8 +1,51 @@
 # Changelog
 
-All notable changes to `@moraya/markdown-core` are documented here. SemVer.
+All notable changes to `@zouwei/moraya-core` are documented here. SemVer.
 
-## [Unreleased] — schema + markdown + plugins/setup + DI plugins migration batches (2026-05-05 — 2026-05-06)
+## [0.1.0] — 2026-05-06
+
+Initial release. Faithful 1:1 extraction of Moraya desktop's `src/lib/editor/` markdown editor core into a host-agnostic, dependency-injected ESM package, per the iteration spec at [`v0.60.0-pre-shared-markdown-core.md`](https://github.com/zouwei/moraya/blob/main/docs/iterations/v0.60.0-pre-shared-markdown-core.md).
+
+### Package identity
+
+- **Name**: `@zouwei/moraya-core` (was working name `@moraya/markdown-core` during pre-release; renamed at v0.1.0 to match the GitHub repo owner — npm scope must equal the GitHub user/org owning the repo when publishing to GitHub Packages)
+- **Repo**: https://github.com/zouwei/moraya-core
+- **Registry**: GitHub Packages (https://npm.pkg.github.com), `access: restricted`
+- **License**: PolyForm Internal Use 1.0.0 (private; not for redistribution)
+
+### Surface
+
+- **Schema**: `createSchema(config)` factory + 23 nodes / 6 marks (faithful 1:1 from desktop)
+- **Markdown**: `parseMarkdown` / `parseMarkdownAsync` (≥50KB threshold) / `serializeMarkdown` with cross-schema parser cache
+- **Editor lifecycle**: `createEditor` / `createEditorPlugins` / `preloadEnhancementPlugins` (Tier 1 chunked dynamic import: highlight + emoji + code-block-view)
+- **Plugins** (11 total): 8 base + 3 DI-coupled (highlight / editor-props / code-block-view); `review-decoration` excluded (stays in moraya for v0.30.0+ team-collab)
+- **Doc cache**: `createDocCache(maxEntries?)` + `djb2Hash`
+- **Commands** (14): bold/italic/strike/code/heading/blockquote/lists/code-block/table/HR/math-block/link/image
+- **Adapters**: `BrowserMediaResolver` (Tauri / Electron / Capacitor adapters live in their consumer repos)
+- **DI seams**: `MediaResolver` / `LinkOpener` / `RendererRegistry` / `Platform` (4 interfaces, §3.3)
+
+### Engineering contract
+
+- **Pure ESM** — `dist/` contains 0 Node API imports, 0 `require()`, 0 host-specific imports (verified by 4 §1.1.4 CI gates)
+- **Bundle**: main entry **34 KB gzipped** (42% of 80 KB budget)
+- **Tests**: 106 vitest cases across 4 spec files
+  - 72 roundtrip tests (55 fixture files + 17 schema-critical data traps)
+  - 23 API contract tests
+  - 6 plugin-order fingerprint snapshots
+  - 5 adapter unit tests
+- **Behavior parity**: §1.2.2 layer 1 (fixture roundtrip) + layer 2 (plugin order snapshot) green; layer 3 (3-note byte-diff) deferred to consumer-side smoke test
+
+### Tarball hygiene
+
+`pnpm pack` produces a 58-entry tarball containing only:
+- `package/LICENSE`, `package/package.json`, `package/CHANGELOG.md`, `package/README.md`
+- `package/dist/**/*.{js,js.map,d.ts}`
+
+No `*.svelte`, `src-tauri/`, `*.test.ts`, lockfile, or fixtures leak into the published artifact.
+
+---
+
+## [Unreleased / pre-release notes] — schema + markdown + plugins/setup + DI plugins migration batches (2026-05-05 — 2026-05-06)
 
 ### DI plugins batch (2026-05-06)
 

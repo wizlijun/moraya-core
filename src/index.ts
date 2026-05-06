@@ -1,5 +1,5 @@
 /**
- * @moraya/markdown-core — public API surface.
+ * @zouwei/moraya-core — public API surface.
  *
  * v0.60.0-pre §3.2 Public API Contract v0.1.0:
  * - schema (createSchema + SchemaConfig)
