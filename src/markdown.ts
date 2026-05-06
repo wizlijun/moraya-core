@@ -25,10 +25,8 @@ import deflistPlugin from 'markdown-it-deflist'
 import texmathPlugin from 'markdown-it-texmath'
 import { MarkdownParser, MarkdownSerializer } from 'prosemirror-markdown'
 import type { MarkdownSerializerState } from 'prosemirror-markdown'
-import type { Node as PmNode, Mark } from 'prosemirror-model'
+import type { Node as PmNode, Mark, Schema } from 'prosemirror-model'
 import { defaultSchema } from './schema'
-
-const schema = defaultSchema
 
 // ── markdown-it instance ────────────────────────────────────────
 
@@ -350,8 +348,16 @@ const parserTokens: Record<string, import('prosemirror-markdown').ParseSpec> = {
  * Fix: override tr/th/td tokenHandlers in the constructor.
  */
 class MorayaMarkdownParser extends MarkdownParser {
-  constructor() {
-    super(schema, md, parserTokens)
+  /**
+   * The schema this parser instance is bound to. Captured for use in
+   * tokenHandler overrides (tr_open / th_open / etc.) so they reference the
+   * caller-provided schema rather than the module-level defaultSchema.
+   */
+  public readonly schema: Schema
+
+  constructor(schemaArg: Schema = defaultSchema) {
+    super(schemaArg, md, parserTokens)
+    this.schema = schemaArg
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const h: Record<string, (state: any, tok: any, tokens: any[], i: number) => void> =
@@ -371,14 +377,14 @@ class MorayaMarkdownParser extends MarkdownParser {
         if (tokens[j].type === 'thead_open') { inThead = true; break }
         if (tokens[j].type === 'thead_close' || tokens[j].type === 'tbody_open') break
       }
-      state.openNode(inThead ? schema.nodes.table_header_row : schema.nodes.table_row, null)
+      state.openNode(inThead ? schemaArg.nodes.table_header_row : schemaArg.nodes.table_row, null)
     }
     h['tr_close'] = (state) => state.closeNode()
 
     // th_open/close: open table_header + inner paragraph so inline text lands correctly
     h['th_open'] = (state, tok) => {
-      state.openNode(schema.nodes.table_header, { alignment: cellAlignment(tok) })
-      state.openNode(schema.nodes.paragraph, null)
+      state.openNode(schemaArg.nodes.table_header, { alignment: cellAlignment(tok) })
+      state.openNode(schemaArg.nodes.paragraph, null)
     }
     h['th_close'] = (state) => {
       state.closeNode() // close paragraph
@@ -387,8 +393,8 @@ class MorayaMarkdownParser extends MarkdownParser {
 
     // td_open/close: open table_cell + inner paragraph
     h['td_open'] = (state, tok) => {
-      state.openNode(schema.nodes.table_cell, { alignment: cellAlignment(tok) })
-      state.openNode(schema.nodes.paragraph, null)
+      state.openNode(schemaArg.nodes.table_cell, { alignment: cellAlignment(tok) })
+      state.openNode(schemaArg.nodes.paragraph, null)
     }
     h['td_close'] = (state) => {
       state.closeNode() // close paragraph
@@ -487,15 +493,15 @@ class MorayaMarkdownParser extends MarkdownParser {
           if (t.content) fullHtml += t.content
           t.meta = { ...(t.meta || {}), mediaSkip: true }
         }
-        state.addNode(schema.nodes.html_inline, { value: fullHtml })
+        state.addNode(schemaArg.nodes.html_inline, { value: fullHtml })
         return
       }
 
       if (tok.meta?.htmlPaired) {
-        const htmlMark = schema.marks.html_mark
+        const htmlMark = schemaArg.marks.html_mark
         if (!htmlMark) {
           // Schema lacks html_mark — fall through to atom-node fallback
-          state.addNode(schema.nodes.html_inline, { value: content })
+          state.addNode(schemaArg.nodes.html_inline, { value: content })
           return
         }
         if (!content.startsWith('</')) {
@@ -513,7 +519,7 @@ class MorayaMarkdownParser extends MarkdownParser {
         return
       }
       // Not paired → atom node (preserves current behavior)
-      state.addNode(schema.nodes.html_inline, { value: content })
+      state.addNode(schemaArg.nodes.html_inline, { value: content })
     }
 
     // ── HTML <img> / <video> / <audio> tag: block → inline promotion ──
@@ -528,23 +534,23 @@ class MorayaMarkdownParser extends MarkdownParser {
         // hardbreaks between them, matching markdown image behavior.
         const imgPattern = /<img\s[^>]*\/?>/gi
         const imgs = content.match(imgPattern)
-        state.openNode(schema.nodes.paragraph, null)
+        state.openNode(schemaArg.nodes.paragraph, null)
         if (imgs && imgs.length > 0) {
           for (let j = 0; j < imgs.length; j++) {
             if (j > 0) {
-              state.addNode(schema.nodes.hardbreak, { isInline: true })
+              state.addNode(schemaArg.nodes.hardbreak, { isInline: true })
             }
-            state.addNode(schema.nodes.html_inline, { value: imgs[j] })
+            state.addNode(schemaArg.nodes.html_inline, { value: imgs[j] })
           }
         } else {
-          state.addNode(schema.nodes.html_inline, { value: content })
+          state.addNode(schemaArg.nodes.html_inline, { value: content })
         }
         state.closeNode()
       } else if (/^<(video|audio)\b/i.test(content)) {
         // Promote <video>/<audio> blocks to paragraph(html_inline) so toDOM
         // renders them as actual media players instead of code blocks.
-        state.openNode(schema.nodes.paragraph, null)
-        state.addNode(schema.nodes.html_inline, { value: content })
+        state.openNode(schemaArg.nodes.paragraph, null)
+        state.addNode(schemaArg.nodes.html_inline, { value: content })
         state.closeNode()
       } else {
         defaultHtmlBlock!(state, tok, tokens, i)
@@ -553,7 +559,26 @@ class MorayaMarkdownParser extends MarkdownParser {
   }
 }
 
-const parser = new MorayaMarkdownParser()
+/** Default parser bound to {@link defaultSchema} (used when caller doesn't pass a schema). */
+const defaultParser = new MorayaMarkdownParser(defaultSchema)
+
+/**
+ * Cache of parsers keyed by schema identity. Rebuilding the parser per call
+ * would re-construct token handlers + retype-overrides on every parseMarkdown
+ * invocation; this WeakMap avoids that. The defaultSchema entry is pre-seeded.
+ */
+const parserCache = new WeakMap<Schema, MorayaMarkdownParser>()
+parserCache.set(defaultSchema, defaultParser)
+
+function getParserFor(schema: Schema | undefined): MorayaMarkdownParser {
+  if (!schema || schema === defaultSchema) return defaultParser
+  let p = parserCache.get(schema)
+  if (!p) {
+    p = new MorayaMarkdownParser(schema)
+    parserCache.set(schema, p)
+  }
+  return p
+}
 
 // ── Serializer ──────────────────────────────────────────────────
 
@@ -906,15 +931,24 @@ function normalizeSmartQuotes(text: string): string {
     )
 }
 
-/** Parse a markdown string into a ProseMirror document node. Never throws (§4.5). */
-export function parseMarkdown(markdown: string): PmNode {
+/**
+ * Parse a markdown string into a ProseMirror document node. Never throws (§4.5).
+ *
+ * @param markdown   Source markdown string (may contain frontmatter, math, html, etc.).
+ * @param schemaArg  Optional consumer schema. When provided, the returned doc's
+ *                   `node.type` references the consumer's NodeType identities,
+ *                   allowing it to be loaded directly into an `EditorState.create`
+ *                   built with that same schema. Defaults to {@link defaultSchema}.
+ */
+export function parseMarkdown(markdown: string, schemaArg?: Schema): PmNode {
+  const p = getParserFor(schemaArg)
   try {
-    return parser.parse(normalizeSmartQuotes(normalizeMathBlocks(markdown)))
+    return p.parse(normalizeSmartQuotes(normalizeMathBlocks(markdown)))
   } catch (err) {
     if (typeof console !== 'undefined' && console.warn) {
       console.warn('[parseMarkdown] best-effort fallback for malformed input:', err)
     }
-    return schema.topNodeType.createAndFill()!
+    return p.schema.topNodeType.createAndFill()!
   }
 }
 
@@ -925,16 +959,17 @@ const ASYNC_PARSE_THRESHOLD = 50_000
  * event loop via setTimeout(0) so the main thread stays responsive.
  * §4.5: never rejects.
  */
-export function parseMarkdownAsync(markdown: string): Promise<PmNode> {
+export function parseMarkdownAsync(markdown: string, schemaArg?: Schema): Promise<PmNode> {
+  const p = getParserFor(schemaArg)
   const normalized = normalizeSmartQuotes(normalizeMathBlocks(markdown))
   if (normalized.length < ASYNC_PARSE_THRESHOLD) {
-    return Promise.resolve(parseMarkdown(normalized))
+    return Promise.resolve(parseMarkdown(normalized, schemaArg))
   }
   return new Promise(resolve => setTimeout(() => {
     try {
-      resolve(parser.parse(normalized))
+      resolve(p.parse(normalized))
     } catch {
-      resolve(schema.topNodeType.createAndFill()!)
+      resolve(p.schema.topNodeType.createAndFill()!)
     }
   }, 0))
 }

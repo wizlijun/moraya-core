@@ -16,7 +16,12 @@
  */
 
 // schema
-export { createSchema, type SchemaConfig } from './schema'
+export {
+  createSchema,
+  setDocumentBaseDir,
+  getDocumentBaseDir,
+  type SchemaConfig,
+} from './schema'
 
 // markdown
 export { parseMarkdown, parseMarkdownAsync, serializeMarkdown } from './markdown'
@@ -25,6 +30,7 @@ export { parseMarkdown, parseMarkdownAsync, serializeMarkdown } from './markdown
 export {
   createEditor,
   createEditorPlugins,
+  preloadEnhancementPlugins,
   type EditorPluginOptions,
   type CreateEditorOptions,
   type MorayaEditorInstance,

@@ -848,7 +848,7 @@ export async function createEditor(opts: CreateEditorOptions): Promise<MorayaEdi
   }
 
   const initialDoc = opts.initialContent
-    ? parseMarkdown(opts.initialContent)
+    ? parseMarkdown(opts.initialContent, schema)
     : schema.topNodeType.createAndFill()!
 
   const state = EditorState.create({ schema, doc: initialDoc, plugins })
@@ -876,7 +876,7 @@ export async function createEditor(opts: CreateEditorOptions): Promise<MorayaEdi
       return serializeMarkdown(view.state.doc)
     },
     setContent(md: string) {
-      const newDoc = parseMarkdown(md)
+      const newDoc = parseMarkdown(md, schema)
       const tr = view.state.tr.replaceWith(0, view.state.doc.content.size, newDoc.content)
       view.dispatch(tr)
     },
