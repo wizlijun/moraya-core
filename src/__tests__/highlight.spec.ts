@@ -83,10 +83,10 @@ describe('highlight mark — serialization', () => {
     expect(out).toContain('^^world^^')
   })
 
-  test('==text== input roundtrips as ^^text^^', () => {
+  test('==text== input roundtrips as ==text== (delimiter preserved)', () => {
     const doc = parseMarkdown('Hello ==world== end\n')
     const out = serializeMarkdown(doc)
-    expect(out).toContain('^^world^^')
+    expect(out).toContain('==world==')
   })
 
   test('second roundtrip is byte-stable for ^^text^^', () => {

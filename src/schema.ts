@@ -717,8 +717,22 @@ const strike_through: MarkSpec = {
 }
 
 const highlight: MarkSpec = {
-  parseDOM: [{ tag: 'mark' }],
-  toDOM() { return ['mark', 0] },
+  attrs: {
+    // Stores which markdown delimiter was used so roundtrip preserves it.
+    delimiter: { default: 'caret' },
+  },
+  parseDOM: [{
+    tag: 'mark',
+    getAttrs(dom: HTMLElement) {
+      return { delimiter: dom.dataset.delimiter === 'equals' ? 'equals' : 'caret' }
+    },
+  }],
+  toDOM(mark) {
+    const d = mark.attrs.delimiter as string
+    return d === 'equals'
+      ? ['mark', { 'data-delimiter': 'equals' }, 0]
+      : ['mark', 0]
+  },
 }
 
 const html_mark: MarkSpec = {

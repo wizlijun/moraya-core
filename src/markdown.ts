@@ -358,8 +358,8 @@ const parserTokens: Record<string, import('prosemirror-markdown').ParseSpec> = {
       }
     },
   },
-  mark: { mark: 'highlight' },
-  caret_highlight: { mark: 'highlight' },
+  mark: { mark: 'highlight', attrs: { delimiter: 'equals' } },
+  caret_highlight: { mark: 'highlight', attrs: { delimiter: 'caret' } },
 }
 
 /**
@@ -806,8 +806,12 @@ const serializer = new MarkdownSerializer(
       expelEnclosingWhitespace: true,
     },
     highlight: {
-      open: '^^',
-      close: '^^',
+      open(_state: MarkdownSerializerState, mark: Mark) {
+        return mark.attrs.delimiter === 'equals' ? '==' : '^^'
+      },
+      close(_state: MarkdownSerializerState, mark: Mark) {
+        return mark.attrs.delimiter === 'equals' ? '==' : '^^'
+      },
       mixable: true,
       expelEnclosingWhitespace: true,
     },

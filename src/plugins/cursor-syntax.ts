@@ -132,7 +132,7 @@ function buildDecorations(state: EditorState): DecorationSet {
     }
   }
 
-  // 3. Inline marks: strong, em, code, strike_through
+  // 3. Inline marks: strong, em, code, strike_through, highlight
   for (const [markName, delim] of Object.entries(MARK_DELIMITERS)) {
     const markType = state.schema.marks[markName]
     if (!markType) continue
@@ -140,12 +140,23 @@ function buildDecorations(state: EditorState): DecorationSet {
     const range = getMarkRange(state, pos, markType)
     if (!range) continue
 
+    // For marks with a delimiter attr (highlight), show the actual delimiter used.
+    let openStr = delim.open
+    let closeStr = delim.close
+    if (markName === 'highlight') {
+      const hMark = state.doc.resolve(pos).marks().find(m => m.type === markType)
+      if (hMark?.attrs?.delimiter === 'equals') {
+        openStr = '=='
+        closeStr = '=='
+      }
+    }
+
     decorations.push(
-      Decoration.widget(range.from, makeWidget(delim.open, 'syntax-md-mark'), {
+      Decoration.widget(range.from, makeWidget(openStr, 'syntax-md-mark'), {
         side: -1,
         key: `${markName}-open`,
       }),
-      Decoration.widget(range.to, makeWidget(delim.close, 'syntax-md-mark'), {
+      Decoration.widget(range.to, makeWidget(closeStr, 'syntax-md-mark'), {
         side: 1,
         key: `${markName}-close`,
       }),
