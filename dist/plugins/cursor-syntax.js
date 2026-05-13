@@ -85,12 +85,21 @@ function buildDecorations(state) {
     if (!markType) continue;
     const range = getMarkRange(state, pos, markType);
     if (!range) continue;
+    let openStr = delim.open;
+    let closeStr = delim.close;
+    if (markName === "highlight") {
+      const hMark = state.doc.resolve(pos).marks().find((m) => m.type === markType);
+      if (hMark?.attrs?.delimiter === "equals") {
+        openStr = "==";
+        closeStr = "==";
+      }
+    }
     decorations.push(
-      Decoration.widget(range.from, makeWidget(delim.open, "syntax-md-mark"), {
+      Decoration.widget(range.from, makeWidget(openStr, "syntax-md-mark"), {
         side: -1,
         key: `${markName}-open`
       }),
-      Decoration.widget(range.to, makeWidget(delim.close, "syntax-md-mark"), {
+      Decoration.widget(range.to, makeWidget(closeStr, "syntax-md-mark"), {
         side: 1,
         key: `${markName}-close`
       })

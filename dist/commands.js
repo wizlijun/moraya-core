@@ -623,9 +623,19 @@ var strike_through = {
   }
 };
 var highlight = {
-  parseDOM: [{ tag: "mark" }],
-  toDOM() {
-    return ["mark", 0];
+  attrs: {
+    // Stores which markdown delimiter was used so roundtrip preserves it.
+    delimiter: { default: "caret" }
+  },
+  parseDOM: [{
+    tag: "mark",
+    getAttrs(dom) {
+      return { delimiter: dom.dataset.delimiter === "equals" ? "equals" : "caret" };
+    }
+  }],
+  toDOM(mark) {
+    const d = mark.attrs.delimiter;
+    return d === "equals" ? ["mark", { "data-delimiter": "equals" }, 0] : ["mark", 0];
   }
 };
 var html_mark = {

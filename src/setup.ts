@@ -322,6 +322,27 @@ function buildInputRules(schema: Schema, tier1: Tier1Plugins): Plugin {
     ))
   }
 
+  // Highlight: ^^text^^ (caret) or ==text== (equals)
+  if (M.highlight) {
+    const applyHighlight = (delimiter: 'caret' | 'equals') =>
+      (state: EditorState, match: RegExpMatchArray, start: number, end: number) => {
+        const tr = state.tr
+        const captured = match[1]
+        if (captured) {
+          const textStart = start + match[0].indexOf(captured)
+          const textEnd = textStart + captured.length
+          if (textEnd < end) tr.delete(textEnd, end)
+          if (textStart > start) tr.delete(start, textStart)
+          const markFrom = start
+          const markTo = markFrom + captured.length
+          tr.addMark(markFrom, markTo, M.highlight!.create({ delimiter }))
+        }
+        return tr
+      }
+    rules.push(new InputRule(/(?<!\^)\^\^([^^]+)\^\^$/, applyHighlight('caret')))
+    rules.push(new InputRule(/(?<!=)==([^=\n]+)==$/, applyHighlight('equals')))
+  }
+
   // Task list: [ ] or [x] at start of list item
   rules.push(new InputRule(
     /^\[(?<checked>\s|x)\]\s$/,

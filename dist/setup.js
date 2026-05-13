@@ -1683,9 +1683,19 @@ var strike_through = {
   }
 };
 var highlight = {
-  parseDOM: [{ tag: "mark" }],
-  toDOM() {
-    return ["mark", 0];
+  attrs: {
+    // Stores which markdown delimiter was used so roundtrip preserves it.
+    delimiter: { default: "caret" }
+  },
+  parseDOM: [{
+    tag: "mark",
+    getAttrs(dom) {
+      return { delimiter: dom.dataset.delimiter === "equals" ? "equals" : "caret" };
+    }
+  }],
+  toDOM(mark) {
+    const d = mark.attrs.delimiter;
+    return d === "equals" ? ["mark", { "data-delimiter": "equals" }, 0] : ["mark", 0];
   }
 };
 var html_mark = {
@@ -2277,8 +2287,8 @@ var parserTokens = {
       };
     }
   },
-  mark: { mark: "highlight" },
-  caret_highlight: { mark: "highlight" }
+  mark: { mark: "highlight", attrs: { delimiter: "equals" } },
+  caret_highlight: { mark: "highlight", attrs: { delimiter: "caret" } }
 };
 var MorayaMarkdownParser = class extends MarkdownParser {
   /**
@@ -2636,8 +2646,12 @@ var serializer = new MarkdownSerializer(
       expelEnclosingWhitespace: true
     },
     highlight: {
-      open: "^^",
-      close: "^^",
+      open(_state, mark) {
+        return mark.attrs.delimiter === "equals" ? "==" : "^^";
+      },
+      close(_state, mark) {
+        return mark.attrs.delimiter === "equals" ? "==" : "^^";
+      },
       mixable: true,
       expelEnclosingWhitespace: true
     },
@@ -3028,7 +3042,8 @@ var MARK_DELIMITERS = {
   strong: { open: "**", close: "**" },
   em: { open: "*", close: "*" },
   code: { open: "`", close: "`" },
-  strike_through: { open: "~~", close: "~~" }
+  strike_through: { open: "~~", close: "~~" },
+  highlight: { open: "^^", close: "^^" }
 };
 function makeWidget(text2, className) {
   return () => {
@@ -3098,12 +3113,21 @@ function buildDecorations(state) {
     if (!markType) continue;
     const range = getMarkRange(state, pos, markType);
     if (!range) continue;
+    let openStr = delim.open;
+    let closeStr = delim.close;
+    if (markName === "highlight") {
+      const hMark = state.doc.resolve(pos).marks().find((m) => m.type === markType);
+      if (hMark?.attrs?.delimiter === "equals") {
+        openStr = "==";
+        closeStr = "==";
+      }
+    }
     decorations.push(
-      Decoration.widget(range.from, makeWidget(delim.open, "syntax-md-mark"), {
+      Decoration.widget(range.from, makeWidget(openStr, "syntax-md-mark"), {
         side: -1,
         key: `${markName}-open`
       }),
-      Decoration.widget(range.to, makeWidget(delim.close, "syntax-md-mark"), {
+      Decoration.widget(range.to, makeWidget(closeStr, "syntax-md-mark"), {
         side: 1,
         key: `${markName}-close`
       })
@@ -4145,6 +4169,24 @@ function buildInputRules(schema, tier1) {
       }
     ));
   }
+  if (M.highlight) {
+    const applyHighlight = (delimiter) => (state, match, start, end) => {
+      const tr = state.tr;
+      const captured = match[1];
+      if (captured) {
+        const textStart = start + match[0].indexOf(captured);
+        const textEnd = textStart + captured.length;
+        if (textEnd < end) tr.delete(textEnd, end);
+        if (textStart > start) tr.delete(start, textStart);
+        const markFrom = start;
+        const markTo = markFrom + captured.length;
+        tr.addMark(markFrom, markTo, M.highlight.create({ delimiter }));
+      }
+      return tr;
+    };
+    rules.push(new InputRule(/(?<!\^)\^\^([^^]+)\^\^$/, applyHighlight("caret")));
+    rules.push(new InputRule(/(?<!=)==([^=\n]+)==$/, applyHighlight("equals")));
+  }
   rules.push(new InputRule(
     /^\[(?<checked>\s|x)\]\s$/,
     (state, match, start, end) => {
@@ -4199,7 +4241,7 @@ function buildKeymap(schema) {
     ...M.em ? { "Mod-i": toggleMark2(M.em) } : {},
     ...M.code ? { "Mod-e": toggleMark2(M.code) } : {},
     ...M.strike_through ? { "Mod-Shift-x": toggleMark2(M.strike_through) } : {},
-    ...M.highlight ? { "Mod-h": toggleMark2(M.highlight) } : {}
+    ...M.highlight ? { "Mod-h": toggleMark2(M.highlight, { delimiter: "caret" }) } : {}
   };
   if (listItemType) {
     bindings["Enter"] = splitListItem(listItemType);
