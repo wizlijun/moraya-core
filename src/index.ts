@@ -65,6 +65,7 @@ export type {
   RendererRegistry,
   RendererPluginModule,
   Platform,
+  SpreadsheetViewFactory,
 } from './types'
 
 // NOTE: defaultSchema is intentionally NOT exported. Per §6.1.1, consumers must

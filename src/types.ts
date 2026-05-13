@@ -83,6 +83,18 @@ export interface RendererRegistry {
 }
 
 /**
+ * Factory for creating the spreadsheet interactive view within a ProseMirror NodeView.
+ * Implemented by consumers (mdeditor uses Svelte mount(); other hosts may differ).
+ */
+export interface SpreadsheetViewFactory {
+  create(
+    container: HTMLElement,
+    source: string,
+    onChange: (csv: string) => void
+  ): { destroy(): void }
+}
+
+/**
  * Platform behavior parameters (carries the editor-props-plugin DI from §F2.6).
  * Desktop injects Tauri / OS truth; Web uses browser detection; mobile bridges fill.
  */
@@ -105,6 +117,7 @@ export interface SchemaConfig {
   mediaResolver: MediaResolver
   rendererRegistry?: RendererRegistry
   linkOpener?: LinkOpener
+  spreadsheetViewFactory?: SpreadsheetViewFactory
 }
 
 // ===== Internal sentinel for misuse detection (v0.60.0-pre §6.1.1) =====
