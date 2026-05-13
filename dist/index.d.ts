@@ -1,0 +1,10 @@
+export { createSchema, getDocumentBaseDir, setDocumentBaseDir } from './schema.js';
+export { parseMarkdown, parseMarkdownAsync, serializeMarkdown } from './markdown.js';
+export { CreateEditorOptions, EditorPluginOptions, MorayaEditorInstance, createEditor, createEditorPlugins, preloadEnhancementPlugins } from './setup.js';
+export { insertHorizontalRule, insertImage, insertMathBlock, insertTable, setHeading, toggleBlockquote, toggleBold, toggleBulletList, toggleCode, toggleCodeBlock, toggleHighlight, toggleItalic, toggleLink, toggleOrderedList, toggleStrikethrough } from './commands.js';
+export { DocCache, createDocCache, djb2Hash } from './doc-cache.js';
+export { LinkOpener, MediaResolver, Platform, RendererPluginModule, RendererRegistry, SchemaConfig } from './types.js';
+import 'prosemirror-model';
+import 'prosemirror-state';
+import 'prosemirror-view';
+import 'prosemirror-inputrules';
