@@ -15,3 +15,9 @@ declare module 'markdown-it-texmath' {
   const plugin: (md: MarkdownIt, opts?: Record<string, unknown>) => void
   export default plugin
 }
+
+declare module 'markdown-it-mark' {
+  import type MarkdownIt from 'markdown-it'
+  const plugin: (md: MarkdownIt) => void
+  export default plugin
+}

@@ -27,23 +27,29 @@ describe('highlight mark — parsing', () => {
   test('^^text^^ parses to highlight mark', () => {
     const doc = parseMarkdown('Hello ^^world^^ end\n')
     let found = false
+    let markedText = ''
     doc.descendants((node) => {
-      node.marks.forEach((m) => {
-        if (m.type.name === 'highlight') found = true
-      })
+      if (node.isText && node.marks.some((m) => m.type.name === 'highlight')) {
+        found = true
+        markedText = node.text || ''
+      }
     })
     expect(found).toBe(true)
+    expect(markedText).toBe('world')
   })
 
   test('==text== parses to highlight mark', () => {
     const doc = parseMarkdown('Hello ==world== end\n')
     let found = false
+    let markedText = ''
     doc.descendants((node) => {
-      node.marks.forEach((m) => {
-        if (m.type.name === 'highlight') found = true
-      })
+      if (node.isText && node.marks.some((m) => m.type.name === 'highlight')) {
+        found = true
+        markedText = node.text || ''
+      }
     })
     expect(found).toBe(true)
+    expect(markedText).toBe('world')
   })
 
   test('empty ^^^^ produces no highlight mark', () => {
@@ -55,5 +61,17 @@ describe('highlight mark — parsing', () => {
       })
     })
     expect(found).toBe(false)
+  })
+
+  test('two ^^highlights^^ in one paragraph both parse', () => {
+    const doc = parseMarkdown('^^a^^ and ^^b^^\n')
+    const highlighted: string[] = []
+    doc.descendants((node) => {
+      if (node.isText && node.marks.some((m) => m.type.name === 'highlight')) {
+        highlighted.push(node.text || '')
+      }
+    })
+    expect(highlighted).toContain('a')
+    expect(highlighted).toContain('b')
   })
 })
