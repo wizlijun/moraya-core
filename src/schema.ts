@@ -19,7 +19,7 @@
  *   table_header, table_cell, math_inline, math_block,
  *   defList, defListTerm, defListDescription
  *
- * Marks (6): html_mark, strong, em, code, link, strike_through
+ * Marks (7): html_mark, strong, em, code, link, strike_through, highlight
  */
 
 import { Schema, Fragment } from 'prosemirror-model'
@@ -716,6 +716,11 @@ const strike_through: MarkSpec = {
   toDOM() { return ['del', 0] },
 }
 
+const highlight: MarkSpec = {
+  parseDOM: [{ tag: 'mark' }],
+  toDOM() { return ['mark', 0] as const },
+}
+
 const html_mark: MarkSpec = {
   attrs: {
     openTag: { default: '' },
@@ -925,6 +930,7 @@ const marks: Record<string, MarkSpec> = {
   code,
   link,
   strike_through,
+  highlight,
 }
 
 // ── Internal default schema (parser/serializer fallback) ────────
