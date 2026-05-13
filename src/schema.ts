@@ -545,6 +545,24 @@ const table_cell: NodeSpec = {
   },
 }
 
+// ── Spreadsheet NodeSpec ─────────────────────────────────────────
+const spreadsheet: NodeSpec = {
+  group: 'block',
+  atom: true,
+  selectable: true,
+  draggable: false,
+  attrs: { source: { default: '' } },
+  parseDOM: [{
+    tag: 'div[data-spreadsheet]',
+    getAttrs(dom: HTMLElement) {
+      return { source: dom.getAttribute('data-source') ?? '' }
+    },
+  }],
+  toDOM(node) {
+    return ['div', { 'data-spreadsheet': '', 'data-source': node.attrs.source as string }]
+  },
+}
+
 // ── Math NodeSpecs (KaTeX) ──────────────────────────────────────
 
 const math_inline: NodeSpec = {
@@ -929,6 +947,7 @@ function buildNodes(mediaResolver: MediaResolver): Record<string, NodeSpec> {
     table_row,
     table_header,
     table_cell,
+    spreadsheet,
     math_inline,
     math_block,
     defList,
