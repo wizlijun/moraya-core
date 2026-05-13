@@ -22,3 +22,38 @@ describe('highlight mark — schema', () => {
     )
   })
 })
+
+describe('highlight mark — parsing', () => {
+  test('^^text^^ parses to highlight mark', () => {
+    const doc = parseMarkdown('Hello ^^world^^ end\n')
+    let found = false
+    doc.descendants((node) => {
+      node.marks.forEach((m) => {
+        if (m.type.name === 'highlight') found = true
+      })
+    })
+    expect(found).toBe(true)
+  })
+
+  test('==text== parses to highlight mark', () => {
+    const doc = parseMarkdown('Hello ==world== end\n')
+    let found = false
+    doc.descendants((node) => {
+      node.marks.forEach((m) => {
+        if (m.type.name === 'highlight') found = true
+      })
+    })
+    expect(found).toBe(true)
+  })
+
+  test('empty ^^^^ produces no highlight mark', () => {
+    const doc = parseMarkdown('Hello ^^^^ end\n')
+    let found = false
+    doc.descendants((node) => {
+      node.marks.forEach((m) => {
+        if (m.type.name === 'highlight') found = true
+      })
+    })
+    expect(found).toBe(false)
+  })
+})
