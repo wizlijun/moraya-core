@@ -65,6 +65,7 @@ import type {
   RendererRegistry,
   Platform,
   SchemaConfig,
+  SpreadsheetViewFactory,
 } from './types'
 import { createDocCache, type DocCache } from './doc-cache'
 
@@ -677,6 +678,7 @@ export interface EditorPluginOptions {
   rendererRegistry?: RendererRegistry    // optional; default = highlight.js only
   linkOpener?: LinkOpener                // optional; default = window.open
   platform?: Platform                    // optional; default = navigator detection
+  spreadsheetViewFactory?: SpreadsheetViewFactory
 
   /** Change callbacks */
   onDocChanged?: (textContent: string) => void
@@ -749,6 +751,7 @@ export async function createEditorPlugins(
     mediaResolver: opts.mediaResolver,
     ...(opts.rendererRegistry ? { rendererRegistry: opts.rendererRegistry } : {}),
     ...(opts.linkOpener ? { linkOpener: opts.linkOpener } : {}),
+    ...(opts.spreadsheetViewFactory ? { spreadsheetViewFactory: opts.spreadsheetViewFactory } : {}),
   }
   const schema = schemaArg ?? createSchema(schemaConfig)
   const linkOpener: LinkOpener = opts.linkOpener ?? {
@@ -853,6 +856,7 @@ export async function createEditor(opts: CreateEditorOptions): Promise<MorayaEdi
     mediaResolver: opts.mediaResolver,
     ...(opts.rendererRegistry ? { rendererRegistry: opts.rendererRegistry } : {}),
     ...(opts.linkOpener ? { linkOpener: opts.linkOpener } : {}),
+    ...(opts.spreadsheetViewFactory ? { spreadsheetViewFactory: opts.spreadsheetViewFactory } : {}),
   }
   const schema = createSchema(schemaConfig)
   const docCache = opts.docCache ?? createDocCache(10)
@@ -867,6 +871,46 @@ export async function createEditor(opts: CreateEditorOptions): Promise<MorayaEdi
   const nodeViews: Record<string, any> = {}
   if (tier1.codeBlockView) {
     nodeViews.code_block = tier1.codeBlockView
+  }
+
+  const svFactory = opts.spreadsheetViewFactory
+  if (svFactory && schema.nodes.spreadsheet) {
+    nodeViews.spreadsheet = (
+      node: import('prosemirror-model').Node,
+      view: import('prosemirror-view').EditorView,
+      getPos: () => number | undefined,
+    ) => {
+      const dom = document.createElement('div')
+      dom.className = 'spreadsheet-node-view'
+      let lastSource = node.attrs.source as string
+
+      const instance = svFactory.create(dom, lastSource, (csv: string) => {
+        lastSource = csv
+        const pos = getPos()
+        if (pos == null) return
+        view.dispatch(view.state.tr.setNodeMarkup(pos, undefined, { source: csv }))
+      })
+
+      return {
+        dom,
+        destroy() { instance.destroy() },
+        update(newNode: import('prosemirror-model').Node) {
+          if (newNode.type.name !== 'spreadsheet') return false
+          const newSource = newNode.attrs.source as string
+          if (newSource === lastSource) return true
+          return false
+        },
+      }
+    }
+  }
+
+  if (!svFactory && schema.nodes.spreadsheet) {
+    nodeViews.spreadsheet = (node: import('prosemirror-model').Node) => {
+      const dom = document.createElement('pre')
+      dom.className = 'spreadsheet-fallback'
+      dom.textContent = node.attrs.source as string
+      return { dom }
+    }
   }
 
   const initialDoc = opts.initialContent
