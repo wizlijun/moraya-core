@@ -42,6 +42,7 @@ export {
   toggleItalic,
   toggleStrikethrough,
   toggleCode,
+  toggleHighlight,
   setHeading,
   toggleBlockquote,
   toggleOrderedList,

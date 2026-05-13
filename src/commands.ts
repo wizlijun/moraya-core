@@ -43,6 +43,9 @@ export const toggleStrikethrough: Command = (state, dispatch) =>
 export const toggleCode: Command = (state, dispatch) =>
   toggleMark(markType('code'))(state, dispatch)
 
+export const toggleHighlight: Command = (state, dispatch) =>
+  toggleMark(markType('highlight'))(state, dispatch)
+
 export function setHeading(level: 1 | 2 | 3 | 4 | 5 | 6): Command {
   return (state, dispatch) => setBlockType(nodeType('heading'), { level })(state, dispatch)
 }

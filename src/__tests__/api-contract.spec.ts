@@ -13,6 +13,7 @@ import {
   toggleItalic,
   setHeading,
   insertHorizontalRule,
+  toggleHighlight,
 } from '../index'
 import { BrowserMediaResolver } from '../adapters/browser-media-resolver'
 import {
@@ -62,6 +63,11 @@ describe('createSchema()', () => {
     const a = createSchema({ mediaResolver: resolver })
     const b = createSchema({ mediaResolver: resolver })
     expect(a).toBe(b)
+  })
+
+  test('schema.marks.highlight is defined', () => {
+    const schema = createSchema({ mediaResolver: new BrowserMediaResolver() })
+    expect(schema.marks.highlight).toBeDefined()
   })
 })
 
@@ -216,5 +222,11 @@ describe('commands', () => {
     })
     expect(ok).toBe(true)
     expect(dispatched).toBe(true)
+  })
+})
+
+describe('toggleHighlight command', () => {
+  test('is a function', () => {
+    expect(typeof toggleHighlight).toBe('function')
   })
 })

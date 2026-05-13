@@ -384,6 +384,7 @@ function buildKeymap(schema: Schema): Plugin {
     ...(M.em ? { 'Mod-i': toggleMark(M.em) } : {}),
     ...(M.code ? { 'Mod-e': toggleMark(M.code) } : {}),
     ...(M.strike_through ? { 'Mod-Shift-x': toggleMark(M.strike_through) } : {}),
+    ...(M.highlight ? { 'Mod-h': toggleMark(M.highlight) } : {}),
   }
 
   if (listItemType) {
