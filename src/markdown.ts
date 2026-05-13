@@ -805,6 +805,12 @@ const serializer = new MarkdownSerializer(
       mixable: true,
       expelEnclosingWhitespace: true,
     },
+    highlight: {
+      open: '^^',
+      close: '^^',
+      mixable: true,
+      expelEnclosingWhitespace: true,
+    },
     html_mark: {
       open(_state: MarkdownSerializerState, mark: Mark) {
         return mark.attrs.openTag as string

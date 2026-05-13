@@ -75,3 +75,24 @@ describe('highlight mark — parsing', () => {
     expect(highlighted).toContain('b')
   })
 })
+
+describe('highlight mark — serialization', () => {
+  test('highlight mark serializes to ^^text^^', () => {
+    const doc = parseMarkdown('Hello ^^world^^ end\n')
+    const out = serializeMarkdown(doc)
+    expect(out).toContain('^^world^^')
+  })
+
+  test('==text== input roundtrips as ^^text^^', () => {
+    const doc = parseMarkdown('Hello ==world== end\n')
+    const out = serializeMarkdown(doc)
+    expect(out).toContain('^^world^^')
+  })
+
+  test('second roundtrip is byte-stable for ^^text^^', () => {
+    const input = 'Hello ^^world^^ end\n'
+    const md1 = serializeMarkdown(parseMarkdown(input))
+    const md2 = serializeMarkdown(parseMarkdown(md1))
+    expect(md2).toBe(md1)
+  })
+})
