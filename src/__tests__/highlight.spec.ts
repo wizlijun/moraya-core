@@ -10,10 +10,10 @@ describe('highlight mark — schema', () => {
     expect(schema.marks.highlight).toBeDefined()
   })
 
-  test('highlight mark renders to <mark> DOM element', () => {
-    const markType = schema.marks.highlight
-    const dom = markType.spec.toDOM!(markType.create(), false)
-    expect(Array.isArray(dom) ? dom[0] : dom).toBe('mark')
+  test('highlight mark toDOM spec returns mark tag', () => {
+    const spec = schema.marks.highlight.spec
+    const dom = spec.toDOM!(schema.marks.highlight.create())
+    expect(Array.isArray(dom) && dom[0]).toBe('mark')
   })
 
   test('highlight mark parses from <mark> element', () => {

@@ -718,7 +718,7 @@ const strike_through: MarkSpec = {
 
 const highlight: MarkSpec = {
   parseDOM: [{ tag: 'mark' }],
-  toDOM() { return ['mark', 0] as const },
+  toDOM() { return ['mark', 0] },
 }
 
 const html_mark: MarkSpec = {
