@@ -23,6 +23,7 @@
 import MarkdownIt from 'markdown-it'
 import deflistPlugin from 'markdown-it-deflist'
 import texmathPlugin from 'markdown-it-texmath'
+import markPlugin from 'markdown-it-mark'
 import { MarkdownParser, MarkdownSerializer } from 'prosemirror-markdown'
 import type { MarkdownSerializerState } from 'prosemirror-markdown'
 import type { Node as PmNode, Mark, Schema } from 'prosemirror-model'
@@ -38,6 +39,7 @@ const md = new MarkdownIt({
   .enable(['table', 'strikethrough'])
   .use(deflistPlugin)
   .use(texmathPlugin)
+  .use(markPlugin)
 
 // ── Caret highlight rule: ^^text^^ → caret_highlight_open/close ──────────────
 
@@ -63,33 +65,6 @@ md.inline.ruler.push('caret_highlight', (state, silent) => {
     const token = state.push('text', '', 0)
     token.content = state.src.slice(contentStart, closeIdx)
     state.push('caret_highlight_close', 'mark', -1).markup = '^^'
-  }
-  state.pos = closeIdx + 2
-  return true
-})
-
-md.inline.ruler.push('equals_highlight', (state, silent) => {
-  const start = state.pos
-  if (state.src.charCodeAt(start) !== 0x3D /* = */) return false
-  if (state.src.charCodeAt(start + 1) !== 0x3D /* = */) return false
-
-  const contentStart = start + 2
-  if (contentStart >= state.posMax) return false
-
-  let closeIdx = -1
-  for (let i = contentStart; i < state.posMax - 1; i++) {
-    if (state.src.charCodeAt(i) === 0x3D && state.src.charCodeAt(i + 1) === 0x3D) {
-      closeIdx = i
-      break
-    }
-  }
-  if (closeIdx < 0 || closeIdx === contentStart) return false
-
-  if (!silent) {
-    state.push('equals_highlight_open', 'mark', 1).markup = '=='
-    const token = state.push('text', '', 0)
-    token.content = state.src.slice(contentStart, closeIdx)
-    state.push('equals_highlight_close', 'mark', -1).markup = '=='
   }
   state.pos = closeIdx + 2
   return true
@@ -385,7 +360,6 @@ const parserTokens: Record<string, import('prosemirror-markdown').ParseSpec> = {
   },
   mark: { mark: 'highlight' },
   caret_highlight: { mark: 'highlight' },
-  equals_highlight: { mark: 'highlight' },
 }
 
 /**
