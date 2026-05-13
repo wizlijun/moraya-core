@@ -397,6 +397,18 @@ class MorayaMarkdownParser extends MarkdownParser {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this as any).tokenHandlers
 
+    // ── CSV fence → spreadsheet node ──────────────────────────────
+    const defaultFence = h['fence']
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    h['fence'] = (state: any, tok: any, tokens: any[], i: number) => {
+      const lang = (tok.info as string).trim().toLowerCase()
+      if (lang === 'csv' && schemaArg.nodes.spreadsheet) {
+        state.addNode(schemaArg.nodes.spreadsheet, { source: (tok.content as string).trim() })
+        return
+      }
+      defaultFence!(state, tok, tokens, i)
+    }
+
     function cellAlignment(tok: { attrGet(s: string): string | null }): string {
       const style = tok.attrGet('style') || ''
       const m = style.match(/text-align:\s*(\w+)/)
@@ -645,6 +657,14 @@ const serializer = new MarkdownSerializer(
       const fenceLang = lang === 'text' ? '' : lang
       state.write(`\`\`\`${fenceLang}\n`)
       state.text(node.textContent, false)
+      state.ensureNewLine()
+      state.write('```')
+      state.closeBlock(node)
+    },
+    spreadsheet(state, node) {
+      state.write('```csv\n')
+      const src = node.attrs.source as string
+      if (src) state.text(src, false)
       state.ensureNewLine()
       state.write('```')
       state.closeBlock(node)
