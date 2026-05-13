@@ -18,6 +18,7 @@ import { Plugin } from 'prosemirror-state';
  *   - em → `*` ... `*`
  *   - code → `` ` `` ... `` ` ``
  *   - strike_through → `~~` ... `~~`
+ *   - highlight → `^^` ... `^^`
  *
  * Link marks are handled by `link-text-plugin` (expand/collapse pattern).
  */

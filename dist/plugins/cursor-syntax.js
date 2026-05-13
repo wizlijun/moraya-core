@@ -14,7 +14,8 @@ var MARK_DELIMITERS = {
   strong: { open: "**", close: "**" },
   em: { open: "*", close: "*" },
   code: { open: "`", close: "`" },
-  strike_through: { open: "~~", close: "~~" }
+  strike_through: { open: "~~", close: "~~" },
+  highlight: { open: "^^", close: "^^" }
 };
 function makeWidget(text, className) {
   return () => {

@@ -16,6 +16,7 @@
  *   - em → `*` ... `*`
  *   - code → `` ` `` ... `` ` ``
  *   - strike_through → `~~` ... `~~`
+ *   - highlight → `^^` ... `^^`
  *
  * Link marks are handled by `link-text-plugin` (expand/collapse pattern).
  */
@@ -41,6 +42,7 @@ const MARK_DELIMITERS: Record<string, { open: string; close: string }> = {
   em: { open: '*', close: '*' },
   code: { open: '`', close: '`' },
   strike_through: { open: '~~', close: '~~' },
+  highlight: { open: '^^', close: '^^' },
 }
 
 function makeWidget(text: string, className: string): () => HTMLSpanElement {
