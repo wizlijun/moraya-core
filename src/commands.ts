@@ -106,17 +106,28 @@ export const wrapInTaskList: Command = (state, dispatch) => {
   wrapInList(bulletListType)(state, (tr) => { listTr = tr })
   if (!listTr) return false
 
-  const { from, to } = listTr.selection
+  // Scope the checked-flip to the innermost bullet_list enclosing the cursor
+  // in the post-wrap transaction's document. Walking a ±200 char window used
+  // to also flip items in adjacent sibling lists ("all my lists became
+  // checkboxes"); restricting to one node range eliminates that.
+  const $from = listTr.doc.resolve(listTr.selection.from)
+  let listDepth = -1
+  for (let d = $from.depth; d >= 0; d--) {
+    if ($from.node(d).type === bulletListType) { listDepth = d; break }
+  }
+  if (listDepth < 0) {
+    dispatch(listTr.scrollIntoView())
+    return true
+  }
+  const listStart = $from.before(listDepth)
+  const listEnd   = listStart + $from.node(listDepth).nodeSize
+
   const updates: Array<{ pos: number; attrs: Attrs }> = []
-  listTr.doc.nodesBetween(
-    Math.max(0, from - 200),
-    Math.min(listTr.doc.content.size, to + 200),
-    (node, pos) => {
-      if (node.type === listItemType && node.attrs.checked === null) {
-        updates.push({ pos, attrs: { ...node.attrs, checked: false } })
-      }
-    },
-  )
+  listTr.doc.nodesBetween(listStart, listEnd, (node, pos) => {
+    if (node.type === listItemType && node.attrs.checked === null) {
+      updates.push({ pos, attrs: { ...node.attrs, checked: false } })
+    }
+  })
   for (let i = updates.length - 1; i >= 0; i--) {
     const u = updates[i]!
     listTr.setNodeMarkup(u.pos, undefined, u.attrs)
