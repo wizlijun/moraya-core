@@ -557,6 +557,22 @@ var table_cell = {
     return ["td", { style: `text-align: ${node.attrs.alignment || "left"}` }, 0];
   }
 };
+var spreadsheet = {
+  group: "block",
+  atom: true,
+  selectable: true,
+  draggable: false,
+  attrs: { source: { default: "" } },
+  parseDOM: [{
+    tag: "div[data-spreadsheet]",
+    getAttrs(dom) {
+      return { source: dom.getAttribute("data-source") ?? "" };
+    }
+  }],
+  toDOM(node) {
+    return ["div", { "data-spreadsheet": "", "data-source": node.attrs.source }];
+  }
+};
 var math_inline = {
   group: "inline",
   content: "text*",
@@ -904,6 +920,7 @@ function buildNodes(mediaResolver) {
     table_row,
     table_header,
     table_cell,
+    spreadsheet,
     math_inline,
     math_block,
     defList,
@@ -1220,6 +1237,15 @@ var MorayaMarkdownParser = class extends MarkdownParser {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this.tokenHandlers
     );
+    const defaultFence = h["fence"];
+    h["fence"] = (state, tok, tokens, i) => {
+      const lang = tok.info.trim().toLowerCase();
+      if (lang === "csv" && schemaArg.nodes.spreadsheet) {
+        state.addNode(schemaArg.nodes.spreadsheet, { source: tok.content.trim() });
+        return;
+      }
+      defaultFence(state, tok, tokens, i);
+    };
     function cellAlignment(tok) {
       const style = tok.attrGet("style") || "";
       const m = style.match(/text-align:\s*(\w+)/);
@@ -1413,6 +1439,14 @@ var serializer = new MarkdownSerializer(
       state.write(`\`\`\`${fenceLang}
 `);
       state.text(node.textContent, false);
+      state.ensureNewLine();
+      state.write("```");
+      state.closeBlock(node);
+    },
+    spreadsheet(state, node) {
+      state.write("```csv\n");
+      const src = node.attrs.source;
+      if (src) state.text(src, false);
       state.ensureNewLine();
       state.write("```");
       state.closeBlock(node);

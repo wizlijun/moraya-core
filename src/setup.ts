@@ -882,6 +882,11 @@ export async function createEditor(opts: CreateEditorOptions): Promise<MorayaEdi
     ) => {
       const dom = document.createElement('div')
       dom.className = 'spreadsheet-node-view'
+      // Critical: prevent the host contenteditable from swallowing input that
+      // happens inside RevoGrid. Without this the outer ProseMirror treats the
+      // grid as part of its editable region and `beforeinput`/`selectionchange`
+      // bypass `stopEvent`, overwriting the spreadsheet block.
+      dom.contentEditable = 'false'
       let lastSource = node.attrs.source as string
 
       const instance = svFactory.create(dom, lastSource, (csv: string) => {
@@ -900,6 +905,12 @@ export async function createEditor(opts: CreateEditorOptions): Promise<MorayaEdi
           if (newSource === lastSource) return true
           return false
         },
+        // The spreadsheet is an atom block backed by its own editor (RevoGrid).
+        // Tell ProseMirror to keep its hands off events and mutations happening
+        // inside the NodeView, otherwise typing into a cell would be intercepted
+        // by the outer editor and the spreadsheet block would be overwritten.
+        stopEvent() { return true },
+        ignoreMutation() { return true },
       }
     }
   }

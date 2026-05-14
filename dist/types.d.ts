@@ -72,6 +72,15 @@ interface RendererRegistry {
     readonly versions: Readonly<Record<string, string>>;
 }
 /**
+ * Factory for creating the spreadsheet interactive view within a ProseMirror NodeView.
+ * Implemented by consumers (mdeditor uses Svelte mount(); other hosts may differ).
+ */
+interface SpreadsheetViewFactory {
+    create(container: HTMLElement, source: string, onChange: (csv: string) => void): {
+        destroy(): void;
+    };
+}
+/**
  * Platform behavior parameters (carries the editor-props-plugin DI from §F2.6).
  * Desktop injects Tauri / OS truth; Web uses browser detection; mobile bridges fill.
  */
@@ -92,6 +101,7 @@ interface SchemaConfig {
     mediaResolver: MediaResolver;
     rendererRegistry?: RendererRegistry;
     linkOpener?: LinkOpener;
+    spreadsheetViewFactory?: SpreadsheetViewFactory;
 }
 /**
  * Internal symbol-tagged null MediaResolver used by core for parseMarkdown /
@@ -104,4 +114,4 @@ interface NullMediaResolver extends MediaResolver {
 }
 declare function isNullMediaResolver(r: MediaResolver): r is NullMediaResolver;
 
-export { type LinkOpener, type MediaResolver, NULL_MEDIA_RESOLVER_SENTINEL, type NullMediaResolver, type Platform, type RendererPluginModule, type RendererRegistry, type SchemaConfig, isNullMediaResolver };
+export { type LinkOpener, type MediaResolver, NULL_MEDIA_RESOLVER_SENTINEL, type NullMediaResolver, type Platform, type RendererPluginModule, type RendererRegistry, type SchemaConfig, type SpreadsheetViewFactory, isNullMediaResolver };

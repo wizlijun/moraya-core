@@ -2,7 +2,7 @@ import { Plugin } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
 import { InputRule } from 'prosemirror-inputrules';
 import { Schema } from 'prosemirror-model';
-import { MediaResolver, RendererRegistry, LinkOpener, Platform } from './types.js';
+import { MediaResolver, RendererRegistry, LinkOpener, Platform, SpreadsheetViewFactory } from './types.js';
 import { DocCache } from './doc-cache.js';
 
 /**
@@ -54,6 +54,7 @@ interface EditorPluginOptions {
     rendererRegistry?: RendererRegistry;
     linkOpener?: LinkOpener;
     platform?: Platform;
+    spreadsheetViewFactory?: SpreadsheetViewFactory;
     /** Change callbacks */
     onDocChanged?: (textContent: string) => void;
     onChange?: (markdown: string) => void;

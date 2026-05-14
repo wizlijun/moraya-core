@@ -454,6 +454,22 @@ var table_cell = {
     return ["td", { style: `text-align: ${node.attrs.alignment || "left"}` }, 0];
   }
 };
+var spreadsheet = {
+  group: "block",
+  atom: true,
+  selectable: true,
+  draggable: false,
+  attrs: { source: { default: "" } },
+  parseDOM: [{
+    tag: "div[data-spreadsheet]",
+    getAttrs(dom) {
+      return { source: dom.getAttribute("data-source") ?? "" };
+    }
+  }],
+  toDOM(node) {
+    return ["div", { "data-spreadsheet": "", "data-source": node.attrs.source }];
+  }
+};
 var math_inline = {
   group: "inline",
   content: "text*",
@@ -801,6 +817,7 @@ function buildNodes(mediaResolver) {
     table_row,
     table_header,
     table_cell,
+    spreadsheet,
     math_inline,
     math_block,
     defList,

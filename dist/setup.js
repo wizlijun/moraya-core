@@ -1514,6 +1514,22 @@ var table_cell = {
     return ["td", { style: `text-align: ${node.attrs.alignment || "left"}` }, 0];
   }
 };
+var spreadsheet = {
+  group: "block",
+  atom: true,
+  selectable: true,
+  draggable: false,
+  attrs: { source: { default: "" } },
+  parseDOM: [{
+    tag: "div[data-spreadsheet]",
+    getAttrs(dom) {
+      return { source: dom.getAttribute("data-source") ?? "" };
+    }
+  }],
+  toDOM(node) {
+    return ["div", { "data-spreadsheet": "", "data-source": node.attrs.source }];
+  }
+};
 var math_inline = {
   group: "inline",
   content: "text*",
@@ -1861,6 +1877,7 @@ function buildNodes(mediaResolver) {
     table_row,
     table_header,
     table_cell,
+    spreadsheet,
     math_inline,
     math_block,
     defList,
@@ -2304,6 +2321,15 @@ var MorayaMarkdownParser = class extends MarkdownParser {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this.tokenHandlers
     );
+    const defaultFence = h["fence"];
+    h["fence"] = (state, tok, tokens, i) => {
+      const lang = tok.info.trim().toLowerCase();
+      if (lang === "csv" && schemaArg.nodes.spreadsheet) {
+        state.addNode(schemaArg.nodes.spreadsheet, { source: tok.content.trim() });
+        return;
+      }
+      defaultFence(state, tok, tokens, i);
+    };
     function cellAlignment(tok) {
       const style = tok.attrGet("style") || "";
       const m = style.match(/text-align:\s*(\w+)/);
@@ -2497,6 +2523,14 @@ var serializer = new MarkdownSerializer(
       state.write(`\`\`\`${fenceLang}
 `);
       state.text(node.textContent, false);
+      state.ensureNewLine();
+      state.write("```");
+      state.closeBlock(node);
+    },
+    spreadsheet(state, node) {
+      state.write("```csv\n");
+      const src = node.attrs.source;
+      if (src) state.text(src, false);
       state.ensureNewLine();
       state.write("```");
       state.closeBlock(node);
@@ -4450,7 +4484,8 @@ async function createEditorPlugins(opts, schemaArg) {
   const schemaConfig = {
     mediaResolver: opts.mediaResolver,
     ...opts.rendererRegistry ? { rendererRegistry: opts.rendererRegistry } : {},
-    ...opts.linkOpener ? { linkOpener: opts.linkOpener } : {}
+    ...opts.linkOpener ? { linkOpener: opts.linkOpener } : {},
+    ...opts.spreadsheetViewFactory ? { spreadsheetViewFactory: opts.spreadsheetViewFactory } : {}
   };
   const schema = schemaArg ?? createSchema(schemaConfig);
   const linkOpener = opts.linkOpener ?? {
@@ -4524,7 +4559,8 @@ async function createEditor(opts) {
   const schemaConfig = {
     mediaResolver: opts.mediaResolver,
     ...opts.rendererRegistry ? { rendererRegistry: opts.rendererRegistry } : {},
-    ...opts.linkOpener ? { linkOpener: opts.linkOpener } : {}
+    ...opts.linkOpener ? { linkOpener: opts.linkOpener } : {},
+    ...opts.spreadsheetViewFactory ? { spreadsheetViewFactory: opts.spreadsheetViewFactory } : {}
   };
   const schema = createSchema(schemaConfig);
   const docCache = opts.docCache ?? createDocCache(10);
@@ -4534,6 +4570,51 @@ async function createEditor(opts) {
   const nodeViews = {};
   if (tier1.codeBlockView) {
     nodeViews.code_block = tier1.codeBlockView;
+  }
+  const svFactory = opts.spreadsheetViewFactory;
+  if (svFactory && schema.nodes.spreadsheet) {
+    nodeViews.spreadsheet = (node, view2, getPos) => {
+      const dom = document.createElement("div");
+      dom.className = "spreadsheet-node-view";
+      dom.contentEditable = "false";
+      let lastSource = node.attrs.source;
+      const instance = svFactory.create(dom, lastSource, (csv) => {
+        lastSource = csv;
+        const pos = getPos();
+        if (pos == null) return;
+        view2.dispatch(view2.state.tr.setNodeMarkup(pos, void 0, { source: csv }));
+      });
+      return {
+        dom,
+        destroy() {
+          instance.destroy();
+        },
+        update(newNode) {
+          if (newNode.type.name !== "spreadsheet") return false;
+          const newSource = newNode.attrs.source;
+          if (newSource === lastSource) return true;
+          return false;
+        },
+        // The spreadsheet is an atom block backed by its own editor (RevoGrid).
+        // Tell ProseMirror to keep its hands off events and mutations happening
+        // inside the NodeView, otherwise typing into a cell would be intercepted
+        // by the outer editor and the spreadsheet block would be overwritten.
+        stopEvent() {
+          return true;
+        },
+        ignoreMutation() {
+          return true;
+        }
+      };
+    };
+  }
+  if (!svFactory && schema.nodes.spreadsheet) {
+    nodeViews.spreadsheet = (node) => {
+      const dom = document.createElement("pre");
+      dom.className = "spreadsheet-fallback";
+      dom.textContent = node.attrs.source;
+      return { dom };
+    };
   }
   const initialDoc = opts.initialContent ? parseMarkdown(opts.initialContent, schema) : schema.topNodeType.createAndFill();
   const state = EditorState.create({ schema, doc: initialDoc, plugins });
