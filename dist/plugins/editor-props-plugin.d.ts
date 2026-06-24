@@ -1,4 +1,5 @@
 import { Plugin } from 'prosemirror-state';
+import { EditorView } from 'prosemirror-view';
 import { Platform, LinkOpener } from '../types.js';
 
 /**
@@ -27,10 +28,21 @@ import { Platform, LinkOpener } from '../types.js';
  * Reducing 5 plugin instances to 1 saves ~4 apply() traversals per transaction.
  */
 
+/**
+ * Toggle a task-list checkbox when the user clicks its marker. The schema emits
+ * no <input> — the checkbox is a CSS `::before` pseudo-element drawn in the list
+ * item's left padding band (see editor-base.css). So we hit-test the click
+ * against that band rather than a real element, then flip the `checked` attr,
+ * which re-serialises the Markdown to `[x]` / `[ ]`.
+ *
+ * Returns true when a checkbox was toggled (so the caller suppresses the default
+ * click handling), false otherwise.
+ */
+declare function toggleTaskCheckboxAtClick(view: EditorView, event: MouseEvent): boolean;
 interface EditorPropsPluginOptions {
     platform: Platform;
     linkOpener: LinkOpener;
 }
 declare function createEditorPropsPlugin(opts: EditorPropsPluginOptions): Plugin;
 
-export { type EditorPropsPluginOptions, createEditorPropsPlugin };
+export { type EditorPropsPluginOptions, createEditorPropsPlugin, toggleTaskCheckboxAtClick };

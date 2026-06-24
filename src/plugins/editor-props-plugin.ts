@@ -26,7 +26,7 @@
 
 import { Fragment, Slice } from 'prosemirror-model'
 import { AllSelection, Plugin, PluginKey, TextSelection } from 'prosemirror-state'
-import { Decoration, DecorationSet } from 'prosemirror-view'
+import { Decoration, DecorationSet, type EditorView } from 'prosemirror-view'
 import { parseMarkdown } from '../markdown'
 import type { LinkOpener, Platform } from '../types'
 
@@ -67,6 +67,48 @@ function resolveLocalPath(href: string, platform: Platform): string {
     return dir + '/' + path
   }
   return path
+}
+
+/**
+ * Toggle a task-list checkbox when the user clicks its marker. The schema emits
+ * no <input> — the checkbox is a CSS `::before` pseudo-element drawn in the list
+ * item's left padding band (see editor-base.css). So we hit-test the click
+ * against that band rather than a real element, then flip the `checked` attr,
+ * which re-serialises the Markdown to `[x]` / `[ ]`.
+ *
+ * Returns true when a checkbox was toggled (so the caller suppresses the default
+ * click handling), false otherwise.
+ */
+export function toggleTaskCheckboxAtClick(view: EditorView, event: MouseEvent): boolean {
+  const target = event.target as HTMLElement | null
+  if (!target) return false
+  const li = target.closest('li[data-item-type="task"]') as HTMLElement | null
+  if (!li || !view.dom.contains(li)) return false
+
+  // The checkbox lives in the left padding band of the list item. Past the
+  // padding is the text, which should place a cursor / select instead.
+  const rect = li.getBoundingClientRect()
+  const padLeft = parseFloat(getComputedStyle(li).paddingLeft) || 0
+  if (event.clientX < rect.left || event.clientX > rect.left + padLeft) return false
+  if (event.clientY < rect.top || event.clientY > rect.bottom) return false
+
+  // Walk up from the click position to the list_item node and flip `checked`.
+  const innerPos = view.posAtDOM(li, 0)
+  const $pos = view.state.doc.resolve(innerPos)
+  for (let depth = $pos.depth; depth > 0; depth--) {
+    const node = $pos.node(depth)
+    if (node.type.name === 'list_item' && node.attrs.checked != null) {
+      const liPos = $pos.before(depth)
+      view.dispatch(
+        view.state.tr.setNodeMarkup(liPos, undefined, {
+          ...node.attrs,
+          checked: !node.attrs.checked,
+        }),
+      )
+      return true
+    }
+  }
+  return false
 }
 
 export interface EditorPropsPluginOptions {
@@ -202,6 +244,16 @@ export function createEditorPropsPlugin(opts: EditorPropsPluginOptions): Plugin 
           if (me.button !== 0) return false
           const target = me.target as HTMLElement | null
           if (!target) return false
+
+          // ── Task-list checkbox click → toggle checked state ──
+          // Handled here (not in handleClick) because the checkbox is a CSS
+          // ::before in the list item's left padding with no DOM text under it;
+          // ProseMirror's posAtCoords returns null there, so handleClick never
+          // fires for that region.
+          if (toggleTaskCheckboxAtClick(view, me)) {
+            me.preventDefault()
+            return true
+          }
 
           // ── Cmd/Ctrl+click on links → open externally via LinkOpener ──
           // Must be handled in mousedown BEFORE ProseMirror places cursor,

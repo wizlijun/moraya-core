@@ -1749,6 +1749,32 @@ function resolveLocalPath(href, platform) {
   }
   return path;
 }
+function toggleTaskCheckboxAtClick(view, event) {
+  const target = event.target;
+  if (!target) return false;
+  const li = target.closest('li[data-item-type="task"]');
+  if (!li || !view.dom.contains(li)) return false;
+  const rect = li.getBoundingClientRect();
+  const padLeft = parseFloat(getComputedStyle(li).paddingLeft) || 0;
+  if (event.clientX < rect.left || event.clientX > rect.left + padLeft) return false;
+  if (event.clientY < rect.top || event.clientY > rect.bottom) return false;
+  const innerPos = view.posAtDOM(li, 0);
+  const $pos = view.state.doc.resolve(innerPos);
+  for (let depth = $pos.depth; depth > 0; depth--) {
+    const node = $pos.node(depth);
+    if (node.type.name === "list_item" && node.attrs.checked != null) {
+      const liPos = $pos.before(depth);
+      view.dispatch(
+        view.state.tr.setNodeMarkup(liPos, void 0, {
+          ...node.attrs,
+          checked: !node.attrs.checked
+        })
+      );
+      return true;
+    }
+  }
+  return false;
+}
 function createEditorPropsPlugin(opts) {
   const { platform, linkOpener } = opts;
   const isMacOS = platform.isMacOS;
@@ -1858,6 +1884,10 @@ function createEditorPropsPlugin(opts) {
           if (me.button !== 0) return false;
           const target = me.target;
           if (!target) return false;
+          if (toggleTaskCheckboxAtClick(view, me)) {
+            me.preventDefault();
+            return true;
+          }
           if (me.metaKey || me.ctrlKey) {
             const anchor = target.closest("a[href]");
             if (anchor) {
@@ -2145,6 +2175,7 @@ function createEditorPropsPlugin(opts) {
   });
 }
 export {
-  createEditorPropsPlugin
+  createEditorPropsPlugin,
+  toggleTaskCheckboxAtClick
 };
 //# sourceMappingURL=editor-props-plugin.js.map
