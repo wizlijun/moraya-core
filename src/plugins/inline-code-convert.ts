@@ -123,7 +123,14 @@ function needsCursorTarget(state: EditorState): number {
   return -1
 }
 
-export function createInlineCodeConvertPlugin(): Plugin {
+/**
+ * @param enableBacktickCollapse When false, the backtick-pair collapse
+ *   (responsibility #1) is skipped so typing `` `text` `` stays literal — kept
+ *   in step with `enableInlineMarkInputRules`. The ZWSP cursor target and the
+ *   code-boundary stored-marks logic (#2/#3, needed to edit marks already
+ *   present in the document) still run.
+ */
+export function createInlineCodeConvertPlugin(enableBacktickCollapse = true): Plugin {
   return new Plugin({
     key: pluginKey,
 
@@ -142,7 +149,9 @@ export function createInlineCodeConvertPlugin(): Plugin {
       const codeType = newState.schema.marks.code
 
       // ── 1. Backtick pair collapse ──
-      const oldMatches = findCodePatternsInBlock(oldState, oldPos)
+      const oldMatches = enableBacktickCollapse
+        ? findCodePatternsInBlock(oldState, oldPos)
+        : []
       const wasIn = oldMatches.find((m) => oldPos > m.from && oldPos < m.to)
       if (wasIn && codeType) {
         let mappedFrom = wasIn.from

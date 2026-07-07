@@ -59,7 +59,7 @@ function needsCursorTarget(state) {
   }
   return -1;
 }
-function createInlineCodeConvertPlugin() {
+function createInlineCodeConvertPlugin(enableBacktickCollapse = true) {
   return new Plugin({
     key: pluginKey,
     appendTransaction(transactions, oldState, newState) {
@@ -72,7 +72,7 @@ function createInlineCodeConvertPlugin() {
       const newPos = newState.selection.from;
       const oldPos = oldState.selection.from;
       const codeType = newState.schema.marks.code;
-      const oldMatches = findCodePatternsInBlock(oldState, oldPos);
+      const oldMatches = enableBacktickCollapse ? findCodePatternsInBlock(oldState, oldPos) : [];
       const wasIn = oldMatches.find((m) => oldPos > m.from && oldPos < m.to);
       if (wasIn && codeType) {
         let mappedFrom = wasIn.from;

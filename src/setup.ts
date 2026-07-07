@@ -164,7 +164,11 @@ function createImageSelectionPlugin(): Plugin {
 
 // ── Input Rules ─────────────────────────────────────────────────
 
-function buildInputRules(schema: Schema, tier1: Tier1Plugins): Plugin {
+export function buildInputRules(
+  schema: Schema,
+  tier1: Tier1Plugins,
+  enableInlineMarks = true,
+): Plugin {
   const rules: InputRule[] = []
   const N = schema.nodes
   const M = schema.marks
@@ -236,7 +240,7 @@ function buildInputRules(schema: Schema, tier1: Tier1Plugins): Plugin {
   }
 
   // Strong: **text** or __text__
-  if (M.strong) {
+  if (enableInlineMarks && M.strong) {
     rules.push(new InputRule(
       /(?<![\w:/])(?:\*\*|__)([^*_]+?)(?:\*\*|__)(?![\w/])$/,
       (state, match, start, end) => {
@@ -257,7 +261,7 @@ function buildInputRules(schema: Schema, tier1: Tier1Plugins): Plugin {
   }
 
   // Emphasis: *text* or _text_
-  if (M.em) {
+  if (enableInlineMarks && M.em) {
     rules.push(new InputRule(
       /(?<![\w:/*])(?:\*|_)([^*_]+?)(?:\*|_)(?![\w/])$/,
       (state, match, start, end) => {
@@ -278,7 +282,7 @@ function buildInputRules(schema: Schema, tier1: Tier1Plugins): Plugin {
   }
 
   // Inline code: `text`
-  if (M.code) {
+  if (enableInlineMarks && M.code) {
     rules.push(new InputRule(
       /(?:`)([^`]+)(?:`)$/,
       (state, match, start, end) => {
@@ -303,7 +307,7 @@ function buildInputRules(schema: Schema, tier1: Tier1Plugins): Plugin {
   }
 
   // Strikethrough: ~~text~~
-  if (M.strike_through) {
+  if (enableInlineMarks && M.strike_through) {
     rules.push(new InputRule(
       /~~([^~]+)~~$/,
       (state, match, start, end) => {
@@ -324,7 +328,7 @@ function buildInputRules(schema: Schema, tier1: Tier1Plugins): Plugin {
   }
 
   // Highlight: ^^text^^ (caret) or ==text== (equals)
-  if (M.highlight) {
+  if (enableInlineMarks && M.highlight) {
     const applyHighlight = (delimiter: 'caret' | 'equals') =>
       (state: EditorState, match: RegExpMatchArray, start: number, end: number) => {
         const tr = state.tr
@@ -672,6 +676,16 @@ export interface EditorPluginOptions {
   enableTableResize?: boolean       // default true (columnResizing)
   enableImageSelection?: boolean    // default true
   enableHistory?: boolean           // default true; v0.72 Yjs collab consumers set false
+  /**
+   * When false, typing inline mark delimiters — `**`/`__` (strong), `*`/`_`
+   * (em), `` ` `` (code), `~~` (strike), `^^`/`==` (highlight) — does NOT
+   * auto-convert into a rendered mark. The delimiters stay literal so the line
+   * reads as source while the user is editing it. Also disables the backtick
+   * pair collapse in `inline-code-convert`, for a uniform "inline markers stay
+   * literal on type" policy. Block-level shortcuts (headings, lists, quotes,
+   * fences, hr, task list) and marks already parsed from the document are
+   * unaffected. Default true. */
+  enableInlineMarkInputRules?: boolean   // default true
 
   /** Dependency injection (§3.3) */
   mediaResolver: MediaResolver           // required
@@ -783,7 +797,7 @@ export async function createEditorPlugins(
     }),
 
     // Input rules (must come before keymaps)
-    buildInputRules(schema, tier1),
+    buildInputRules(schema, tier1, opts.enableInlineMarkInputRules !== false),
 
     // Custom Enter handler MUST come before keymaps so pipe-table and
     // code-fence detection run before baseKeymap's splitBlock intercepts Enter.
@@ -814,7 +828,7 @@ export async function createEditorPlugins(
   // Custom plugins
   plugins.push(createCursorSyntaxPlugin())
   plugins.push(createLinkTextPlugin())
-  plugins.push(createInlineCodeConvertPlugin())
+  plugins.push(createInlineCodeConvertPlugin(opts.enableInlineMarkInputRules !== false))
 
   if (opts.enableImageSelection !== false) {
     plugins.push(createImageSelectionPlugin())

@@ -3450,7 +3450,7 @@ function needsCursorTarget(state) {
   }
   return -1;
 }
-function createInlineCodeConvertPlugin() {
+function createInlineCodeConvertPlugin(enableBacktickCollapse = true) {
   return new Plugin4({
     key: pluginKey3,
     appendTransaction(transactions, oldState, newState) {
@@ -3463,7 +3463,7 @@ function createInlineCodeConvertPlugin() {
       const newPos = newState.selection.from;
       const oldPos = oldState.selection.from;
       const codeType = newState.schema.marks.code;
-      const oldMatches = findCodePatternsInBlock(oldState, oldPos);
+      const oldMatches = enableBacktickCollapse ? findCodePatternsInBlock(oldState, oldPos) : [];
       const wasIn = oldMatches.find((m) => oldPos > m.from && oldPos < m.to);
       if (wasIn && codeType) {
         let mappedFrom = wasIn.from;
@@ -4110,7 +4110,7 @@ function createImageSelectionPlugin() {
     }
   });
 }
-function buildInputRules(schema, tier1) {
+function buildInputRules(schema, tier1, enableInlineMarks = true) {
   const rules = [];
   const N = schema.nodes;
   const M = schema.marks;
@@ -4166,7 +4166,7 @@ function buildInputRules(schema, tier1) {
       return state.tr.replaceWith(start, end, node);
     }));
   }
-  if (M.strong) {
+  if (enableInlineMarks && M.strong) {
     rules.push(new InputRule(
       /(?<![\w:/])(?:\*\*|__)([^*_]+?)(?:\*\*|__)(?![\w/])$/,
       (state, match, start, end) => {
@@ -4185,7 +4185,7 @@ function buildInputRules(schema, tier1) {
       }
     ));
   }
-  if (M.em) {
+  if (enableInlineMarks && M.em) {
     rules.push(new InputRule(
       /(?<![\w:/*])(?:\*|_)([^*_]+?)(?:\*|_)(?![\w/])$/,
       (state, match, start, end) => {
@@ -4204,7 +4204,7 @@ function buildInputRules(schema, tier1) {
       }
     ));
   }
-  if (M.code) {
+  if (enableInlineMarks && M.code) {
     rules.push(new InputRule(
       /(?:`)([^`]+)(?:`)$/,
       (state, match, start, end) => {
@@ -4223,7 +4223,7 @@ function buildInputRules(schema, tier1) {
       }
     ));
   }
-  if (M.strike_through) {
+  if (enableInlineMarks && M.strike_through) {
     rules.push(new InputRule(
       /~~([^~]+)~~$/,
       (state, match, start, end) => {
@@ -4242,7 +4242,7 @@ function buildInputRules(schema, tier1) {
       }
     ));
   }
-  if (M.highlight) {
+  if (enableInlineMarks && M.highlight) {
     const applyHighlight = (delimiter) => (state, match, start, end) => {
       const tr = state.tr;
       const captured = match[1];
@@ -4553,7 +4553,7 @@ async function createEditorPlugins(opts, schemaArg) {
       }
     }),
     // Input rules (must come before keymaps)
-    buildInputRules(schema, tier1),
+    buildInputRules(schema, tier1, opts.enableInlineMarkInputRules !== false),
     // Custom Enter handler MUST come before keymaps so pipe-table and
     // code-fence detection run before baseKeymap's splitBlock intercepts Enter.
     createEnterHandlerPlugin(),
@@ -4571,7 +4571,7 @@ async function createEditorPlugins(opts, schemaArg) {
   plugins.push(createEditorPropsPlugin({ platform, linkOpener }));
   plugins.push(createCursorSyntaxPlugin());
   plugins.push(createLinkTextPlugin());
-  plugins.push(createInlineCodeConvertPlugin());
+  plugins.push(createInlineCodeConvertPlugin(opts.enableInlineMarkInputRules !== false));
   if (opts.enableImageSelection !== false) {
     plugins.push(createImageSelectionPlugin());
   }
@@ -4688,6 +4688,7 @@ async function createEditor(opts) {
   };
 }
 export {
+  buildInputRules,
   createEditor,
   createEditorPlugins,
   preloadEnhancementPlugins

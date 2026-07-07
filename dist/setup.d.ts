@@ -42,6 +42,7 @@ interface Tier1Plugins {
  * different cached factories.
  */
 declare function preloadEnhancementPlugins(schema: Schema, rendererRegistry?: RendererRegistry): Promise<Tier1Plugins>;
+declare function buildInputRules(schema: Schema, tier1: Tier1Plugins, enableInlineMarks?: boolean): Plugin;
 interface EditorPluginOptions {
     /** Render features */
     enableMath?: boolean;
@@ -49,6 +50,16 @@ interface EditorPluginOptions {
     enableTableResize?: boolean;
     enableImageSelection?: boolean;
     enableHistory?: boolean;
+    /**
+     * When false, typing inline mark delimiters — `**`/`__` (strong), `*`/`_`
+     * (em), `` ` `` (code), `~~` (strike), `^^`/`==` (highlight) — does NOT
+     * auto-convert into a rendered mark. The delimiters stay literal so the line
+     * reads as source while the user is editing it. Also disables the backtick
+     * pair collapse in `inline-code-convert`, for a uniform "inline markers stay
+     * literal on type" policy. Block-level shortcuts (headings, lists, quotes,
+     * fences, hr, task list) and marks already parsed from the document are
+     * unaffected. Default true. */
+    enableInlineMarkInputRules?: boolean;
     /** Dependency injection (§3.3) */
     mediaResolver: MediaResolver;
     rendererRegistry?: RendererRegistry;
@@ -102,4 +113,4 @@ declare function createEditorPlugins(opts: EditorPluginOptions, schemaArg?: Sche
  */
 declare function createEditor(opts: CreateEditorOptions): Promise<MorayaEditorInstance>;
 
-export { type CreateEditorOptions, type EditorPluginOptions, type MorayaEditorInstance, createEditor, createEditorPlugins, preloadEnhancementPlugins };
+export { type CreateEditorOptions, type EditorPluginOptions, type MorayaEditorInstance, buildInputRules, createEditor, createEditorPlugins, preloadEnhancementPlugins };
