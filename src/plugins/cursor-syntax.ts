@@ -11,12 +11,18 @@
  *   - heading 1-6 → `# `, `## `, ... `###### `
  *   - blockquote → `> `
  *
- * Inline mark delimiters shown when cursor is inside the mark:
+ * Inline mark delimiters:
  *   - strong → `**` ... `**`
  *   - em → `*` ... `*`
  *   - code → `` ` `` ... `` ` ``
  *   - strike_through → `~~` ... `~~`
  *   - highlight → `^^` ... `^^`
+ *
+ * The `inlineScope` controls how much inline syntax is revealed:
+ *   - `'cursor'` (default): only the single mark the cursor sits inside.
+ *   - `'line'`: every inline mark in the cursor's textblock, so the whole
+ *     current line reads as markdown source (Obsidian Live-Preview style);
+ *     moving the cursor to another line re-renders this one.
  *
  * Link marks are handled by `link-text-plugin` (expand/collapse pattern).
  */
@@ -24,7 +30,10 @@
 import { Plugin, PluginKey } from 'prosemirror-state'
 import type { EditorState } from 'prosemirror-state'
 import { Decoration, DecorationSet } from 'prosemirror-view'
-import type { MarkType } from 'prosemirror-model'
+import type { MarkType, Mark } from 'prosemirror-model'
+
+/** How much inline markdown syntax the plugin reveals around the cursor. */
+export type InlineSyntaxScope = 'cursor' | 'line'
 
 const pluginKey = new PluginKey('moraya-cursor-syntax')
 
@@ -54,47 +63,49 @@ function makeWidget(text: string, className: string): () => HTMLSpanElement {
   }
 }
 
+/** A contiguous span of `markType` in a textblock, with the mark instance. */
+interface MarkRun { from: number; to: number; mark: Mark }
+
 /**
- * Find the contiguous range of `markType` in the current textblock that contains `pos`.
- * Returns absolute document positions {from, to}, or null if cursor is not inside that mark.
+ * Collect every contiguous run of `markType` in the textblock that contains
+ * `pos`. Positions are absolute document coordinates. The mark instance is
+ * kept so callers can read per-run attributes (e.g. highlight delimiter).
  */
-function getMarkRange(
-  state: EditorState,
-  pos: number,
-  markType: MarkType,
-): { from: number; to: number } | null {
+function getMarkRuns(state: EditorState, pos: number, markType: MarkType): MarkRun[] {
   const $pos = state.doc.resolve(pos)
   const parent = $pos.parent
-  if (!parent.isTextblock) return null
+  if (!parent.isTextblock) return []
 
   const base = $pos.start() // absolute position of parent content start
-  const runs: Array<{ from: number; to: number }> = []
+  const runs: MarkRun[] = []
   let runFrom = -1
+  let runMark: Mark | null = null
   let nodePos = base
 
   for (let i = 0; i < parent.childCount; i++) {
     const child = parent.child(i)
     const childEnd = nodePos + child.nodeSize
 
-    if (markType.isInSet(child.marks)) {
-      if (runFrom === -1) runFrom = nodePos
+    const mark = markType.isInSet(child.marks)
+      ? child.marks.find(m => m.type === markType)!
+      : null
+    if (mark) {
+      if (runFrom === -1) { runFrom = nodePos; runMark = mark }
     } else {
       if (runFrom !== -1) {
-        runs.push({ from: runFrom, to: nodePos })
+        runs.push({ from: runFrom, to: nodePos, mark: runMark! })
         runFrom = -1
+        runMark = null
       }
     }
     nodePos = childEnd
   }
-  if (runFrom !== -1) runs.push({ from: runFrom, to: nodePos })
+  if (runFrom !== -1) runs.push({ from: runFrom, to: nodePos, mark: runMark! })
 
-  // Use half-open interval [from, to): include left boundary, exclude right boundary.
-  // Position exactly at r.to is the "just exited" point — no decoration there prevents
-  // the DOM-mutation-driven cursor bounce when moving from mark boundary to ZWSP position.
-  return runs.find(r => pos >= r.from && pos < r.to) ?? null
+  return runs
 }
 
-function buildDecorations(state: EditorState): DecorationSet {
+function buildDecorations(state: EditorState, inlineScope: InlineSyntaxScope): DecorationSet {
   const { selection } = state
   // Only show decorations when cursor is a single collapsed point (no selection)
   if (!selection.empty) return DecorationSet.empty
@@ -132,35 +143,40 @@ function buildDecorations(state: EditorState): DecorationSet {
     }
   }
 
-  // 3. Inline marks: strong, em, code, strike_through, highlight
+  // 3. Inline marks: strong, em, code, strike_through, highlight.
+  //    'cursor' scope reveals only the run the caret is inside; 'line' scope
+  //    reveals every run in the current textblock so the whole line reads as
+  //    markdown source. Half-open interval [from, to): a caret exactly at r.to
+  //    counts as "just exited" (avoids a DOM-mutation cursor bounce).
   for (const [markName, delim] of Object.entries(MARK_DELIMITERS)) {
     const markType = state.schema.marks[markName]
     if (!markType) continue
 
-    const range = getMarkRange(state, pos, markType)
-    if (!range) continue
+    const runs = getMarkRuns(state, pos, markType)
+    const targets = inlineScope === 'line'
+      ? runs
+      : runs.filter(r => pos >= r.from && pos < r.to)
 
-    // For marks with a delimiter attr (highlight), show the actual delimiter used.
-    let openStr = delim.open
-    let closeStr = delim.close
-    if (markName === 'highlight') {
-      const hMark = state.doc.resolve(pos).marks().find(m => m.type === markType)
-      if (hMark?.attrs?.delimiter === 'equals') {
+    for (const range of targets) {
+      // For marks with a delimiter attr (highlight), show the actual delimiter.
+      let openStr = delim.open
+      let closeStr = delim.close
+      if (markName === 'highlight' && range.mark.attrs?.delimiter === 'equals') {
         openStr = '=='
         closeStr = '=='
       }
-    }
 
-    decorations.push(
-      Decoration.widget(range.from, makeWidget(openStr, 'syntax-md-mark'), {
-        side: -1,
-        key: `${markName}-open`,
-      }),
-      Decoration.widget(range.to, makeWidget(closeStr, 'syntax-md-mark'), {
-        side: 1,
-        key: `${markName}-close`,
-      }),
-    )
+      decorations.push(
+        Decoration.widget(range.from, makeWidget(openStr, 'syntax-md-mark'), {
+          side: -1,
+          key: `${markName}-open-${range.from}`,
+        }),
+        Decoration.widget(range.to, makeWidget(closeStr, 'syntax-md-mark'), {
+          side: 1,
+          key: `${markName}-close-${range.to}`,
+        }),
+      )
+    }
   }
 
   // 4. Link marks are handled by link-text-plugin (expand/collapse)
@@ -168,17 +184,17 @@ function buildDecorations(state: EditorState): DecorationSet {
   return DecorationSet.create(state.doc, decorations)
 }
 
-export function createCursorSyntaxPlugin(): Plugin {
+export function createCursorSyntaxPlugin(inlineScope: InlineSyntaxScope = 'cursor'): Plugin {
   return new Plugin({
     key: pluginKey,
     state: {
       init(_, state) {
-        return buildDecorations(state)
+        return buildDecorations(state, inlineScope)
       },
       apply(tr, old, _, newState) {
         // Only recompute when selection or document changes
         if (!tr.selectionSet && !tr.docChanged) return old
-        return buildDecorations(newState)
+        return buildDecorations(newState, inlineScope)
       },
     },
     props: {

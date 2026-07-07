@@ -2,6 +2,7 @@ import { Plugin } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
 import { InputRule } from 'prosemirror-inputrules';
 import { Schema } from 'prosemirror-model';
+import { InlineSyntaxScope } from './plugins/cursor-syntax.js';
 import { MediaResolver, RendererRegistry, LinkOpener, Platform, SpreadsheetViewFactory } from './types.js';
 import { DocCache } from './doc-cache.js';
 
@@ -60,6 +61,13 @@ interface EditorPluginOptions {
      * fences, hr, task list) and marks already parsed from the document are
      * unaffected. Default true. */
     enableInlineMarkInputRules?: boolean;
+    /**
+     * How much inline markdown syntax `cursor-syntax` reveals around the caret:
+     *   - `'cursor'` (default): only the single mark the caret sits inside.
+     *   - `'line'`: every inline mark in the caret's textblock, so the current
+     *     line reads as markdown source and re-renders once the caret leaves it
+     *     (Obsidian Live-Preview style). */
+    inlineSyntaxScope?: InlineSyntaxScope;
     /** Dependency injection (§3.3) */
     mediaResolver: MediaResolver;
     rendererRegistry?: RendererRegistry;

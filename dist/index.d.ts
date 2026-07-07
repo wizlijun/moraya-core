@@ -8,3 +8,4 @@ import 'prosemirror-model';
 import 'prosemirror-state';
 import 'prosemirror-view';
 import 'prosemirror-inputrules';
+import './plugins/cursor-syntax.js';

@@ -25,31 +25,37 @@ function makeWidget(text, className) {
     return span;
   };
 }
-function getMarkRange(state, pos, markType) {
+function getMarkRuns(state, pos, markType) {
   const $pos = state.doc.resolve(pos);
   const parent = $pos.parent;
-  if (!parent.isTextblock) return null;
+  if (!parent.isTextblock) return [];
   const base = $pos.start();
   const runs = [];
   let runFrom = -1;
+  let runMark = null;
   let nodePos = base;
   for (let i = 0; i < parent.childCount; i++) {
     const child = parent.child(i);
     const childEnd = nodePos + child.nodeSize;
-    if (markType.isInSet(child.marks)) {
-      if (runFrom === -1) runFrom = nodePos;
+    const mark = markType.isInSet(child.marks) ? child.marks.find((m) => m.type === markType) : null;
+    if (mark) {
+      if (runFrom === -1) {
+        runFrom = nodePos;
+        runMark = mark;
+      }
     } else {
       if (runFrom !== -1) {
-        runs.push({ from: runFrom, to: nodePos });
+        runs.push({ from: runFrom, to: nodePos, mark: runMark });
         runFrom = -1;
+        runMark = null;
       }
     }
     nodePos = childEnd;
   }
-  if (runFrom !== -1) runs.push({ from: runFrom, to: nodePos });
-  return runs.find((r) => pos >= r.from && pos < r.to) ?? null;
+  if (runFrom !== -1) runs.push({ from: runFrom, to: nodePos, mark: runMark });
+  return runs;
 }
-function buildDecorations(state) {
+function buildDecorations(state, inlineScope) {
   const { selection } = state;
   if (!selection.empty) return DecorationSet.empty;
   const $from = selection.$from;
@@ -83,40 +89,39 @@ function buildDecorations(state) {
   for (const [markName, delim] of Object.entries(MARK_DELIMITERS)) {
     const markType = state.schema.marks[markName];
     if (!markType) continue;
-    const range = getMarkRange(state, pos, markType);
-    if (!range) continue;
-    let openStr = delim.open;
-    let closeStr = delim.close;
-    if (markName === "highlight") {
-      const hMark = state.doc.resolve(pos).marks().find((m) => m.type === markType);
-      if (hMark?.attrs?.delimiter === "equals") {
+    const runs = getMarkRuns(state, pos, markType);
+    const targets = inlineScope === "line" ? runs : runs.filter((r) => pos >= r.from && pos < r.to);
+    for (const range of targets) {
+      let openStr = delim.open;
+      let closeStr = delim.close;
+      if (markName === "highlight" && range.mark.attrs?.delimiter === "equals") {
         openStr = "==";
         closeStr = "==";
       }
+      decorations.push(
+        Decoration.widget(range.from, makeWidget(openStr, "syntax-md-mark"), {
+          side: -1,
+          key: `${markName}-open-${range.from}`
+        }),
+        Decoration.widget(range.to, makeWidget(closeStr, "syntax-md-mark"), {
+          side: 1,
+          key: `${markName}-close-${range.to}`
+        })
+      );
     }
-    decorations.push(
-      Decoration.widget(range.from, makeWidget(openStr, "syntax-md-mark"), {
-        side: -1,
-        key: `${markName}-open`
-      }),
-      Decoration.widget(range.to, makeWidget(closeStr, "syntax-md-mark"), {
-        side: 1,
-        key: `${markName}-close`
-      })
-    );
   }
   return DecorationSet.create(state.doc, decorations);
 }
-function createCursorSyntaxPlugin() {
+function createCursorSyntaxPlugin(inlineScope = "cursor") {
   return new Plugin({
     key: pluginKey,
     state: {
       init(_, state) {
-        return buildDecorations(state);
+        return buildDecorations(state, inlineScope);
       },
       apply(tr, old, _, newState) {
         if (!tr.selectionSet && !tr.docChanged) return old;
-        return buildDecorations(newState);
+        return buildDecorations(newState, inlineScope);
       }
     },
     props: {

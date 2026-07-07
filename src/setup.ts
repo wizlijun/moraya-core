@@ -55,7 +55,7 @@ import { parseMarkdown, serializeMarkdown } from './markdown'
 import { wrapInBulletList, wrapInOrderedList, wrapInTaskList } from './commands'
 import { createDefListInputRule } from './plugins/definition-list'
 import { createEnterHandlerPlugin } from './plugins/enter-handler'
-import { createCursorSyntaxPlugin } from './plugins/cursor-syntax'
+import { createCursorSyntaxPlugin, type InlineSyntaxScope } from './plugins/cursor-syntax'
 import { createLinkTextPlugin } from './plugins/link-text-plugin'
 import { createInlineCodeConvertPlugin } from './plugins/inline-code-convert'
 import { createEditorPropsPlugin } from './plugins/editor-props-plugin'
@@ -686,6 +686,13 @@ export interface EditorPluginOptions {
    * fences, hr, task list) and marks already parsed from the document are
    * unaffected. Default true. */
   enableInlineMarkInputRules?: boolean   // default true
+  /**
+   * How much inline markdown syntax `cursor-syntax` reveals around the caret:
+   *   - `'cursor'` (default): only the single mark the caret sits inside.
+   *   - `'line'`: every inline mark in the caret's textblock, so the current
+   *     line reads as markdown source and re-renders once the caret leaves it
+   *     (Obsidian Live-Preview style). */
+  inlineSyntaxScope?: InlineSyntaxScope   // default 'cursor'
 
   /** Dependency injection (§3.3) */
   mediaResolver: MediaResolver           // required
@@ -826,7 +833,7 @@ export async function createEditorPlugins(
   plugins.push(createEditorPropsPlugin({ platform, linkOpener }))
 
   // Custom plugins
-  plugins.push(createCursorSyntaxPlugin())
+  plugins.push(createCursorSyntaxPlugin(opts.inlineSyntaxScope ?? 'cursor'))
   plugins.push(createLinkTextPlugin())
   plugins.push(createInlineCodeConvertPlugin(opts.enableInlineMarkInputRules !== false))
 
