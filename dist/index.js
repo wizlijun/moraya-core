@@ -4838,6 +4838,38 @@ async function createEditor(opts) {
       return { dom };
     };
   }
+  const fmFactory = opts.frontmatterViewFactory;
+  if (fmFactory && schema2.nodes.frontmatter) {
+    nodeViews.frontmatter = (node) => {
+      const dom = document.createElement("div");
+      dom.className = "frontmatter-node-view";
+      dom.contentEditable = "false";
+      let lastRaw = node.textContent;
+      let inst = fmFactory.render(dom, lastRaw);
+      return {
+        dom,
+        destroy() {
+          inst?.destroy?.();
+        },
+        update(newNode) {
+          if (newNode.type.name !== "frontmatter") return false;
+          const raw = newNode.textContent;
+          if (raw === lastRaw) return true;
+          lastRaw = raw;
+          inst?.destroy?.();
+          dom.replaceChildren();
+          inst = fmFactory.render(dom, raw);
+          return true;
+        },
+        stopEvent() {
+          return true;
+        },
+        ignoreMutation() {
+          return true;
+        }
+      };
+    };
+  }
   const initialDoc = opts.initialContent ? parseMarkdown(opts.initialContent, schema2) : schema2.topNodeType.createAndFill();
   const state = EditorState.create({ schema: schema2, doc: initialDoc, plugins });
   const view = new EditorView(opts.container, {

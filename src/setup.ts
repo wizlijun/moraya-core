@@ -66,6 +66,7 @@ import type {
   Platform,
   SchemaConfig,
   SpreadsheetViewFactory,
+  FrontmatterViewFactory,
 } from './types'
 import { createDocCache, type DocCache } from './doc-cache'
 
@@ -700,6 +701,8 @@ export interface EditorPluginOptions {
   linkOpener?: LinkOpener                // optional; default = window.open
   platform?: Platform                    // optional; default = navigator detection
   spreadsheetViewFactory?: SpreadsheetViewFactory
+  /** Optional read-only frontmatter renderer (consumer builds a key/value table). */
+  frontmatterViewFactory?: FrontmatterViewFactory
 
   /** Change callbacks */
   onDocChanged?: (textContent: string) => void
@@ -942,6 +945,36 @@ export async function createEditor(opts: CreateEditorOptions): Promise<MorayaEdi
       dom.className = 'spreadsheet-fallback'
       dom.textContent = node.attrs.source as string
       return { dom }
+    }
+  }
+
+  const fmFactory = opts.frontmatterViewFactory
+  if (fmFactory && schema.nodes.frontmatter) {
+    nodeViews.frontmatter = (node: import('prosemirror-model').Node) => {
+      const dom = document.createElement('div')
+      dom.className = 'frontmatter-node-view'
+      // Read-only rendered view. Keep the outer contenteditable from treating
+      // the parsed table as its editable region (same rationale as spreadsheet).
+      dom.contentEditable = 'false'
+      let lastRaw = node.textContent
+      let inst = fmFactory.render(dom, lastRaw)
+
+      return {
+        dom,
+        destroy() { inst?.destroy?.() },
+        update(newNode: import('prosemirror-model').Node) {
+          if (newNode.type.name !== 'frontmatter') return false
+          const raw = newNode.textContent
+          if (raw === lastRaw) return true
+          lastRaw = raw
+          inst?.destroy?.()
+          dom.replaceChildren()
+          inst = fmFactory.render(dom, raw)
+          return true
+        },
+        stopEvent() { return true },
+        ignoreMutation() { return true },
+      }
     }
   }
 

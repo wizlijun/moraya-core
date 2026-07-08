@@ -3,7 +3,7 @@ import { EditorView } from 'prosemirror-view';
 import { InputRule } from 'prosemirror-inputrules';
 import { Schema } from 'prosemirror-model';
 import { InlineSyntaxScope } from './plugins/cursor-syntax.js';
-import { MediaResolver, RendererRegistry, LinkOpener, Platform, SpreadsheetViewFactory } from './types.js';
+import { MediaResolver, RendererRegistry, LinkOpener, Platform, SpreadsheetViewFactory, FrontmatterViewFactory } from './types.js';
 import { DocCache } from './doc-cache.js';
 
 /**
@@ -74,6 +74,8 @@ interface EditorPluginOptions {
     linkOpener?: LinkOpener;
     platform?: Platform;
     spreadsheetViewFactory?: SpreadsheetViewFactory;
+    /** Optional read-only frontmatter renderer (consumer builds a key/value table). */
+    frontmatterViewFactory?: FrontmatterViewFactory;
     /** Change callbacks */
     onDocChanged?: (textContent: string) => void;
     onChange?: (markdown: string) => void;

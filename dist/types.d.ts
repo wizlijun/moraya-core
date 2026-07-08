@@ -81,6 +81,18 @@ interface SpreadsheetViewFactory {
     };
 }
 /**
+ * Factory for rendering a read-only frontmatter view within a ProseMirror
+ * NodeView. Implemented by consumers (mdeditor parses the YAML and builds a
+ * key/value table). Given the raw YAML text and a container, it renders display
+ * DOM and returns an optional cleanup handle. Editing happens elsewhere (source
+ * view); the rendered view is read-only.
+ */
+interface FrontmatterViewFactory {
+    render(container: HTMLElement, raw: string): {
+        destroy(): void;
+    } | void;
+}
+/**
  * Platform behavior parameters (carries the editor-props-plugin DI from §F2.6).
  * Desktop injects Tauri / OS truth; Web uses browser detection; mobile bridges fill.
  */
@@ -114,4 +126,4 @@ interface NullMediaResolver extends MediaResolver {
 }
 declare function isNullMediaResolver(r: MediaResolver): r is NullMediaResolver;
 
-export { type LinkOpener, type MediaResolver, NULL_MEDIA_RESOLVER_SENTINEL, type NullMediaResolver, type Platform, type RendererPluginModule, type RendererRegistry, type SchemaConfig, type SpreadsheetViewFactory, isNullMediaResolver };
+export { type FrontmatterViewFactory, type LinkOpener, type MediaResolver, NULL_MEDIA_RESOLVER_SENTINEL, type NullMediaResolver, type Platform, type RendererPluginModule, type RendererRegistry, type SchemaConfig, type SpreadsheetViewFactory, isNullMediaResolver };
