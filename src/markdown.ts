@@ -183,6 +183,59 @@ function preserveBlankLines(tokens: InlineToken[]): InlineToken[] {
   return result
 }
 
+// ── Frontmatter block rule ──────────────────────────────────────
+// markdown-it has no native frontmatter support, so a leading `---\n…\n---`
+// gets shredded into hr + paragraphs + a trailing setext heading, collapsing
+// the YAML newlines. Capture it up-front as a single `front_matter` token whose
+// raw text (newlines intact) maps to the schema's `frontmatter` node.
+//
+// Runs before every other block rule and only fires on line 0, so it never
+// steals a `---` horizontal rule that appears later in the document.
+md.block.ruler.before(
+  'table',
+  'front_matter',
+  (state, startLine, endLine, silent): boolean => {
+    // Only valid as the very first block of the document.
+    if (startLine !== 0 || state.blkIndent !== 0 || state.tShift[startLine] !== 0) return false
+
+    const openStart = state.bMarks[startLine]
+    const openMax = state.eMarks[startLine]
+    // Opening fence must be exactly `---` on line 0.
+    if (state.src.slice(openStart, openMax) !== '---') return false
+
+    // Scan for the closing `---` line.
+    let nextLine = startLine
+    let closed = false
+    for (;;) {
+      nextLine++
+      if (nextLine >= endLine) break
+      const lineStart = state.bMarks[nextLine]
+      const lineMax = state.eMarks[nextLine]
+      if (state.src.slice(lineStart, lineMax) === '---') { closed = true; break }
+    }
+    // Unterminated block → not frontmatter; let the default rules handle it.
+    if (!closed) return false
+
+    if (silent) return true
+
+    // Raw YAML between the fences (exclusive of both `---` lines), newlines
+    // preserved. Ends with the trailing `\n` before the closing fence, which
+    // prosemirror-markdown's `withoutTrailingNewline` strips back off.
+    const contentStart = state.bMarks[startLine + 1]
+    const contentEnd = state.bMarks[nextLine]
+
+    const token = state.push('front_matter', '', 0)
+    token.markup = '---'
+    token.block = true
+    token.map = [startLine, nextLine + 1]
+    token.content = state.src.slice(contentStart, contentEnd)
+
+    state.line = nextLine + 1
+    return true
+  },
+  { alt: [] },
+)
+
 // Patch md.parse to inject paired-tag pre-processing and blank-line preservation
 // before prosemirror-markdown processes the tokens.
 const _origMdParse = md.parse.bind(md)
@@ -264,6 +317,10 @@ const parserTokens: Record<string, import('prosemirror-markdown').ParseSpec> = {
     getAttrs(token) {
       return { language: token.info.trim() || 'text' }
     },
+    noCloseToken: true,
+  },
+  front_matter: {
+    block: 'frontmatter',
     noCloseToken: true,
   },
   html_block: {
@@ -667,6 +724,13 @@ const serializer = new MarkdownSerializer(
       if (src) state.text(src, false)
       state.ensureNewLine()
       state.write('```')
+      state.closeBlock(node)
+    },
+    frontmatter(state, node) {
+      state.write('---\n')
+      state.text(node.textContent, false)
+      state.ensureNewLine()
+      state.write('---')
       state.closeBlock(node)
     },
     horizontal_rule(state, node) {

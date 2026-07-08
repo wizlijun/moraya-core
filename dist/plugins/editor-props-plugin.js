@@ -354,6 +354,18 @@ var code_block = {
     return ["pre", { "data-language": node.attrs.language || void 0 }, ["code", 0]];
   }
 };
+var frontmatter = {
+  content: "text*",
+  group: "block",
+  marks: "",
+  defining: true,
+  code: true,
+  isolating: true,
+  parseDOM: [{ tag: "pre.moraya-frontmatter", preserveWhitespace: "full" }],
+  toDOM() {
+    return ["pre", { class: "moraya-frontmatter", "data-frontmatter": "true" }, ["code", 0]];
+  }
+};
 var horizontal_rule = {
   group: "block",
   parseDOM: [{ tag: "hr" }],
@@ -907,6 +919,7 @@ function buildNodes(mediaResolver) {
     heading,
     blockquote,
     code_block,
+    frontmatter,
     horizontal_rule,
     bullet_list,
     ordered_list,
@@ -1062,6 +1075,40 @@ function preserveBlankLines(tokens) {
   }
   return result;
 }
+md.block.ruler.before(
+  "table",
+  "front_matter",
+  (state, startLine, endLine, silent) => {
+    if (startLine !== 0 || state.blkIndent !== 0 || state.tShift[startLine] !== 0) return false;
+    const openStart = state.bMarks[startLine];
+    const openMax = state.eMarks[startLine];
+    if (state.src.slice(openStart, openMax) !== "---") return false;
+    let nextLine = startLine;
+    let closed = false;
+    for (; ; ) {
+      nextLine++;
+      if (nextLine >= endLine) break;
+      const lineStart = state.bMarks[nextLine];
+      const lineMax = state.eMarks[nextLine];
+      if (state.src.slice(lineStart, lineMax) === "---") {
+        closed = true;
+        break;
+      }
+    }
+    if (!closed) return false;
+    if (silent) return true;
+    const contentStart = state.bMarks[startLine + 1];
+    const contentEnd = state.bMarks[nextLine];
+    const token = state.push("front_matter", "", 0);
+    token.markup = "---";
+    token.block = true;
+    token.map = [startLine, nextLine + 1];
+    token.content = state.src.slice(contentStart, contentEnd);
+    state.line = nextLine + 1;
+    return true;
+  },
+  { alt: [] }
+);
 var _origMdParse = md.parse.bind(md);
 md.parse = function(src, env) {
   let tokens = _origMdParse(src, env);
@@ -1129,6 +1176,10 @@ var parserTokens = {
     getAttrs(token) {
       return { language: token.info.trim() || "text" };
     },
+    noCloseToken: true
+  },
+  front_matter: {
+    block: "frontmatter",
     noCloseToken: true
   },
   html_block: {
@@ -1449,6 +1500,13 @@ var serializer = new MarkdownSerializer(
       if (src) state.text(src, false);
       state.ensureNewLine();
       state.write("```");
+      state.closeBlock(node);
+    },
+    frontmatter(state, node) {
+      state.write("---\n");
+      state.text(node.textContent, false);
+      state.ensureNewLine();
+      state.write("---");
       state.closeBlock(node);
     },
     horizontal_rule(state, node) {

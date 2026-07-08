@@ -251,6 +251,18 @@ var code_block = {
     return ["pre", { "data-language": node.attrs.language || void 0 }, ["code", 0]];
   }
 };
+var frontmatter = {
+  content: "text*",
+  group: "block",
+  marks: "",
+  defining: true,
+  code: true,
+  isolating: true,
+  parseDOM: [{ tag: "pre.moraya-frontmatter", preserveWhitespace: "full" }],
+  toDOM() {
+    return ["pre", { class: "moraya-frontmatter", "data-frontmatter": "true" }, ["code", 0]];
+  }
+};
 var horizontal_rule = {
   group: "block",
   parseDOM: [{ tag: "hr" }],
@@ -804,6 +816,7 @@ function buildNodes(mediaResolver) {
     heading,
     blockquote,
     code_block,
+    frontmatter,
     horizontal_rule,
     bullet_list,
     ordered_list,

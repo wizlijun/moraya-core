@@ -13,8 +13,8 @@
  *   - Per §6.1.1: this module does NOT export the default schema. It is
  *     used internally by parseMarkdown / serializeMarkdown only.
  *
- * Nodes (23): doc, text, paragraph, heading, blockquote, code_block,
- *   horizontal_rule, bullet_list, ordered_list, list_item, image,
+ * Nodes (24): doc, text, paragraph, heading, blockquote, code_block,
+ *   frontmatter, horizontal_rule, bullet_list, ordered_list, list_item, image,
  *   hardbreak, html_block, html_inline, table, table_header_row, table_row,
  *   table_header, table_cell, math_inline, math_block,
  *   defList, defListTerm, defListDescription
@@ -336,6 +336,19 @@ const code_block: NodeSpec = {
   }],
   toDOM(node) {
     return ['pre', { 'data-language': (node.attrs.language as string) || undefined }, ['code', 0]]
+  },
+}
+
+const frontmatter: NodeSpec = {
+  content: 'text*',
+  group: 'block',
+  marks: '',
+  defining: true,
+  code: true,
+  isolating: true,
+  parseDOM: [{ tag: 'pre.moraya-frontmatter', preserveWhitespace: 'full' as const }],
+  toDOM() {
+    return ['pre', { class: 'moraya-frontmatter', 'data-frontmatter': 'true' }, ['code', 0]]
   },
 }
 
@@ -934,6 +947,7 @@ function buildNodes(mediaResolver: MediaResolver): Record<string, NodeSpec> {
     heading,
     blockquote,
     code_block,
+    frontmatter,
     horizontal_rule,
     bullet_list,
     ordered_list,

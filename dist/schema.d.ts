@@ -17,8 +17,8 @@ import { SchemaConfig } from './types.js';
  *   - Per §6.1.1: this module does NOT export the default schema. It is
  *     used internally by parseMarkdown / serializeMarkdown only.
  *
- * Nodes (23): doc, text, paragraph, heading, blockquote, code_block,
- *   horizontal_rule, bullet_list, ordered_list, list_item, image,
+ * Nodes (24): doc, text, paragraph, heading, blockquote, code_block,
+ *   frontmatter, horizontal_rule, bullet_list, ordered_list, list_item, image,
  *   hardbreak, html_block, html_inline, table, table_header_row, table_row,
  *   table_header, table_cell, math_inline, math_block,
  *   defList, defListTerm, defListDescription
