@@ -950,14 +950,35 @@ export async function createEditor(opts: CreateEditorOptions): Promise<MorayaEdi
 
   const fmFactory = opts.frontmatterViewFactory
   if (fmFactory && schema.nodes.frontmatter) {
-    nodeViews.frontmatter = (node: import('prosemirror-model').Node) => {
+    nodeViews.frontmatter = (
+      node: import('prosemirror-model').Node,
+      view: import('prosemirror-view').EditorView,
+      getPos: () => number | undefined,
+    ) => {
       const dom = document.createElement('div')
       dom.className = 'frontmatter-node-view'
-      // Read-only rendered view. Keep the outer contenteditable from treating
-      // the parsed table as its editable region (same rationale as spreadsheet).
+      // The outer container is non-editable; the consumer view may mark
+      // individual cells contentEditable for value editing (same isolation
+      // rationale as the spreadsheet NodeView).
       dom.contentEditable = 'false'
       let lastRaw = node.textContent
-      let inst = fmFactory.render(dom, lastRaw)
+
+      // Write edited YAML back into the frontmatter node's text content.
+      const onChange = (newRaw: string) => {
+        const pos = getPos()
+        if (pos == null) return
+        const cur = view.state.doc.nodeAt(pos)
+        if (!cur || cur.type.name !== 'frontmatter') return
+        if (newRaw === cur.textContent) return
+        const from = pos + 1
+        const to = pos + cur.nodeSize - 1
+        const tr = newRaw
+          ? view.state.tr.replaceWith(from, to, view.state.schema.text(newRaw))
+          : view.state.tr.delete(from, to)
+        view.dispatch(tr)
+      }
+
+      let inst = fmFactory.render(dom, lastRaw, onChange)
 
       return {
         dom,
@@ -969,7 +990,7 @@ export async function createEditor(opts: CreateEditorOptions): Promise<MorayaEdi
           lastRaw = raw
           inst?.destroy?.()
           dom.replaceChildren()
-          inst = fmFactory.render(dom, raw)
+          inst = fmFactory.render(dom, raw, onChange)
           return true
         },
         stopEvent() { return true },

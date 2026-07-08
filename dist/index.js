@@ -4840,12 +4840,23 @@ async function createEditor(opts) {
   }
   const fmFactory = opts.frontmatterViewFactory;
   if (fmFactory && schema2.nodes.frontmatter) {
-    nodeViews.frontmatter = (node) => {
+    nodeViews.frontmatter = (node, view2, getPos) => {
       const dom = document.createElement("div");
       dom.className = "frontmatter-node-view";
       dom.contentEditable = "false";
       let lastRaw = node.textContent;
-      let inst = fmFactory.render(dom, lastRaw);
+      const onChange = (newRaw) => {
+        const pos = getPos();
+        if (pos == null) return;
+        const cur = view2.state.doc.nodeAt(pos);
+        if (!cur || cur.type.name !== "frontmatter") return;
+        if (newRaw === cur.textContent) return;
+        const from = pos + 1;
+        const to = pos + cur.nodeSize - 1;
+        const tr = newRaw ? view2.state.tr.replaceWith(from, to, view2.state.schema.text(newRaw)) : view2.state.tr.delete(from, to);
+        view2.dispatch(tr);
+      };
+      let inst = fmFactory.render(dom, lastRaw, onChange);
       return {
         dom,
         destroy() {
@@ -4858,7 +4869,7 @@ async function createEditor(opts) {
           lastRaw = raw;
           inst?.destroy?.();
           dom.replaceChildren();
-          inst = fmFactory.render(dom, raw);
+          inst = fmFactory.render(dom, raw, onChange);
           return true;
         },
         stopEvent() {

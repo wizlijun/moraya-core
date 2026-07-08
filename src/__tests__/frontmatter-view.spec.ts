@@ -11,9 +11,12 @@ import type { FrontmatterViewFactory } from '../types'
 const DOC = `---\ntitle: Hello\ntags:\n  - a\n  - b\n---\n\n# Body\n`
 
 // Minimal factory: render the raw YAML into a marked container so we can assert
-// the NodeView path fired.
+// the NodeView path fired. Stashes the latest onChange so a test can drive an
+// edit write-back.
+let lastOnChange: ((newRaw: string) => void) | undefined
 const factory: FrontmatterViewFactory = {
-  render(container, raw) {
+  render(container, raw, onChange) {
+    lastOnChange = onChange
     const el = document.createElement('div')
     el.className = 'test-fm-render'
     el.textContent = raw
@@ -48,6 +51,19 @@ describe('frontmatterViewFactory', () => {
     const first = inst.view.state.doc.firstChild!
     expect(first.type.name).toBe('frontmatter')
     expect(first.textContent).toBe('title: Hello\ntags:\n  - a\n  - b')
+
+    inst.destroy(); container.remove()
+  })
+
+  test('onChange writes edited YAML back into the frontmatter node', async () => {
+    const { inst, container } = await mount(true)
+    expect(typeof lastOnChange).toBe('function')
+
+    lastOnChange!('title: Changed\ntags:\n  - a\n  - b')
+
+    const first = inst.view.state.doc.firstChild!
+    expect(first.type.name).toBe('frontmatter')
+    expect(first.textContent).toBe('title: Changed\ntags:\n  - a\n  - b')
 
     inst.destroy(); container.remove()
   })

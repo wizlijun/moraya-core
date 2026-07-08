@@ -95,14 +95,21 @@ export interface SpreadsheetViewFactory {
 }
 
 /**
- * Factory for rendering a read-only frontmatter view within a ProseMirror
- * NodeView. Implemented by consumers (mdeditor parses the YAML and builds a
- * key/value table). Given the raw YAML text and a container, it renders display
- * DOM and returns an optional cleanup handle. Editing happens elsewhere (source
- * view); the rendered view is read-only.
+ * Factory for rendering a frontmatter view within a ProseMirror NodeView.
+ * Implemented by consumers (mdeditor parses the YAML and builds a key/value
+ * table). Given the raw YAML text and a container, it renders display DOM and
+ * returns an optional cleanup handle.
+ *
+ * `onChange` lets the view write edited values back into the document: the
+ * NodeView replaces the frontmatter node's text with the new raw YAML. Views
+ * that are purely read-only can ignore it.
  */
 export interface FrontmatterViewFactory {
-  render(container: HTMLElement, raw: string): { destroy(): void } | void
+  render(
+    container: HTMLElement,
+    raw: string,
+    onChange?: (newRaw: string) => void
+  ): { destroy(): void } | void
 }
 
 /**
