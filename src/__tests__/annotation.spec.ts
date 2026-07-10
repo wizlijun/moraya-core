@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'vitest'
 import { createSchema } from '../schema'
 import { BrowserMediaResolver } from '../adapters/browser-media-resolver'
+import { parseMarkdown, serializeMarkdown } from '../markdown'
 
 const schema = createSchema({ mediaResolver: new BrowserMediaResolver() })
 
@@ -36,5 +37,56 @@ describe('note_anchor node — schema', () => {
     const dom = schema.nodes.note_anchor.spec.toDOM!(
       schema.nodes.note_anchor.create({ note: 'p' }))
     expect((dom as unknown[])[1]).toMatchObject({ 'data-note': 'p' })
+  })
+})
+
+describe('CriticMarkup — parsing', () => {
+  test('{==text==}{>>note<<} parses to annotation mark', () => {
+    const doc = parseMarkdown('a {==bc==}{>>my note<<} d\n')
+    let note = ''
+    let marked = ''
+    doc.descendants((node) => {
+      const m = node.marks.find((mk) => mk.type.name === 'annotation')
+      if (node.isText && m) { note = m.attrs.note as string; marked = node.text || '' }
+    })
+    expect(marked).toBe('bc')
+    expect(note).toBe('my note')
+  })
+
+  test('standalone {>>note<<} parses to note_anchor node', () => {
+    const doc = parseMarkdown('end{>>point note<<}\n')
+    let found: string | null = null
+    doc.descendants((node) => {
+      if (node.type.name === 'note_anchor') found = node.attrs.note as string
+    })
+    expect(found).toBe('point note')
+  })
+
+  test('inline formatting survives inside annotated text', () => {
+    const doc = parseMarkdown('{==has **bold** word==}{>>n<<}\n')
+    let boldAnnotated = false
+    doc.descendants((node) => {
+      if (node.isText && node.text === 'bold'
+          && node.marks.some((m) => m.type.name === 'strong')
+          && node.marks.some((m) => m.type.name === 'annotation')) boldAnnotated = true
+    })
+    expect(boldAnnotated).toBe(true)
+  })
+
+  test('unclosed marker stays literal text (fail open)', () => {
+    const doc = parseMarkdown('a {>>never closed\n')
+    let hasAnchor = false
+    doc.descendants((node) => { if (node.type.name === 'note_anchor') hasAnchor = true })
+    expect(hasAnchor).toBe(false)
+    expect(doc.textContent).toContain('{>>never closed')
+  })
+
+  test('empty note is allowed: {>><<}', () => {
+    const doc = parseMarkdown('x{>><<}\n')
+    let found: string | null = null
+    doc.descendants((node) => {
+      if (node.type.name === 'note_anchor') found = node.attrs.note as string
+    })
+    expect(found).toBe('')
   })
 })

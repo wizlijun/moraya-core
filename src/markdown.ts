@@ -70,6 +70,60 @@ md.inline.ruler.push('caret_highlight', (state, silent) => {
   return true
 })
 
+// ── CriticMarkup annotation rules ───────────────────────────────
+// {==text==}{>>note<<} → critic_anno_open / inline content / critic_anno_close
+// {>>note<<}           → critic_note (self-closing, nesting 0)
+// Registered as a plain push: markdown-it's text rule already breaks on `{`,
+// and the inner `==…==` never reaches markdown-it-mark because we tokenize
+// the slice between the delimiters directly.
+md.inline.ruler.push('critic_annotation', (state, silent) => {
+  const src = state.src
+  const start = state.pos
+  if (src.charCodeAt(start) !== 0x7B /* { */) return false
+
+  // Standalone point annotation: {>>note<<}
+  if (src.startsWith('{>>', start)) {
+    const close = src.indexOf('<<}', start + 3)
+    if (close < 0) return false
+    const note = src.slice(start + 3, close)
+    if (note.includes('\n')) return false
+    if (!silent) {
+      const tok = state.push('critic_note', '', 0)
+      tok.meta = { note }
+    }
+    state.pos = close + 3
+    return true
+  }
+
+  // Wrapped annotation: {==text==}{>>note<<} (segments must be adjacent)
+  if (!src.startsWith('{==', start)) return false
+  const hlClose = src.indexOf('==}{>>', start + 3)
+  if (hlClose < 0) return false
+  const text = src.slice(start + 3, hlClose)
+  if (!text || text.includes('\n')) return false
+  const noteStart = hlClose + 6
+  const noteClose = src.indexOf('<<}', noteStart)
+  if (noteClose < 0) return false
+  const note = src.slice(noteStart, noteClose)
+  if (note.includes('\n')) return false
+
+  if (!silent) {
+    const open = state.push('critic_anno_open', 'span', 1)
+    open.meta = { note }
+    // Recursively tokenize the wrapped text so **bold** etc. still work.
+    const oldPos = state.pos
+    const oldMax = state.posMax
+    state.pos = start + 3
+    state.posMax = hlClose
+    state.md.inline.tokenize(state)
+    state.pos = oldPos
+    state.posMax = oldMax
+    state.push('critic_anno_close', 'span', -1)
+  }
+  state.pos = noteClose + 3
+  return true
+})
+
 // ── Paired HTML tag pre-processing ──────────────────────────────
 
 interface InlineToken {
@@ -417,6 +471,14 @@ const parserTokens: Record<string, import('prosemirror-markdown').ParseSpec> = {
   },
   mark: { mark: 'highlight', attrs: { delimiter: 'equals' } },
   caret_highlight: { mark: 'highlight', attrs: { delimiter: 'caret' } },
+  critic_anno: {
+    mark: 'annotation',
+    getAttrs: (tok) => ({ note: ((tok.meta as { note?: string } | null)?.note) ?? '' }),
+  },
+  critic_note: {
+    node: 'note_anchor',
+    getAttrs: (tok) => ({ note: ((tok.meta as { note?: string } | null)?.note) ?? '' }),
+  },
 }
 
 /**
