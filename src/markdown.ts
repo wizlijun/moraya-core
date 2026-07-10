@@ -837,6 +837,9 @@ const serializer = new MarkdownSerializer(
       // Write the raw HTML back verbatim (no escaping); value attr holds the original HTML.
       state.text(node.attrs.value as string, false)
     },
+    note_anchor(state, node) {
+      state.write(`{>>${sanitizeNote(node.attrs.note as string)}<<}`)
+    },
 
     // ── Table nodes ──
     table(state, node) {
@@ -969,6 +972,16 @@ const serializer = new MarkdownSerializer(
         return mark.attrs.closeTag as string
       },
     },
+    annotation: {
+      open: '{==',
+      close(_state: MarkdownSerializerState, mark: Mark) {
+        return `==}{>>${sanitizeNote(mark.attrs.note as string)}<<}`
+      },
+      // mixable so inner marks (**bold** etc.) don't split the annotation
+      // into multiple {==…==}{>>…<<} fragments.
+      mixable: true,
+      expelEnclosingWhitespace: true,
+    },
   },
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ({
@@ -1016,6 +1029,14 @@ function renderTableRow(state: MarkdownSerializerState, row: PmNode) {
   })
   state.write(`| ${cells.join(' | ')} |`)
   state.ensureNewLine()
+}
+
+/**
+ * Clean a note string so it cannot break out of its CriticMarkup container:
+ * newlines would end the inline run, and a literal `<<}` would close it early.
+ */
+function sanitizeNote(s: string): string {
+  return s.replace(/\r?\n/g, ' ').replace(/<<\}/g, '< <}')
 }
 
 /**

@@ -90,3 +90,33 @@ describe('CriticMarkup — parsing', () => {
     expect(found).toBe('')
   })
 })
+
+describe('CriticMarkup — serialization / round-trip', () => {
+  // serializeMarkdown emits no trailing newline — compare trimmed.
+  test('wrapped annotation round-trips exactly', () => {
+    const md = 'a {==bc==}{>>my note<<} d'
+    expect(serializeMarkdown(parseMarkdown(md))).toBe(md)
+  })
+
+  test('point annotation round-trips exactly', () => {
+    const md = 'end{>>point note<<}'
+    expect(serializeMarkdown(parseMarkdown(md))).toBe(md)
+  })
+
+  test('inline bold inside annotation round-trips', () => {
+    const md = '{==has **bold** word==}{>>n<<}'
+    expect(serializeMarkdown(parseMarkdown(md))).toBe(md)
+  })
+
+  test('note text is sanitized on serialize (newline / <<} guard)', () => {
+    // Build a doc with a hostile note via the node API and serialize it.
+    const hostile = schema.nodes.doc.create(null, [
+      schema.nodes.paragraph.create(null, [
+        schema.text('x'),
+        schema.nodes.note_anchor.create({ note: 'line1\nline2 <<} end' }),
+      ]),
+    ])
+    const out = serializeMarkdown(hostile)
+    expect(out).toContain('{>>line1 line2 < <} end<<}')
+  })
+})
