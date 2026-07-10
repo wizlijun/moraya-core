@@ -17,9 +17,10 @@
  *   frontmatter, horizontal_rule, bullet_list, ordered_list, list_item, image,
  *   hardbreak, html_block, html_inline, table, table_header_row, table_row,
  *   table_header, table_cell, math_inline, math_block,
- *   defList, defListTerm, defListDescription
+ *   defList, defListTerm, defListDescription, note_anchor
  *
- * Marks (7): html_mark, strong, em, code, link, strike_through, highlight
+ * Marks (8): html_mark, strong, em, code, link, strike_through, highlight,
+ *   annotation
  */
 
 import { Schema, Fragment } from 'prosemirror-model'
@@ -576,6 +577,29 @@ const spreadsheet: NodeSpec = {
   },
 }
 
+// ── CriticMarkup point annotation: {>>note<<} ───────────────────
+// An inline atom carrying the note text in an attr — the note never
+// enters the document text flow, so hiding/editing it is trivial.
+const note_anchor: NodeSpec = {
+  group: 'inline',
+  inline: true,
+  atom: true,
+  selectable: true,
+  attrs: { note: { default: '' } },
+  parseDOM: [{
+    tag: 'span[data-note-anchor]',
+    getAttrs(dom: HTMLElement) { return { note: dom.dataset.note ?? '' } },
+  }],
+  toDOM(node) {
+    return ['span', {
+      'data-note-anchor': '',
+      'data-note': node.attrs.note as string,
+      class: 'moraya-note-anchor',
+      contenteditable: 'false',
+    }]
+  },
+}
+
 // ── Math NodeSpecs (KaTeX) ──────────────────────────────────────
 
 const math_inline: NodeSpec = {
@@ -763,6 +787,24 @@ const highlight: MarkSpec = {
     return d === 'equals'
       ? ['mark', { 'data-delimiter': 'equals' }, 0]
       : ['mark', 0]
+  },
+}
+
+// ── CriticMarkup wrapped annotation: {==text==}{>>note<<} ──────
+// The note lives in the mark attr; serializer re-emits CriticMarkup.
+const annotation: MarkSpec = {
+  attrs: { note: { default: '' } },
+  inclusive: false,
+  parseDOM: [{
+    tag: 'span[data-annotation]',
+    getAttrs(dom: HTMLElement) { return { note: dom.dataset.note ?? '' } },
+  }],
+  toDOM(mark) {
+    return ['span', {
+      'data-annotation': '',
+      'data-note': mark.attrs.note as string,
+      class: 'moraya-annotation',
+    }, 0]
   },
 }
 
@@ -967,6 +1009,7 @@ function buildNodes(mediaResolver: MediaResolver): Record<string, NodeSpec> {
     defList,
     defListTerm,
     defListDescription,
+    note_anchor,
   }
 }
 
@@ -978,6 +1021,7 @@ const marks: Record<string, MarkSpec> = {
   link,
   strike_through,
   highlight,
+  annotation,
 }
 
 // ── Internal default schema (parser/serializer fallback) ────────
