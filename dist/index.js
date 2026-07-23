@@ -452,14 +452,18 @@ function installThemeObserver() {
   if (themeObserverInstalled) return;
   themeObserverInstalled = true;
   if (typeof document === "undefined" || typeof MutationObserver === "undefined") return;
-  const observer = new MutationObserver(() => {
+  const notifyThemeChange = () => {
     if (mermaidApi) mermaidApi.updateMermaidTheme();
     for (const cb of mermaidReRenderCallbacks) cb();
-  });
+  };
+  const observer = new MutationObserver(notifyThemeChange);
   observer.observe(document.documentElement, {
     attributes: true,
     attributeFilter: ["data-theme"]
   });
+  if (typeof window !== "undefined" && window.matchMedia) {
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", notifyThemeChange);
+  }
 }
 function buildLanguageLists(registry) {
   const rendererLangIds = registry ? new Set(Object.keys(registry.versions)) : /* @__PURE__ */ new Set();
@@ -668,16 +672,71 @@ function escapeText(str) {
   d.textContent = str;
   return d.innerHTML;
 }
+function markCopied(btn) {
+  btn.classList.add("copied");
+  btn.title = "Copied!";
+  setTimeout(() => {
+    btn.classList.remove("copied");
+    btn.title = "Copy";
+  }, 1500);
+}
 function handleCopy(btn, codeEl) {
   const text2 = codeEl.textContent || "";
-  navigator.clipboard.writeText(text2).then(() => {
-    btn.classList.add("copied");
-    btn.title = "Copied!";
-    setTimeout(() => {
-      btn.classList.remove("copied");
-      btn.title = "Copy";
-    }, 1500);
+  navigator.clipboard.writeText(text2).then(() => markCopied(btn));
+}
+function resolveBackground(el) {
+  const bg = getComputedStyle(el).backgroundColor;
+  if (!bg || bg === "transparent" || /rgba?\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)/.test(bg)) {
+    return "#ffffff";
+  }
+  return bg;
+}
+async function svgToPngBlob(svg, background) {
+  const scale = 2;
+  let w = 0;
+  let h = 0;
+  const vb = svg.viewBox?.baseVal;
+  if (vb && vb.width > 0 && vb.height > 0) {
+    w = vb.width;
+    h = vb.height;
+  } else {
+    const rect = svg.getBoundingClientRect();
+    w = rect.width;
+    h = rect.height;
+  }
+  if (!(w > 0 && h > 0)) throw new Error("svg has no measurable size");
+  const clone = svg.cloneNode(true);
+  if (!clone.getAttribute("xmlns")) clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  const svgStr = new XMLSerializer().serializeToString(clone);
+  const src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svgStr);
+  const img = new Image();
+  await new Promise((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error("svg image load failed"));
+    img.src = src;
   });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(w * scale));
+  canvas.height = Math.max(1, Math.round(h * scale));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("no 2d context");
+  ctx.scale(scale, scale);
+  ctx.fillStyle = background;
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(img, 0, 0, w, h);
+  return await new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("toBlob returned null")), "image/png");
+  });
+}
+function copyPreviewAsImage(btn, preview, codeEl) {
+  const svg = preview.querySelector("svg");
+  const canWriteImage = typeof ClipboardItem !== "undefined" && !!navigator.clipboard && typeof navigator.clipboard.write === "function";
+  if (!svg || !canWriteImage) {
+    handleCopy(btn, codeEl);
+    return;
+  }
+  const blobPromise = svgToPngBlob(svg, resolveBackground(preview));
+  navigator.clipboard.write([new ClipboardItem({ "image/png": blobPromise })]).then(() => markCopied(btn)).catch(() => handleCopy(btn, codeEl));
 }
 function createCodeBlockNodeViewFactory(opts = {}) {
   const { rendererRegistry } = opts;
@@ -894,7 +953,13 @@ function createCodeBlockNodeViewFactory(opts = {}) {
     copyBtn.addEventListener("mousedown", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      handleCopy(copyBtn, code2);
+      if (isMermaid && !isEditing) {
+        copyPreviewAsImage(copyBtn, mermaidPreview, code2);
+      } else if (isRenderer && !rendererEditing) {
+        copyPreviewAsImage(copyBtn, rendererPreview, code2);
+      } else {
+        handleCopy(copyBtn, code2);
+      }
     });
     return {
       dom: wrapper,
@@ -1514,6 +1579,27 @@ var spreadsheet = {
     return ["div", { "data-spreadsheet": "", "data-source": node.attrs.source }];
   }
 };
+var note_anchor = {
+  group: "inline",
+  inline: true,
+  atom: true,
+  selectable: true,
+  attrs: { note: { default: "" } },
+  parseDOM: [{
+    tag: "span[data-note-anchor]",
+    getAttrs(dom) {
+      return { note: dom.dataset.note ?? "" };
+    }
+  }],
+  toDOM(node) {
+    return ["span", {
+      "data-note-anchor": "",
+      "data-note": node.attrs.note,
+      class: "moraya-note-anchor",
+      contenteditable: "false"
+    }];
+  }
+};
 var math_inline = {
   group: "inline",
   content: "text*",
@@ -1698,6 +1784,23 @@ var highlight = {
     return d === "equals" ? ["mark", { "data-delimiter": "equals" }, 0] : ["mark", 0];
   }
 };
+var annotation = {
+  attrs: { note: { default: "" } },
+  inclusive: false,
+  parseDOM: [{
+    tag: "span[data-annotation]",
+    getAttrs(dom) {
+      return { note: dom.dataset.note ?? "" };
+    }
+  }],
+  toDOM(mark) {
+    return ["span", {
+      "data-annotation": "",
+      "data-note": mark.attrs.note,
+      class: "moraya-annotation"
+    }, 0];
+  }
+};
 var html_mark = {
   attrs: {
     openTag: { default: "" },
@@ -1867,7 +1970,8 @@ function buildNodes(mediaResolver) {
     math_block,
     defList,
     defListTerm,
-    defListDescription
+    defListDescription,
+    note_anchor
   };
 }
 var marks = {
@@ -1877,7 +1981,8 @@ var marks = {
   code,
   link,
   strike_through,
-  highlight
+  highlight,
+  annotation
 };
 var nullMediaResolver = {
   [NULL_MEDIA_RESOLVER_SENTINEL]: true,
@@ -2050,6 +2155,47 @@ md.inline.ruler.push("caret_highlight", (state, silent) => {
     state.push("caret_highlight_close", "mark", -1).markup = "^^";
   }
   state.pos = closeIdx + 2;
+  return true;
+});
+md.inline.ruler.push("critic_annotation", (state, silent) => {
+  const src = state.src;
+  const start = state.pos;
+  if (src.charCodeAt(start) !== 123) return false;
+  if (src.startsWith("{>>", start)) {
+    const close = src.indexOf("<<}", start + 3);
+    if (close < 0) return false;
+    const note2 = src.slice(start + 3, close);
+    if (note2.includes("\n")) return false;
+    if (!silent) {
+      const tok = state.push("critic_note", "", 0);
+      tok.meta = { note: note2 };
+    }
+    state.pos = close + 3;
+    return true;
+  }
+  if (!src.startsWith("{==", start)) return false;
+  const hlClose = src.indexOf("==}{>>", start + 3);
+  if (hlClose < 0) return false;
+  const text2 = src.slice(start + 3, hlClose);
+  if (!text2 || text2.includes("\n")) return false;
+  const noteStart = hlClose + 6;
+  const noteClose = src.indexOf("<<}", noteStart);
+  if (noteClose < 0) return false;
+  const note = src.slice(noteStart, noteClose);
+  if (note.includes("\n")) return false;
+  if (!silent) {
+    const open = state.push("critic_anno_open", "span", 1);
+    open.meta = { note };
+    const oldPos = state.pos;
+    const oldMax = state.posMax;
+    state.pos = start + 3;
+    state.posMax = hlClose;
+    state.md.inline.tokenize(state);
+    state.pos = oldPos;
+    state.posMax = oldMax;
+    state.push("critic_anno_close", "span", -1);
+  }
+  state.pos = noteClose + 3;
   return true;
 });
 function tagPairedHtmlInline(tokens) {
@@ -2328,7 +2474,15 @@ var parserTokens = {
     }
   },
   mark: { mark: "highlight", attrs: { delimiter: "equals" } },
-  caret_highlight: { mark: "highlight", attrs: { delimiter: "caret" } }
+  caret_highlight: { mark: "highlight", attrs: { delimiter: "caret" } },
+  critic_anno: {
+    mark: "annotation",
+    getAttrs: (tok) => ({ note: tok.meta?.note ?? "" })
+  },
+  critic_note: {
+    node: "note_anchor",
+    getAttrs: (tok) => ({ note: tok.meta?.note ?? "" })
+  }
 };
 var MorayaMarkdownParser = class extends MarkdownParser {
   /**
@@ -2603,6 +2757,9 @@ var serializer = new MarkdownSerializer(
     html_inline(state, node) {
       state.text(node.attrs.value, false);
     },
+    note_anchor(state, node) {
+      state.write(`{>>${sanitizeNote(node.attrs.note)}<<}`);
+    },
     // ── Table nodes ──
     table(state, node) {
       const alignments = [];
@@ -2726,6 +2883,16 @@ var serializer = new MarkdownSerializer(
       close(_state, mark) {
         return mark.attrs.closeTag;
       }
+    },
+    annotation: {
+      open: "{==",
+      close(_state, mark) {
+        return `==}{>>${sanitizeNote(mark.attrs.note)}<<}`;
+      },
+      // mixable so inner marks (**bold** etc.) don't split the annotation
+      // into multiple {==…==}{>>…<<} fragments.
+      mixable: true,
+      expelEnclosingWhitespace: true
     }
   },
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2755,6 +2922,9 @@ function renderTableRow(state, row) {
   });
   state.write(`| ${cells.join(" | ")} |`);
   state.ensureNewLine();
+}
+function sanitizeNote(s) {
+  return s.replace(/\r?\n/g, " ").replace(/<<\}/g, "< <}");
 }
 function isPlainURL(mark, parent, index, side) {
   if (mark.attrs.title || !/^\w+:/.test(mark.attrs.href)) return false;

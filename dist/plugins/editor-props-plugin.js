@@ -585,6 +585,27 @@ var spreadsheet = {
     return ["div", { "data-spreadsheet": "", "data-source": node.attrs.source }];
   }
 };
+var note_anchor = {
+  group: "inline",
+  inline: true,
+  atom: true,
+  selectable: true,
+  attrs: { note: { default: "" } },
+  parseDOM: [{
+    tag: "span[data-note-anchor]",
+    getAttrs(dom) {
+      return { note: dom.dataset.note ?? "" };
+    }
+  }],
+  toDOM(node) {
+    return ["span", {
+      "data-note-anchor": "",
+      "data-note": node.attrs.note,
+      class: "moraya-note-anchor",
+      contenteditable: "false"
+    }];
+  }
+};
 var math_inline = {
   group: "inline",
   content: "text*",
@@ -769,6 +790,23 @@ var highlight = {
     return d === "equals" ? ["mark", { "data-delimiter": "equals" }, 0] : ["mark", 0];
   }
 };
+var annotation = {
+  attrs: { note: { default: "" } },
+  inclusive: false,
+  parseDOM: [{
+    tag: "span[data-annotation]",
+    getAttrs(dom) {
+      return { note: dom.dataset.note ?? "" };
+    }
+  }],
+  toDOM(mark) {
+    return ["span", {
+      "data-annotation": "",
+      "data-note": mark.attrs.note,
+      class: "moraya-annotation"
+    }, 0];
+  }
+};
 var html_mark = {
   attrs: {
     openTag: { default: "" },
@@ -938,7 +976,8 @@ function buildNodes(mediaResolver) {
     math_block,
     defList,
     defListTerm,
-    defListDescription
+    defListDescription,
+    note_anchor
   };
 }
 var marks = {
@@ -948,7 +987,8 @@ var marks = {
   code,
   link,
   strike_through,
-  highlight
+  highlight,
+  annotation
 };
 var nullMediaResolver = {
   [NULL_MEDIA_RESOLVER_SENTINEL]: true,
@@ -994,6 +1034,47 @@ md.inline.ruler.push("caret_highlight", (state, silent) => {
     state.push("caret_highlight_close", "mark", -1).markup = "^^";
   }
   state.pos = closeIdx + 2;
+  return true;
+});
+md.inline.ruler.push("critic_annotation", (state, silent) => {
+  const src = state.src;
+  const start = state.pos;
+  if (src.charCodeAt(start) !== 123) return false;
+  if (src.startsWith("{>>", start)) {
+    const close = src.indexOf("<<}", start + 3);
+    if (close < 0) return false;
+    const note2 = src.slice(start + 3, close);
+    if (note2.includes("\n")) return false;
+    if (!silent) {
+      const tok = state.push("critic_note", "", 0);
+      tok.meta = { note: note2 };
+    }
+    state.pos = close + 3;
+    return true;
+  }
+  if (!src.startsWith("{==", start)) return false;
+  const hlClose = src.indexOf("==}{>>", start + 3);
+  if (hlClose < 0) return false;
+  const text2 = src.slice(start + 3, hlClose);
+  if (!text2 || text2.includes("\n")) return false;
+  const noteStart = hlClose + 6;
+  const noteClose = src.indexOf("<<}", noteStart);
+  if (noteClose < 0) return false;
+  const note = src.slice(noteStart, noteClose);
+  if (note.includes("\n")) return false;
+  if (!silent) {
+    const open = state.push("critic_anno_open", "span", 1);
+    open.meta = { note };
+    const oldPos = state.pos;
+    const oldMax = state.posMax;
+    state.pos = start + 3;
+    state.posMax = hlClose;
+    state.md.inline.tokenize(state);
+    state.pos = oldPos;
+    state.posMax = oldMax;
+    state.push("critic_anno_close", "span", -1);
+  }
+  state.pos = noteClose + 3;
   return true;
 });
 function tagPairedHtmlInline(tokens) {
@@ -1272,7 +1353,15 @@ var parserTokens = {
     }
   },
   mark: { mark: "highlight", attrs: { delimiter: "equals" } },
-  caret_highlight: { mark: "highlight", attrs: { delimiter: "caret" } }
+  caret_highlight: { mark: "highlight", attrs: { delimiter: "caret" } },
+  critic_anno: {
+    mark: "annotation",
+    getAttrs: (tok) => ({ note: tok.meta?.note ?? "" })
+  },
+  critic_note: {
+    node: "note_anchor",
+    getAttrs: (tok) => ({ note: tok.meta?.note ?? "" })
+  }
 };
 var MorayaMarkdownParser = class extends MarkdownParser {
   /**
@@ -1547,6 +1636,9 @@ var serializer = new MarkdownSerializer(
     html_inline(state, node) {
       state.text(node.attrs.value, false);
     },
+    note_anchor(state, node) {
+      state.write(`{>>${sanitizeNote(node.attrs.note)}<<}`);
+    },
     // ── Table nodes ──
     table(state, node) {
       const alignments = [];
@@ -1670,6 +1762,16 @@ var serializer = new MarkdownSerializer(
       close(_state, mark) {
         return mark.attrs.closeTag;
       }
+    },
+    annotation: {
+      open: "{==",
+      close(_state, mark) {
+        return `==}{>>${sanitizeNote(mark.attrs.note)}<<}`;
+      },
+      // mixable so inner marks (**bold** etc.) don't split the annotation
+      // into multiple {==…==}{>>…<<} fragments.
+      mixable: true,
+      expelEnclosingWhitespace: true
     }
   },
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1699,6 +1801,9 @@ function renderTableRow(state, row) {
   });
   state.write(`| ${cells.join(" | ")} |`);
   state.ensureNewLine();
+}
+function sanitizeNote(s) {
+  return s.replace(/\r?\n/g, " ").replace(/<<\}/g, "< <}");
 }
 function isPlainURL(mark, parent, index, side) {
   if (mark.attrs.title || !/^\w+:/.test(mark.attrs.href)) return false;

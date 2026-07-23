@@ -113,14 +113,18 @@ function installThemeObserver() {
   if (themeObserverInstalled) return;
   themeObserverInstalled = true;
   if (typeof document === "undefined" || typeof MutationObserver === "undefined") return;
-  const observer = new MutationObserver(() => {
+  const notifyThemeChange = () => {
     if (mermaidApi) mermaidApi.updateMermaidTheme();
     for (const cb of mermaidReRenderCallbacks) cb();
-  });
+  };
+  const observer = new MutationObserver(notifyThemeChange);
   observer.observe(document.documentElement, {
     attributes: true,
     attributeFilter: ["data-theme"]
   });
+  if (typeof window !== "undefined" && window.matchMedia) {
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", notifyThemeChange);
+  }
 }
 var POPULAR_LANGUAGES = [
   { id: "javascript", label: "JavaScript", aliases: ["js"] },
@@ -379,16 +383,71 @@ function escapeText(str) {
   d.textContent = str;
   return d.innerHTML;
 }
+function markCopied(btn) {
+  btn.classList.add("copied");
+  btn.title = "Copied!";
+  setTimeout(() => {
+    btn.classList.remove("copied");
+    btn.title = "Copy";
+  }, 1500);
+}
 function handleCopy(btn, codeEl) {
   const text = codeEl.textContent || "";
-  navigator.clipboard.writeText(text).then(() => {
-    btn.classList.add("copied");
-    btn.title = "Copied!";
-    setTimeout(() => {
-      btn.classList.remove("copied");
-      btn.title = "Copy";
-    }, 1500);
+  navigator.clipboard.writeText(text).then(() => markCopied(btn));
+}
+function resolveBackground(el) {
+  const bg = getComputedStyle(el).backgroundColor;
+  if (!bg || bg === "transparent" || /rgba?\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)/.test(bg)) {
+    return "#ffffff";
+  }
+  return bg;
+}
+async function svgToPngBlob(svg, background) {
+  const scale = 2;
+  let w = 0;
+  let h = 0;
+  const vb = svg.viewBox?.baseVal;
+  if (vb && vb.width > 0 && vb.height > 0) {
+    w = vb.width;
+    h = vb.height;
+  } else {
+    const rect = svg.getBoundingClientRect();
+    w = rect.width;
+    h = rect.height;
+  }
+  if (!(w > 0 && h > 0)) throw new Error("svg has no measurable size");
+  const clone = svg.cloneNode(true);
+  if (!clone.getAttribute("xmlns")) clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  const svgStr = new XMLSerializer().serializeToString(clone);
+  const src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svgStr);
+  const img = new Image();
+  await new Promise((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error("svg image load failed"));
+    img.src = src;
   });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(w * scale));
+  canvas.height = Math.max(1, Math.round(h * scale));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("no 2d context");
+  ctx.scale(scale, scale);
+  ctx.fillStyle = background;
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(img, 0, 0, w, h);
+  return await new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("toBlob returned null")), "image/png");
+  });
+}
+function copyPreviewAsImage(btn, preview, codeEl) {
+  const svg = preview.querySelector("svg");
+  const canWriteImage = typeof ClipboardItem !== "undefined" && !!navigator.clipboard && typeof navigator.clipboard.write === "function";
+  if (!svg || !canWriteImage) {
+    handleCopy(btn, codeEl);
+    return;
+  }
+  const blobPromise = svgToPngBlob(svg, resolveBackground(preview));
+  navigator.clipboard.write([new ClipboardItem({ "image/png": blobPromise })]).then(() => markCopied(btn)).catch(() => handleCopy(btn, codeEl));
 }
 function createCodeBlockNodeViewFactory(opts = {}) {
   const { rendererRegistry } = opts;
@@ -605,7 +664,13 @@ function createCodeBlockNodeViewFactory(opts = {}) {
     copyBtn.addEventListener("mousedown", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      handleCopy(copyBtn, code);
+      if (isMermaid && !isEditing) {
+        copyPreviewAsImage(copyBtn, mermaidPreview, code);
+      } else if (isRenderer && !rendererEditing) {
+        copyPreviewAsImage(copyBtn, rendererPreview, code);
+      } else {
+        handleCopy(copyBtn, code);
+      }
     });
     return {
       dom: wrapper,

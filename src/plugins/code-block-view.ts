@@ -396,16 +396,94 @@ function escapeText(str: string): string {
 
 // ── Copy button helper ────────────────────────────
 
+function markCopied(btn: HTMLButtonElement) {
+  btn.classList.add('copied')
+  btn.title = 'Copied!'
+  setTimeout(() => {
+    btn.classList.remove('copied')
+    btn.title = 'Copy'
+  }, 1500)
+}
+
 function handleCopy(btn: HTMLButtonElement, codeEl: HTMLElement) {
   const text = codeEl.textContent || ''
-  navigator.clipboard.writeText(text).then(() => {
-    btn.classList.add('copied')
-    btn.title = 'Copied!'
-    setTimeout(() => {
-      btn.classList.remove('copied')
-      btn.title = 'Copy'
-    }, 1500)
+  navigator.clipboard.writeText(text).then(() => markCopied(btn))
+}
+
+/** Resolve a solid background for the PNG: the preview's own bg, or white when transparent. */
+function resolveBackground(el: HTMLElement): string {
+  const bg = getComputedStyle(el).backgroundColor
+  if (!bg || bg === 'transparent' || /rgba?\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)/.test(bg)) {
+    return '#ffffff'
+  }
+  return bg
+}
+
+/** Rasterize an <svg> to a PNG Blob at 2x scale on a solid background. */
+async function svgToPngBlob(svg: SVGSVGElement, background: string): Promise<Blob> {
+  const scale = 2
+  let w = 0
+  let h = 0
+  const vb = svg.viewBox?.baseVal
+  if (vb && vb.width > 0 && vb.height > 0) {
+    w = vb.width
+    h = vb.height
+  } else {
+    const rect = svg.getBoundingClientRect()
+    w = rect.width
+    h = rect.height
+  }
+  if (!(w > 0 && h > 0)) throw new Error('svg has no measurable size')
+
+  const clone = svg.cloneNode(true) as SVGSVGElement
+  if (!clone.getAttribute('xmlns')) clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+  const svgStr = new XMLSerializer().serializeToString(clone)
+  const src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgStr)
+
+  const img = new Image()
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve()
+    img.onerror = () => reject(new Error('svg image load failed'))
+    img.src = src
   })
+
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(w * scale))
+  canvas.height = Math.max(1, Math.round(h * scale))
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('no 2d context')
+  ctx.scale(scale, scale)
+  ctx.fillStyle = background
+  ctx.fillRect(0, 0, w, h)
+  ctx.drawImage(img, 0, 0, w, h)
+
+  return await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('toBlob returned null'))), 'image/png')
+  })
+}
+
+/**
+ * Copy the rendered SVG inside `preview` to the clipboard as a PNG image.
+ * Falls back to copying `codeEl` text when there is no SVG, the clipboard
+ * image API is unavailable, or rasterization/write fails (e.g. foreignObject).
+ */
+function copyPreviewAsImage(btn: HTMLButtonElement, preview: HTMLElement, codeEl: HTMLElement) {
+  const svg = preview.querySelector('svg') as SVGSVGElement | null
+  const canWriteImage =
+    typeof ClipboardItem !== 'undefined' &&
+    !!navigator.clipboard &&
+    typeof navigator.clipboard.write === 'function'
+  if (!svg || !canWriteImage) {
+    handleCopy(btn, codeEl)
+    return
+  }
+  // Build the ClipboardItem synchronously inside the user-gesture handler,
+  // deferring the async rasterization via a Promise (WebKit/Safari requirement).
+  const blobPromise = svgToPngBlob(svg, resolveBackground(preview))
+  navigator.clipboard
+    .write([new ClipboardItem({ 'image/png': blobPromise })])
+    .then(() => markCopied(btn))
+    .catch(() => handleCopy(btn, codeEl))
 }
 
 // ── NodeView Factory ──────────────────────────────
@@ -688,10 +766,18 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
     })
 
     // ── Copy button ──
+    // In a rendered preview (mermaid / renderer SVG) copy the image as PNG;
+    // in edit mode or a plain code block copy the source text.
     copyBtn.addEventListener('mousedown', (e) => {
       e.preventDefault()
       e.stopPropagation()
-      handleCopy(copyBtn, code)
+      if (isMermaid && !isEditing) {
+        copyPreviewAsImage(copyBtn, mermaidPreview, code)
+      } else if (isRenderer && !rendererEditing) {
+        copyPreviewAsImage(copyBtn, rendererPreview, code)
+      } else {
+        handleCopy(copyBtn, code)
+      }
     })
 
     return {

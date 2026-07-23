@@ -21,9 +21,10 @@ import { SchemaConfig } from './types.js';
  *   frontmatter, horizontal_rule, bullet_list, ordered_list, list_item, image,
  *   hardbreak, html_block, html_inline, table, table_header_row, table_row,
  *   table_header, table_cell, math_inline, math_block,
- *   defList, defListTerm, defListDescription
+ *   defList, defListTerm, defListDescription, note_anchor
  *
- * Marks (7): html_mark, strong, em, code, link, strike_through, highlight
+ * Marks (8): html_mark, strong, em, code, link, strike_through, highlight,
+ *   annotation
  */
 
 /** Update the base directory used to resolve relative image paths. */

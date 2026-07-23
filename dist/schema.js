@@ -482,6 +482,27 @@ var spreadsheet = {
     return ["div", { "data-spreadsheet": "", "data-source": node.attrs.source }];
   }
 };
+var note_anchor = {
+  group: "inline",
+  inline: true,
+  atom: true,
+  selectable: true,
+  attrs: { note: { default: "" } },
+  parseDOM: [{
+    tag: "span[data-note-anchor]",
+    getAttrs(dom) {
+      return { note: dom.dataset.note ?? "" };
+    }
+  }],
+  toDOM(node) {
+    return ["span", {
+      "data-note-anchor": "",
+      "data-note": node.attrs.note,
+      class: "moraya-note-anchor",
+      contenteditable: "false"
+    }];
+  }
+};
 var math_inline = {
   group: "inline",
   content: "text*",
@@ -666,6 +687,23 @@ var highlight = {
     return d === "equals" ? ["mark", { "data-delimiter": "equals" }, 0] : ["mark", 0];
   }
 };
+var annotation = {
+  attrs: { note: { default: "" } },
+  inclusive: false,
+  parseDOM: [{
+    tag: "span[data-annotation]",
+    getAttrs(dom) {
+      return { note: dom.dataset.note ?? "" };
+    }
+  }],
+  toDOM(mark) {
+    return ["span", {
+      "data-annotation": "",
+      "data-note": mark.attrs.note,
+      class: "moraya-annotation"
+    }, 0];
+  }
+};
 var html_mark = {
   attrs: {
     openTag: { default: "" },
@@ -835,7 +873,8 @@ function buildNodes(mediaResolver) {
     math_block,
     defList,
     defListTerm,
-    defListDescription
+    defListDescription,
+    note_anchor
   };
 }
 var marks = {
@@ -845,7 +884,8 @@ var marks = {
   code,
   link,
   strike_through,
-  highlight
+  highlight,
+  annotation
 };
 var nullMediaResolver = {
   [NULL_MEDIA_RESOLVER_SENTINEL]: true,
