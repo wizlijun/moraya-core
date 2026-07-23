@@ -50,14 +50,22 @@ function installThemeObserver() {
   if (themeObserverInstalled) return
   themeObserverInstalled = true
   if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') return
-  const observer = new MutationObserver(() => {
+  const notifyThemeChange = () => {
     if (mermaidApi) mermaidApi.updateMermaidTheme()
     for (const cb of mermaidReRenderCallbacks) cb()
-  })
+  }
+  const observer = new MutationObserver(notifyThemeChange)
   observer.observe(document.documentElement, {
     attributes: true,
     attributeFilter: ['data-theme'],
   })
+  // Hosts that follow the OS appearance may never mutate <html data-theme>
+  // (e.g. scope data-theme to the editor container and restyle via
+  // prefers-color-scheme media queries), so watch the system scheme too.
+  if (typeof window !== 'undefined' && window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: dark)')
+      .addEventListener('change', notifyThemeChange)
+  }
 }
 
 // ── Language registry ─────────────────────────────
