@@ -93,3 +93,45 @@ describe("inlineScope 'cursor' (default) — only the mark under the caret", () 
     view.destroy()
   })
 })
+
+/**
+ * A block-prefix widget (`# `, `> `) inside a still-empty textblock left the
+ * caret painting a line below the marker: the block then held only the widget
+ * plus ProseMirror's trailing <br>, and the widget filling line 1 made WebKit
+ * snap the end-of-block caret past that break. An empty paragraph escapes this
+ * because nothing precedes its <br>, so an empty block emits no prefix at all.
+ */
+describe('cursor-syntax block prefixes', () => {
+  const prefixes = (view: EditorView) =>
+    Array.from(view.dom.querySelectorAll('.syntax-md-prefix')).map((n) => n.textContent)
+
+  test('an empty heading shows no prefix widget', () => {
+    const view = mount('# ', 'line')
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 1)))
+    expect(prefixes(view)).toHaveLength(0)
+    // Same shape as an empty paragraph: nothing before the trailing break.
+    expect(view.dom.innerHTML).toContain('<h1><br class="ProseMirror-trailingBreak"></h1>')
+    view.destroy()
+  })
+
+  test('a heading with content still shows its prefix', () => {
+    const view = mount('# x', 'line')
+    caretBefore(view, 'x')
+    expect(prefixes(view)).toEqual(['# '])
+    view.destroy()
+  })
+
+  test('an empty blockquote paragraph shows no prefix widget', () => {
+    const view = mount('> ', 'line')
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 2)))
+    expect(prefixes(view)).toHaveLength(0)
+    view.destroy()
+  })
+
+  test('a blockquote with content still shows its prefix', () => {
+    const view = mount('> hi', 'line')
+    caretBefore(view, 'hi')
+    expect(prefixes(view)).toEqual(['> '])
+    view.destroy()
+  })
+})

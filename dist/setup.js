@@ -3362,7 +3362,8 @@ function buildDecorations(state, inlineScope) {
   const pos = $from.pos;
   const depth = $from.depth;
   const parent = $from.parent;
-  if (parent.type === state.schema.nodes.heading) {
+  const blockIsEmpty = parent.content.size === 0;
+  if (!blockIsEmpty && parent.type === state.schema.nodes.heading) {
     const level = parent.attrs.level;
     const prefix = HEADING_PREFIX[level] ?? "# ";
     const contentStart = $from.start(depth);
@@ -3373,7 +3374,7 @@ function buildDecorations(state, inlineScope) {
       })
     );
   }
-  for (let d = depth - 1; d >= 1; d--) {
+  for (let d = depth - 1; !blockIsEmpty && d >= 1; d--) {
     if ($from.node(d).type === state.schema.nodes.blockquote) {
       const contentStart = $from.start(depth);
       decorations.push(

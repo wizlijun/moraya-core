@@ -116,8 +116,16 @@ function buildDecorations(state: EditorState, inlineScope: InlineSyntaxScope): D
   const depth = $from.depth
   const parent = $from.parent
 
+  // A block-prefix widget inside an *empty* textblock mis-paints the caret: the
+  // block then holds only the widget plus ProseMirror's trailing <br>, and with
+  // the widget filling line 1 WebKit snaps the end-of-block caret past that
+  // break onto line 2 — typing `# ` left you writing a line below the marker.
+  // An empty paragraph escapes this only because nothing precedes its <br>, so
+  // hold the prefix back until the block has content and matches that shape.
+  const blockIsEmpty = parent.content.size === 0
+
   // 1. Block-level: heading prefix
-  if (parent.type === state.schema.nodes.heading) {
+  if (!blockIsEmpty && parent.type === state.schema.nodes.heading) {
     const level = parent.attrs.level as number
     const prefix = HEADING_PREFIX[level] ?? '# '
     const contentStart = $from.start(depth)
@@ -130,7 +138,7 @@ function buildDecorations(state: EditorState, inlineScope: InlineSyntaxScope): D
   }
 
   // 2. Block-level: blockquote prefix at start of current paragraph
-  for (let d = depth - 1; d >= 1; d--) {
+  for (let d = depth - 1; !blockIsEmpty && d >= 1; d--) {
     if ($from.node(d).type === state.schema.nodes.blockquote) {
       const contentStart = $from.start(depth)
       decorations.push(
