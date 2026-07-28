@@ -23,8 +23,8 @@ import { SchemaConfig } from './types.js';
  *   table_header, table_cell, math_inline, math_block,
  *   defList, defListTerm, defListDescription, note_anchor
  *
- * Marks (8): html_mark, strong, em, code, link, strike_through, highlight,
- *   annotation
+ * Marks (8), in nesting order (earlier = serialized further out):
+ *   html_mark, strong, em, annotation, code, link, strike_through, highlight
  */
 
 /** Update the base directory used to resolve relative image paths. */

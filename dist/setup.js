@@ -2006,11 +2006,11 @@ var marks = {
   html_mark,
   strong,
   em,
+  annotation,
   code,
   link,
   strike_through,
-  highlight,
-  annotation
+  highlight
 };
 var nullMediaResolver = {
   [NULL_MEDIA_RESOLVER_SENTINEL]: true,

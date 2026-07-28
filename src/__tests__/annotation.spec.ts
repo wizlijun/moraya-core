@@ -120,3 +120,32 @@ describe('CriticMarkup — serialization / round-trip', () => {
     expect(out).toContain('{>>line1 line2 < <} end<<}')
   })
 })
+
+describe('annotation over inline code', () => {
+  // 给行内代码加批注:序列化必须把 CriticMarkup 放在反引号**外面**。
+  // 放里面的话,代码段内一切按字面渲染 —— 批注既不显示徽标,重新解析时也整个消失。
+  test('annotated inline code round-trips (markup outside the backticks)', () => {
+    const md = '输入（{==`fixture`==}{>>这是什么意思？<<}）'
+    expect(serializeMarkdown(parseMarkdown(md))).toBe(md)
+  })
+
+  test('the annotation survives a save→reload cycle', () => {
+    const md = '{==`fixture`==}{>>why?<<}'
+    const once = serializeMarkdown(parseMarkdown(md))
+    const doc = parseMarkdown(once)
+    let noted: string | null = null
+    doc.descendants((n) => {
+      const m = n.marks.find((x) => x.type.name === 'annotation')
+      if (m) noted = m.attrs.note as string
+    })
+    expect(noted).toBe('why?')       // 修复前:批注被吞进 code 里,这里是 null
+  })
+
+  test('the code mark itself is preserved', () => {
+    const doc = parseMarkdown('{==`fixture`==}{>>why?<<}')
+    let marks: string[] = []
+    doc.descendants((n) => { if (n.isText) marks = n.marks.map((m) => m.type.name) })
+    expect(marks).toContain('code')
+    expect(marks).toContain('annotation')
+  })
+})

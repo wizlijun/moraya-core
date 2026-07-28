@@ -19,8 +19,8 @@
  *   table_header, table_cell, math_inline, math_block,
  *   defList, defListTerm, defListDescription, note_anchor
  *
- * Marks (8): html_mark, strong, em, code, link, strike_through, highlight,
- *   annotation
+ * Marks (8), in nesting order (earlier = serialized further out):
+ *   html_mark, strong, em, annotation, code, link, strike_through, highlight
  */
 
 import { Schema, Fragment } from 'prosemirror-model'
@@ -1013,15 +1013,19 @@ function buildNodes(mediaResolver: MediaResolver): Record<string, NodeSpec> {
   }
 }
 
+// 顺序即嵌套层级:靠前的 mark 序列化时在外层。
+// `annotation` 必须排在 `code` 之前 —— 否则给行内代码加批注时,CriticMarkup 会被写进
+// 反引号内部(`` `{==x==}{>>note<<}` ``),而代码段内一切按字面渲染:徽标不显示,重新
+// 解析时批注整个消失。放到外面(`` {==`x`==}{>>note<<} ``)两者都能正确 round-trip。
 const marks: Record<string, MarkSpec> = {
   html_mark,
   strong,
   em,
+  annotation,
   code,
   link,
   strike_through,
   highlight,
-  annotation,
 }
 
 // ── Internal default schema (parser/serializer fallback) ────────
