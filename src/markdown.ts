@@ -62,8 +62,18 @@ md.inline.ruler.push('caret_highlight', (state, silent) => {
 
   if (!silent) {
     state.push('caret_highlight_open', 'mark', 1).markup = '^^'
-    const token = state.push('text', '', 0)
-    token.content = state.src.slice(contentStart, closeIdx)
+    // Recursively tokenize the wrapped text (like the ==…== and {==…==} paths)
+    // so escapes (`\*`) are consumed and inner marks (`**bold**`) still work. A
+    // raw slice would keep backslash escapes as literal text, which the
+    // serializer then re-escapes every round-trip (^^\*\*^^ → ^^\\\*\\\*^^ → …),
+    // exploding on repeated save.
+    const oldPos = state.pos
+    const oldMax = state.posMax
+    state.pos = contentStart
+    state.posMax = closeIdx
+    state.md.inline.tokenize(state)
+    state.pos = oldPos
+    state.posMax = oldMax
     state.push('caret_highlight_close', 'mark', -1).markup = '^^'
   }
   state.pos = closeIdx + 2

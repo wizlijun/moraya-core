@@ -95,4 +95,38 @@ describe('highlight mark — serialization', () => {
     const md2 = serializeMarkdown(parseMarkdown(md1))
     expect(md2).toBe(md1)
   })
+
+  // Regression: the caret-highlight rule sliced its inner content in raw and
+  // pushed it as a single text token, so markdown escapes (\*) were never
+  // consumed. The serializer then re-escaped the leftover backslash every
+  // round-trip — ^^\*\*^^ → ^^\\\*\\\*^^ → … — exploding on repeated save.
+  // The inner content must be tokenized like ==…== / {==…==} so escapes are
+  // symmetric and the text stabilises.
+  test('^^ wrapping escaped asterisks is escape-symmetric and stable', () => {
+    // Literal asterisks inside a caret highlight arrive escaped (`\*`).
+    const doc = parseMarkdown('^^\\*\\*bar\\*\\*^^\n')
+    let marked = ''
+    doc.descendants((node) => {
+      if (node.isText && node.marks.some((m) => m.type.name === 'highlight')) marked = node.text || ''
+    })
+    // The backslash escapes are consumed: the model text is the literal `**bar**`.
+    expect(marked).toBe('**bar**')
+
+    let cur = '^^\\*\\*bar\\*\\*^^\n'
+    for (let i = 0; i < 4; i++) cur = serializeMarkdown(parseMarkdown(cur))
+    // No runaway backslashes.
+    expect(cur).not.toContain('\\\\')
+    // Fixed point reached after the first round-trip.
+    const once = serializeMarkdown(parseMarkdown('^^\\*\\*bar\\*\\*^^\n'))
+    expect(serializeMarkdown(parseMarkdown(once))).toBe(once)
+  })
+
+  test('^^ preserves inner bold as a real mark', () => {
+    const doc = parseMarkdown('^^**bar**^^\n')
+    let hasStrong = false
+    doc.descendants((node) => {
+      if (node.isText && node.marks.some((m) => m.type.name === 'strong')) hasStrong = true
+    })
+    expect(hasStrong).toBe(true)
+  })
 })
