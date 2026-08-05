@@ -24,7 +24,7 @@
  * Reducing 5 plugin instances to 1 saves ~4 apply() traversals per transaction.
  */
 
-import { Fragment, Slice } from 'prosemirror-model'
+import { Fragment, Slice, type Schema } from 'prosemirror-model'
 import { AllSelection, Plugin, PluginKey, TextSelection } from 'prosemirror-state'
 import { Decoration, DecorationSet, type EditorView } from 'prosemirror-view'
 import { parseMarkdown } from '../markdown'
@@ -111,6 +111,46 @@ export function toggleTaskCheckboxAtClick(view: EditorView, event: MouseEvent): 
   return false
 }
 
+/**
+ * Parse `text` as Markdown and turn it into a paste-able Slice.
+ *
+ * **`schema` is not optional by accident.** `createSchema()` builds a fresh
+ * Schema per editor (it is keyed on the consumer's MediaResolver and refuses
+ * the null one), so the module-level `defaultSchema` is *never* the schema a
+ * live editor runs on. ProseMirror compares NodeType/MarkType by identity, so
+ * a Slice built from `defaultSchema` cannot be fitted into the document:
+ * `replaceSelection` produces zero steps and the paste silently vanishes —
+ * no throw, no warning. Always hand in `view.state.schema`.
+ *
+ * Returns `null` when the text yields nothing worth inserting.
+ */
+function markdownSlice(text: string, schema: Schema): Slice | null {
+  const doc = parseMarkdown(text, schema)
+  // A single empty paragraph means "nothing parsed" — inserting it would just
+  // wipe the current selection.
+  if (doc.textContent.length === 0 && doc.content.size <= 2) return null
+  const content = doc.content
+  // Single paragraph → hand back its inline content so it merges into the
+  // paragraph the caret sits in instead of splitting it.
+  if (content.childCount === 1 && content.firstChild!.type.name === 'paragraph') {
+    return new Slice(content.firstChild!.content, 0, 0)
+  }
+  return new Slice(content, 0, 0)
+}
+
+/** True when the slice carries something worth keeping that is not text. */
+function hasNonTextContent(slice: Slice): boolean {
+  let found = false
+  slice.content.descendants((node) => {
+    if (found) return false
+    // Leaf/atom nodes (image, math, hard_break, horizontal_rule…) carry meaning
+    // even though `textBetween` reports nothing for them.
+    if (node.isLeaf && !node.isText) found = true
+    return !found
+  })
+  return found
+}
+
 export interface EditorPropsPluginOptions {
   platform: Platform
   linkOpener: LinkOpener
@@ -131,49 +171,60 @@ export function createEditorPropsPlugin(opts: EditorPropsPluginOptions): Plugin 
        * Parse pasted plain text as Markdown so syntax renders instead of
        * being inserted as escaped literal text.
        */
-      clipboardTextParser(text, $context, plain) {
+      clipboardTextParser(text, $context, plain, view) {
         if (plain || $context.parent.type.spec.code) return undefined!
-        const doc = parseMarkdown(text)
-        // If markdown parse produced a single empty paragraph, fall back to
-        // literal text insertion to avoid replacing the current selection.
-        if (doc.textContent.length === 0 && doc.content.size <= 2) return undefined!
-        const content = doc.content
-        // Single paragraph → extract inline content so it merges into current text
-        if (content.childCount === 1 && content.firstChild!.type.name === 'paragraph') {
-          return new Slice(content.firstChild!.content, 0, 0)
-        }
-        return new Slice(content, 0, 0)
+        // MUST be the live editor's schema — see markdownSlice()'s note.
+        const slice = markdownSlice(text, view.state.schema)
+        // Nothing parsed → let ProseMirror insert the literal text rather than
+        // replacing the current selection with emptiness.
+        if (!slice) return undefined!
+        return slice
       },
 
       /**
-       * Safety net for degenerate pastes (empty markdown link, empty <a>, etc.).
+       * Safety net for pastes the HTML branch cannot turn into anything usable.
        * Also routes pasted markdown image syntax through the markdown parser.
+       *
+       * The guiding rule (user-facing): *when the rich content is empty, use the
+       * plain text*. "Empty" is judged by outcome, not by looks — a slice can be
+       * non-empty and still be a no-op (foreign schema, or block content that
+       * cannot be fitted at the caret), which is indistinguishable from an empty
+       * paste for the person watching the screen.
        */
       handlePaste(view, event, slice) {
         const plain = event.clipboardData?.getData('text/plain')
         if (!plain) return false
+        const schema = view.state.schema
+
+        /** Insert `plain` as Markdown; falls back to literal text. */
+        const insertPlain = (): boolean => {
+          const md = markdownSlice(plain, schema)
+          const content = md ?? new Slice(Fragment.from(schema.text(plain)), 0, 0)
+          const tr = view.state.tr.replaceSelection(content)
+          if (!tr.docChanged) return false
+          view.dispatch(tr)
+          pendingPaste = true
+          return true
+        }
 
         // Markdown image syntax — parse so the image renders instead of being escaped
         const trimmed = plain.trim()
         if (/^!\[/.test(trimmed)) {
-          const doc = parseMarkdown(trimmed)
-          if (doc.content.size > 2) {
-            const content = doc.content
-            const inner = (content.childCount === 1 && content.firstChild!.type.name === 'paragraph')
-              ? content.firstChild!.content
-              : content
-            view.dispatch(
-              view.state.tr.replaceSelection(new Slice(inner, 0, 0)),
-            )
-            pendingPaste = true
-            return true
+          const imgSlice = markdownSlice(trimmed, schema)
+          if (imgSlice) {
+            const tr = view.state.tr.replaceSelection(imgSlice)
+            if (tr.docChanged) {
+              view.dispatch(tr)
+              pendingPaste = true
+              return true
+            }
           }
         }
 
         // Link pattern with empty text or empty URL
         const linkMatch = /^\[([^\]]*)\]\(([^)]*)\)$/.exec(trimmed)
         if (linkMatch && (!linkMatch[1] || !linkMatch[2])) {
-          const textNode = view.state.schema.text(plain)
+          const textNode = schema.text(plain)
           view.dispatch(
             view.state.tr.replaceSelection(new Slice(Fragment.from(textNode), 0, 0)),
           )
@@ -181,18 +232,23 @@ export function createEditorPropsPlugin(opts: EditorPropsPluginOptions): Plugin 
           return true
         }
 
-        // Degenerate slice (e.g. empty <a> tag from HTML clipboard)
+        if (trimmed.length === 0) return false
+
+        // Is the rich slice actually usable? Two ways it is not:
+        //  1. it carries no text and no atom node (e.g. an empty <a> from the
+        //     HTML clipboard) — visually an empty paste;
+        //  2. replacing the selection with it changes nothing at all.
+        // Either way, fall back to the plain text — parsed as Markdown, so
+        // `**bold**` copied out of a web page still comes back as bold.
         try {
           const sliceText = slice.content.textBetween(0, slice.content.size, '', '')
-          if (sliceText.trim().length === 0 && trimmed.length > 0) {
-            const textNode = view.state.schema.text(plain)
-            view.dispatch(
-              view.state.tr.replaceSelection(new Slice(Fragment.from(textNode), 0, 0)),
-            )
-            pendingPaste = true
-            return true
-          }
-        } catch { /* malformed slice — fall through */ }
+          const carriesSomething = sliceText.trim().length > 0 || hasNonTextContent(slice)
+          const fits = carriesSomething && view.state.tr.replaceSelection(slice).docChanged
+          if (!fits) return insertPlain()
+        } catch {
+          // Malformed slice — the plain text is the only thing left to try.
+          return insertPlain()
+        }
 
         return false
       },

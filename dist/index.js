@@ -3971,6 +3971,24 @@ function toggleTaskCheckboxAtClick(view, event) {
   }
   return false;
 }
+function markdownSlice(text2, schema2) {
+  const doc2 = parseMarkdown(text2, schema2);
+  if (doc2.textContent.length === 0 && doc2.content.size <= 2) return null;
+  const content = doc2.content;
+  if (content.childCount === 1 && content.firstChild.type.name === "paragraph") {
+    return new Slice(content.firstChild.content, 0, 0);
+  }
+  return new Slice(content, 0, 0);
+}
+function hasNonTextContent(slice) {
+  let found = false;
+  slice.content.descendants((node) => {
+    if (found) return false;
+    if (node.isLeaf && !node.isText) found = true;
+    return !found;
+  });
+  return found;
+}
 function createEditorPropsPlugin(opts) {
   const { platform, linkOpener } = opts;
   const isMacOS = platform.isMacOS;
@@ -3982,56 +4000,64 @@ function createEditorPropsPlugin(opts) {
        * Parse pasted plain text as Markdown so syntax renders instead of
        * being inserted as escaped literal text.
        */
-      clipboardTextParser(text2, $context, plain) {
+      clipboardTextParser(text2, $context, plain, view) {
         if (plain || $context.parent.type.spec.code) return void 0;
-        const doc2 = parseMarkdown(text2);
-        if (doc2.textContent.length === 0 && doc2.content.size <= 2) return void 0;
-        const content = doc2.content;
-        if (content.childCount === 1 && content.firstChild.type.name === "paragraph") {
-          return new Slice(content.firstChild.content, 0, 0);
-        }
-        return new Slice(content, 0, 0);
+        const slice = markdownSlice(text2, view.state.schema);
+        if (!slice) return void 0;
+        return slice;
       },
       /**
-       * Safety net for degenerate pastes (empty markdown link, empty <a>, etc.).
+       * Safety net for pastes the HTML branch cannot turn into anything usable.
        * Also routes pasted markdown image syntax through the markdown parser.
+       *
+       * The guiding rule (user-facing): *when the rich content is empty, use the
+       * plain text*. "Empty" is judged by outcome, not by looks — a slice can be
+       * non-empty and still be a no-op (foreign schema, or block content that
+       * cannot be fitted at the caret), which is indistinguishable from an empty
+       * paste for the person watching the screen.
        */
       handlePaste(view, event, slice) {
         const plain = event.clipboardData?.getData("text/plain");
         if (!plain) return false;
+        const schema2 = view.state.schema;
+        const insertPlain = () => {
+          const md2 = markdownSlice(plain, schema2);
+          const content = md2 ?? new Slice(Fragment2.from(schema2.text(plain)), 0, 0);
+          const tr = view.state.tr.replaceSelection(content);
+          if (!tr.docChanged) return false;
+          view.dispatch(tr);
+          pendingPaste = true;
+          return true;
+        };
         const trimmed = plain.trim();
         if (/^!\[/.test(trimmed)) {
-          const doc2 = parseMarkdown(trimmed);
-          if (doc2.content.size > 2) {
-            const content = doc2.content;
-            const inner = content.childCount === 1 && content.firstChild.type.name === "paragraph" ? content.firstChild.content : content;
-            view.dispatch(
-              view.state.tr.replaceSelection(new Slice(inner, 0, 0))
-            );
-            pendingPaste = true;
-            return true;
+          const imgSlice = markdownSlice(trimmed, schema2);
+          if (imgSlice) {
+            const tr = view.state.tr.replaceSelection(imgSlice);
+            if (tr.docChanged) {
+              view.dispatch(tr);
+              pendingPaste = true;
+              return true;
+            }
           }
         }
         const linkMatch = /^\[([^\]]*)\]\(([^)]*)\)$/.exec(trimmed);
         if (linkMatch && (!linkMatch[1] || !linkMatch[2])) {
-          const textNode = view.state.schema.text(plain);
+          const textNode = schema2.text(plain);
           view.dispatch(
             view.state.tr.replaceSelection(new Slice(Fragment2.from(textNode), 0, 0))
           );
           pendingPaste = true;
           return true;
         }
+        if (trimmed.length === 0) return false;
         try {
           const sliceText = slice.content.textBetween(0, slice.content.size, "", "");
-          if (sliceText.trim().length === 0 && trimmed.length > 0) {
-            const textNode = view.state.schema.text(plain);
-            view.dispatch(
-              view.state.tr.replaceSelection(new Slice(Fragment2.from(textNode), 0, 0))
-            );
-            pendingPaste = true;
-            return true;
-          }
+          const carriesSomething = sliceText.trim().length > 0 || hasNonTextContent(slice);
+          const fits = carriesSomething && view.state.tr.replaceSelection(slice).docChanged;
+          if (!fits) return insertPlain();
         } catch {
+          return insertPlain();
         }
         return false;
       },
