@@ -977,9 +977,9 @@ function buildNodes(mediaResolver) {
 }
 var marks = {
   html_mark,
+  annotation,
   strong,
   em,
-  annotation,
   code,
   link,
   strike_through,
