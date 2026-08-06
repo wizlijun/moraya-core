@@ -149,3 +149,24 @@ describe('annotation over inline code', () => {
     expect(marks).toContain('annotation')
   })
 })
+
+describe('annotation spanning an inner mark boundary (regression)', () => {
+  // 真实事故:源文 `**被录一方的知情同意**（美国部分州要求双方同意）`,用户选中跨过
+  // 加粗边界做批注。若 annotation 比 strong 内层,序列化会在加粗边界处断开、各补一份
+  // {>>note<<} —— 一条批注变两条,伴生笔记里多出一个同文本的 question 节点,采纳时
+  // 按文本匹配就会标错节点、卡片清不掉。批注是数据模型的身份,不能被排版 mark 切开。
+  test('one annotation across bold+plain stays ONE annotation', () => {
+    const md = '{==**A**B==}{>>note<<}\n'
+    const out = serializeMarkdown(parseMarkdown(md, schema))
+    const opens = out.match(/\{==/g) ?? []
+    const notes = out.match(/\{>>/g) ?? []
+    expect({ out, opens: opens.length, notes: notes.length })
+      .toMatchObject({ opens: 1, notes: 1 })
+  })
+
+  test('annotation covering only part of a bold run does not duplicate the note', () => {
+    const md = '**A{==B==}{>>note<<}C**\n'
+    const out = serializeMarkdown(parseMarkdown(md, schema))
+    expect((out.match(/\{>>/g) ?? []).length).toBe(1)
+  })
+})

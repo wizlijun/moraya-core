@@ -1014,14 +1014,20 @@ function buildNodes(mediaResolver: MediaResolver): Record<string, NodeSpec> {
 }
 
 // 顺序即嵌套层级:靠前的 mark 序列化时在外层。
-// `annotation` 必须排在 `code` 之前 —— 否则给行内代码加批注时,CriticMarkup 会被写进
-// 反引号内部(`` `{==x==}{>>note<<}` ``),而代码段内一切按字面渲染:徽标不显示,重新
-// 解析时批注整个消失。放到外面(`` {==`x`==}{>>note<<} ``)两者都能正确 round-trip。
+// `annotation` 必须排在**所有排版 mark 之前**,因为它不是排版,是数据模型里的身份:
+//   - 在 `code` 之前 —— 否则给行内代码加批注时,CriticMarkup 会被写进反引号内部
+//     (`` `{==x==}{>>note<<}` ``),而代码段内一切按字面渲染:徽标不显示,重新解析
+//     时批注整个消失。放到外面(`` {==`x`==}{>>note<<} ``)两者都能正确 round-trip。
+//   - 在 `strong`/`em` 之前 —— 批注跨过加粗/斜体边界时(选中 `**A**B` 这样的范围),
+//     内层的那个 mark 必须在边界处断开。若断的是 annotation,一条批注会被写成两段
+//     `{==…==}{>>note<<}`,伴生笔记里就凭空多出一个同文本的 question 节点:采纳按文本
+//     匹配会标错节点、卡片清不掉。断 strong 只是 `**A**{==**B**==}**C**` 这种形式变化,
+//     渲染与语义都不变。宁可切排版,不可切身份。
 const marks: Record<string, MarkSpec> = {
   html_mark,
+  annotation,
   strong,
   em,
-  annotation,
   code,
   link,
   strike_through,
