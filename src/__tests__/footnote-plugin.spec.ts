@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'vitest'
 import { EditorState } from 'prosemirror-state'
+import { EditorView } from 'prosemirror-view'
 import { DecorationSet } from 'prosemirror-view'
 import { parseMarkdown } from '../markdown'
 import { createSchema } from '../schema'
@@ -105,5 +106,65 @@ describe('定义块也带编号(底部列表要等宽对齐)', () => {
     const src = '一[^x] 二[^x]。\n\n[^x]: X。\n'
     expect(numsFor(src, 'footnote_ref')).toEqual(['1', '1'])
     expect(numsFor(src, 'footnote_definition')).toEqual(['1'])
+  })
+})
+
+describe('点击跳转(挂真实 EditorView)', () => {
+  function mount(src: string) {
+    const doc = parseMarkdown(src, schema)
+    const view = new EditorView(document.createElement('div'), {
+      state: EditorState.create({ doc, plugins: [createFootnotePlugin()] }),
+    })
+    const def = view.dom.querySelector('[data-footnote-def]') as HTMLElement
+    const ref = view.dom.querySelector('[data-footnote-ref]') as HTMLElement
+    const scrolled: string[] = []
+    if (ref) ref.scrollIntoView = (() => scrolled.push('ref')) as never
+    if (def) def.scrollIntoView = (() => scrolled.push('def')) as never
+    return { view, def, ref, scrolled }
+  }
+
+  const down = () => new window.MouseEvent('mousedown', { bubbles: true, cancelable: true })
+
+  test('点定义块回跳到引用,并高亮它', () => {
+    const { def, ref, scrolled } = mount('正文引用[^a] 结束。\n\n[^a]: A 的内容。\n')
+    const ev = down()
+    def.dispatchEvent(ev)
+    expect(scrolled).toEqual(['ref'])
+    expect(ev.defaultPrevented).toBe(true)
+    expect(ref.classList.contains('moraya-footnote-flash')).toBe(true)
+  })
+
+  test('点角标跳到定义,并高亮它', () => {
+    const { def, ref, scrolled } = mount('正文引用[^a] 结束。\n\n[^a]: A 的内容。\n')
+    const ev = down()
+    ref.dispatchEvent(ev)
+    expect(scrolled).toEqual(['def'])
+    expect(ev.defaultPrevented).toBe(true)
+    expect(def.classList.contains('moraya-footnote-flash')).toBe(true)
+  })
+
+  test('孤儿定义没有引用可回跳时不拦截事件(否则没法正常编辑)', () => {
+    const { def, scrolled } = mount('正文没有引用。\n\n[^orphan]: 孤儿。\n')
+    const ev = down()
+    def.dispatchEvent(ev)
+    expect(scrolled).toEqual([])
+    expect(ev.defaultPrevented).toBe(false)
+  })
+
+  test('点定义块内的文字不触发回跳 —— 否则没法选中和编辑定义内容', () => {
+    const { def, scrolled } = mount('正文引用[^a] 结束。\n\n[^a]: A 的内容。\n')
+    const inner = def.querySelector('p') as HTMLElement
+    const ev = down()
+    inner.dispatchEvent(ev)
+    expect(scrolled).toEqual([])
+    expect(ev.defaultPrevented).toBe(false)
+  })
+
+  test('无定义的裸引用点击时不拦截事件', () => {
+    const { ref, scrolled } = mount('裸引用[^none] 没有定义。\n')
+    const ev = down()
+    ref.dispatchEvent(ev)
+    expect(scrolled).toEqual([])
+    expect(ev.defaultPrevented).toBe(false)
   })
 })
