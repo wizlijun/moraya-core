@@ -600,6 +600,51 @@ const note_anchor: NodeSpec = {
   },
 }
 
+// ── Footnote NodeSpecs ──────────────────────────────────────────
+
+// `[^label]` 引用。atom + 无 content:角标是不可编辑的整体。
+// 注意 attrs 里**只有 label,没有编号** —— 编号是按文档顺序派生的渲染层产物,
+// 由 footnote-plugin 用 Decoration 挂 data-num,写进 attrs 就会污染磁盘语义。
+const footnote_ref: NodeSpec = {
+  group: 'inline',
+  inline: true,
+  atom: true,
+  selectable: true,
+  attrs: { label: { default: '' } },
+  parseDOM: [{
+    tag: 'sup[data-footnote-ref]',
+    getAttrs(dom: HTMLElement) { return { label: dom.dataset.label ?? '' } },
+  }],
+  toDOM(node) {
+    return ['sup', {
+      'data-footnote-ref': '',
+      'data-label': node.attrs.label as string,
+      class: 'moraya-footnote-ref',
+      contenteditable: 'false',
+    }]
+  },
+}
+
+// `[^label]: 内容` 定义。content 为 block+ 而非 inline*,因为脚注定义
+// 允许缩进续行构成多个段落(markdown-it-footnote 会解析成多个 paragraph)。
+const footnote_definition: NodeSpec = {
+  group: 'block',
+  content: 'block+',
+  defining: true,
+  attrs: { label: { default: '' } },
+  parseDOM: [{
+    tag: 'div[data-footnote-def]',
+    getAttrs(dom: HTMLElement) { return { label: dom.dataset.label ?? '' } },
+  }],
+  toDOM(node) {
+    return ['div', {
+      'data-footnote-def': '',
+      'data-label': node.attrs.label as string,
+      class: 'moraya-footnote-def',
+    }, 0]
+  },
+}
+
 // ── Math NodeSpecs (KaTeX) ──────────────────────────────────────
 
 const math_inline: NodeSpec = {
@@ -1010,6 +1055,8 @@ function buildNodes(mediaResolver: MediaResolver): Record<string, NodeSpec> {
     defListTerm,
     defListDescription,
     note_anchor,
+    footnote_ref,
+    footnote_definition,
   }
 }
 
