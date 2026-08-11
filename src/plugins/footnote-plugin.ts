@@ -16,6 +16,29 @@ import type { Node as PmNode } from 'prosemirror-model'
 
 export const footnotePluginKey = new PluginKey('moraya-footnote')
 
+/** 按 label 查找定义节点。找不到返回 null。 */
+export function findDefinition(doc: PmNode, label: string): { node: PmNode; pos: number } | null {
+  let hit: { node: PmNode; pos: number } | null = null
+  doc.descendants((node, pos) => {
+    if (hit) return false
+    if (node.type.name === 'footnote_definition' && node.attrs.label === label) {
+      hit = { node, pos }
+      return false
+    }
+    return true
+  })
+  return hit
+}
+
+/** 定义的纯文本,用于 hover 浮层。多段之间用空格连接。 */
+export function definitionText(doc: PmNode, label: string): string {
+  const hit = findDefinition(doc, label)
+  if (!hit) return ''
+  const parts: string[] = []
+  hit.node.forEach((child) => { parts.push(child.textContent) })
+  return parts.join(' ').trim()
+}
+
 /** 按首次出现顺序给每个 label 编号,并为每个引用生成一个 data-num decoration。 */
 function buildDecorations(doc: PmNode): DecorationSet {
   const numByLabel = new Map<string, number>()
@@ -50,6 +73,18 @@ export function createFootnotePlugin(): Plugin {
     props: {
       decorations(state) {
         return footnotePluginKey.getState(state) as DecorationSet
+      },
+      handleDOMEvents: {
+        mouseover(view, event) {
+          const target = (event.target as HTMLElement | null)?.closest?.('[data-footnote-ref]')
+          if (!(target instanceof HTMLElement)) return false
+          const label = target.dataset.label ?? ''
+          const text = definitionText(view.state.doc, label)
+          // 用原生 title 而不是自绘浮层:脚注 hover 是低频只读交互,自绘要处理定位、
+          // 边界、滚动跟随、销毁时机,不值当。无定义时明确提示而不是静默空白。
+          target.title = text ? `[^${label}] ${text}` : `[^${label}] (未定义)`
+          return false
+        },
       },
     },
   })

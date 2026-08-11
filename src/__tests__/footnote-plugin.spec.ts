@@ -4,7 +4,7 @@ import { DecorationSet } from 'prosemirror-view'
 import { parseMarkdown } from '../markdown'
 import { createSchema } from '../schema'
 import { BrowserMediaResolver } from '../adapters/browser-media-resolver'
-import { createFootnotePlugin, footnotePluginKey } from '../plugins/footnote-plugin'
+import { createFootnotePlugin, footnotePluginKey, findDefinition, definitionText } from '../plugins/footnote-plugin'
 
 const schema = createSchema({ mediaResolver: new BrowserMediaResolver() })
 
@@ -30,5 +30,30 @@ describe('footnote numbering', () => {
 
   test('无定义的裸引用照样参与编号', () => {
     expect(decosFor('裸[^none]。\n')).toEqual(['1'])
+  })
+})
+
+describe('footnote definition lookup', () => {
+  test('按 label 找到定义节点及其位置', () => {
+    const doc = parseMarkdown('引用[^a]。\n\n[^a]: A 的内容。\n', schema)
+    const hit = findDefinition(doc, 'a')
+    expect(hit).not.toBeNull()
+    expect(hit!.node.type.name).toBe('footnote_definition')
+    expect(doc.nodeAt(hit!.pos)!.attrs.label).toBe('a')
+  })
+
+  test('label 不存在时返回 null', () => {
+    const doc = parseMarkdown('裸引用[^none]。\n', schema)
+    expect(findDefinition(doc, 'none')).toBeNull()
+  })
+
+  test('definitionText 取出定义的纯文本', () => {
+    const doc = parseMarkdown('引用[^m]。\n\n[^m]: 第一段。\n\n    第二段。\n', schema)
+    expect(definitionText(doc, 'm')).toBe('第一段。 第二段。')
+  })
+
+  test('无定义时 definitionText 返回空串', () => {
+    const doc = parseMarkdown('裸[^none]。\n', schema)
+    expect(definitionText(doc, 'none')).toBe('')
   })
 })
