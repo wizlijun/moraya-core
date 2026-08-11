@@ -1287,14 +1287,68 @@ export function parseMarkdownAsync(markdown: string, schemaArg?: Schema): Promis
   }, 0))
 }
 
+// 每一组各试一次。分组而不是整体一把梭,是为了让一处必须保留的转义(例如字面量
+// `\*star\*`)不至于连累同一文档里其他本可以松掉的转义(例如 `a\[0\]`)。
+// 不含 `\\` —— 去掉反斜杠自身的转义会改变语义。
+const ESCAPE_RELAX_GROUPS: RegExp[] = [
+  /\\([[\]])/g,
+  /\\(\*)/g,
+  /\\([`~_])/g,
+  /\\(#)/g,
+  /\\([-+>.])/g,
+]
+
+const HAS_RELAXABLE_ESCAPE = /\\[`*#~_[\]\-+>.]/
+
+/**
+ * 松弛 prosemirror-markdown `esc()` 的过度转义。
+ *
+ * `esc()` 无条件转义 `` ` * \ ~ [ ] _ ``(行首另加 `- + > # 数字.`),于是正文里任何
+ * 方括号都会被改写:`数组 a[0]` 存盘变成 `a\[0\]`,`[^loop]` 变成 `\[^loop\]`。对一个
+ * 以 file-over-app 为硬原则的编辑器来说,这是每次保存都在悄悄改用户的文件。
+ *
+ * 但直接放宽转义规则是危险的:转义少了会让纯文本被解析成语法(字面量 `\*star\*` 变成
+ * 斜体),那是语义级破坏,比多几个反斜杠严重得多。
+ *
+ * 所以这里不预测哪些转义"可以去掉",而是**去掉之后重新解析、验证文档没变**——
+ * 让解析器自己当裁判。等价才采纳,存疑就保留。代价是含转义的文档多几次解析;
+ * 不含转义的文档(绝大多数)走快速路径,零开销。
+ *
+ * 这同时取代了旧的链接 un-escape 正则(`\[x\](y)` → `[x](y)`):那条规则不看上下文,
+ * 会把用户**故意**转义的字面量 `\[文档](url)` 还原成一个真链接。
+ */
+function relaxEscapes(md: string, doc: PmNode): string {
+  if (!HAS_RELAXABLE_ESCAPE.test(md)) return md
+
+  let reference: string
+  try {
+    reference = JSON.stringify(doc.toJSON())
+  } catch {
+    return md
+  }
+
+  let current = md
+  for (const re of ESCAPE_RELAX_GROUPS) {
+    const candidate = current.replace(re, '$1')
+    if (candidate === current) continue
+    try {
+      // 走 parseMarkdown 而非裸 parser,确保与真实解析路径(含 smart-quote /
+      // math-block 归一化)完全一致,否则等价判断会失真。
+      if (JSON.stringify(parseMarkdown(candidate).toJSON()) === reference) current = candidate
+    } catch {
+      // 解析失败 → 这一组不安全,保留转义。
+    }
+  }
+  return current
+}
+
 /**
  * Serialize a ProseMirror document node to a markdown string. Never throws (§4.5).
  */
 export function serializeMarkdown(doc: PmNode): string {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let result = serializer.serialize(doc, ({ tightLists: true } as any))
-  // Un-escape markdown link syntax that the serializer's esc() over-escapes.
-  result = result.replace(/\\\[([^\\\[\]]*)\\\]\(([^)]*)\)/g, '[$1]($2)')
+  result = relaxEscapes(result, doc)
   // Strip zero-width spaces used as cursor targets after inline code marks.
   result = result.replace(/​/g, '')
   return result
