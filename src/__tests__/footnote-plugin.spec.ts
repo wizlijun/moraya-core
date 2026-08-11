@@ -1,42 +1,42 @@
 import { describe, test, expect } from 'vitest'
 import { EditorState } from 'prosemirror-state'
 import { EditorView } from 'prosemirror-view'
-import { DecorationSet } from 'prosemirror-view'
 import { parseMarkdown } from '../markdown'
 import { createSchema } from '../schema'
 import { BrowserMediaResolver } from '../adapters/browser-media-resolver'
-import { createFootnotePlugin, footnotePluginKey, findDefinition, definitionText, findFirstRef } from '../plugins/footnote-plugin'
+import {
+  createFootnotePlugin,
+  findDefinition,
+  findFirstRef,
+  definitionText,
+} from '../plugins/footnote-plugin'
 
 const schema = createSchema({ mediaResolver: new BrowserMediaResolver() })
 
-function numsFor(src: string, typeName: 'footnote_ref' | 'footnote_definition'): string[] {
-  const doc = parseMarkdown(src, schema)
-  const state = EditorState.create({ doc, plugins: [createFootnotePlugin()] })
-  const set = footnotePluginKey.getState(state) as DecorationSet
-  return set
-    .find()
-    .filter((d) => doc.nodeAt(d.from)?.type.name === typeName)
-    .map((d) => (d as unknown as { type: { attrs: Record<string, string> } }).type.attrs['data-num'])
-}
+describe('角标渲染:直接用 [^id] 里的 id', () => {
+  function mountView(src: string) {
+    const doc = parseMarkdown(src, schema)
+    return new EditorView(document.createElement('div'), {
+      state: EditorState.create({ doc, plugins: [createFootnotePlugin()] }),
+    })
+  }
 
-/** 引用侧的编号。 */
-const decosFor = (src: string) => numsFor(src, 'footnote_ref')
-
-describe('footnote numbering', () => {
-  test('按首次出现顺序编号', () => {
-    expect(decosFor('甲[^a] 乙[^b]。\n\n[^a]: A。\n\n[^b]: B。\n')).toEqual(['1', '2'])
+  test('data-label 带的是原始 id,不是编号', () => {
+    const view = mountView('甲[^loop] 乙[^wispr]。\n\n[^loop]: A。\n\n[^wispr]: B。\n')
+    const labels = [...view.dom.querySelectorAll('[data-footnote-ref]')].map((e) =>
+      e.getAttribute('data-label'),
+    )
+    expect(labels).toEqual(['loop', 'wispr'])
   })
 
-  test('同一 label 多次引用共用同一编号', () => {
-    expect(decosFor('一[^x] 二[^x] 三[^y]。\n\n[^x]: X。\n\n[^y]: Y。\n')).toEqual(['1', '1', '2'])
+  test('定义块也带原始 id', () => {
+    const view = mountView('甲[^loop]。\n\n[^loop]: A。\n')
+    expect(view.dom.querySelector('[data-footnote-def]')?.getAttribute('data-label')).toBe('loop')
   })
 
-  test('编号按正文出现顺序,与定义书写顺序无关', () => {
-    expect(decosFor('先[^second] 后[^first]。\n\n[^first]: 1。\n\n[^second]: 2。\n')).toEqual(['1', '2'])
-  })
-
-  test('无定义的裸引用照样参与编号', () => {
-    expect(decosFor('裸[^none]。\n')).toEqual(['1'])
+  test('不再产生任何编号 decoration', () => {
+    const view = mountView('甲[^a] 乙[^b]。\n\n[^a]: A。\n\n[^b]: B。\n')
+    expect([...view.dom.querySelectorAll('[data-num]')]).toEqual([])
   })
 })
 
@@ -79,36 +79,6 @@ describe('footnote back-reference lookup', () => {
   })
 })
 
-describe('定义块也带编号(底部列表要等宽对齐)', () => {
-  test('定义拿到与其引用相同的编号', () => {
-    const src = '甲[^a] 乙[^b]。\n\n[^a]: A。\n\n[^b]: B。\n'
-    expect(numsFor(src, 'footnote_definition')).toEqual(['1', '2'])
-  })
-
-  test('定义书写顺序与引用顺序不一致时,编号跟引用走', () => {
-    // 正文先引 second 后引 first,但定义按 first/second 顺序写
-    const src = '先[^second] 后[^first]。\n\n[^first]: 1。\n\n[^second]: 2。\n'
-    // 定义按文档位置返回:first 的定义在前,它的编号应是 2
-    expect(numsFor(src, 'footnote_definition')).toEqual(['2', '1'])
-  })
-
-  test('定义写在引用之前也能拿到正确编号', () => {
-    const src = '[^a]: A。\n\n后引用[^a]。\n'
-    expect(numsFor(src, 'footnote_definition')).toEqual(['1'])
-  })
-
-  test('孤儿定义不挂 data-num(CSS 退回等宽占位)', () => {
-    const src = '正文无引用。\n\n[^orphan]: 孤儿。\n'
-    expect(numsFor(src, 'footnote_definition')).toEqual([])
-  })
-
-  test('同一 label 引用两次,定义仍只有一个编号', () => {
-    const src = '一[^x] 二[^x]。\n\n[^x]: X。\n'
-    expect(numsFor(src, 'footnote_ref')).toEqual(['1', '1'])
-    expect(numsFor(src, 'footnote_definition')).toEqual(['1'])
-  })
-})
-
 describe('点击跳转(挂真实 EditorView)', () => {
   function mount(src: string) {
     const doc = parseMarkdown(src, schema)
@@ -116,25 +86,18 @@ describe('点击跳转(挂真实 EditorView)', () => {
       state: EditorState.create({ doc, plugins: [createFootnotePlugin()] }),
     })
     const def = view.dom.querySelector('[data-footnote-def]') as HTMLElement
-    const ref = view.dom.querySelector('[data-footnote-ref]') as HTMLElement
+    const refs = [...view.dom.querySelectorAll('[data-footnote-ref]')] as HTMLElement[]
     const scrolled: string[] = []
-    if (ref) ref.scrollIntoView = (() => scrolled.push('ref')) as never
+    refs.forEach((r, i) => {
+      r.scrollIntoView = (() => scrolled.push(`ref${i}`)) as never
+    })
     if (def) def.scrollIntoView = (() => scrolled.push('def')) as never
-    return { view, def, ref, scrolled }
+    return { view, def, ref: refs[0], refs, scrolled }
   }
 
   const down = () => new window.MouseEvent('mousedown', { bubbles: true, cancelable: true })
 
-  test('点定义块回跳到引用,并高亮它', () => {
-    const { def, ref, scrolled } = mount('正文引用[^a] 结束。\n\n[^a]: A 的内容。\n')
-    const ev = down()
-    def.dispatchEvent(ev)
-    expect(scrolled).toEqual(['ref'])
-    expect(ev.defaultPrevented).toBe(true)
-    expect(ref.classList.contains('moraya-footnote-flash')).toBe(true)
-  })
-
-  test('点首个角标(全文只有它)跳到定义', () => {
+  test('正文角标 → 底部定义,并高亮它', () => {
     const { def, ref, scrolled } = mount('正文引用[^a] 结束。\n\n[^a]: A 的内容。\n')
     const ev = down()
     ref.dispatchEvent(ev)
@@ -143,38 +106,21 @@ describe('点击跳转(挂真实 EditorView)', () => {
     expect(def.classList.contains('moraya-footnote-flash')).toBe(true)
   })
 
-  test('点后出现的角标 → 回到首次引用,而不是跳去定义', () => {
-    // 同一来源正文详述一次、文末汇总表再列一次:从汇总点回去要看的是正文。
-    const doc = parseMarkdown('正文详述[^a]。\n\n后面汇总又提[^a]。\n\n[^a]: A。\n', schema)
-    const view = new EditorView(document.createElement('div'), {
-      state: EditorState.create({ doc, plugins: [createFootnotePlugin()] }),
-    })
-    const refs = [...view.dom.querySelectorAll('[data-footnote-ref]')] as HTMLElement[]
-    const def = view.dom.querySelector('[data-footnote-def]') as HTMLElement
+  test('同一 label 的第二次引用同样跳定义 —— 规则不看引用出现的次序', () => {
+    const { def, refs, scrolled } = mount('详述[^a]。\n\n汇总又提[^a]。\n\n[^a]: A。\n')
     expect(refs).toHaveLength(2)
-    const scrolled: string[] = []
-    refs[0].scrollIntoView = (() => scrolled.push('ref0')) as never
-    refs[1].scrollIntoView = (() => scrolled.push('ref1')) as never
-    def.scrollIntoView = (() => scrolled.push('def')) as never
+    refs[1].dispatchEvent(down())
+    expect(scrolled).toEqual(['def'])
+    expect(def.classList.contains('moraya-footnote-flash')).toBe(true)
+  })
 
+  test('定义前的标记 → 首次引用,并高亮它', () => {
+    const { def, refs, scrolled } = mount('详述[^a]。\n\n汇总又提[^a]。\n\n[^a]: A。\n')
     const ev = down()
-    refs[1].dispatchEvent(ev)
+    def.dispatchEvent(ev)
     expect(scrolled).toEqual(['ref0'])
     expect(ev.defaultPrevented).toBe(true)
     expect(refs[0].classList.contains('moraya-footnote-flash')).toBe(true)
-
-    // 首个角标仍然跳定义
-    scrolled.length = 0
-    refs[0].dispatchEvent(down())
-    expect(scrolled).toEqual(['def'])
-  })
-
-  test('首个角标但无定义时不拦截', () => {
-    const { ref, scrolled } = mount('裸引用[^none]。\n')
-    const ev = down()
-    ref.dispatchEvent(ev)
-    expect(scrolled).toEqual([])
-    expect(ev.defaultPrevented).toBe(false)
   })
 
   test('孤儿定义没有引用可回跳时不拦截事件(否则没法正常编辑)', () => {

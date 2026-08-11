@@ -14,7 +14,7 @@ __export(highlight_exports, {
   createHighlightPlugin: () => createHighlightPlugin
 });
 import { Plugin as Plugin7, PluginKey as PluginKey7 } from "prosemirror-state";
-import { Decoration as Decoration5, DecorationSet as DecorationSet5 } from "prosemirror-view";
+import { Decoration as Decoration4, DecorationSet as DecorationSet4 } from "prosemirror-view";
 import hljs from "highlight.js/lib/core";
 import javascript from "highlight.js/lib/languages/javascript";
 import typescript from "highlight.js/lib/languages/typescript";
@@ -100,7 +100,7 @@ function getDecorations(doc2) {
         const from = blockStart + span.relOffset;
         const to = from + span.length;
         if (from < to) {
-          decorations.push(Decoration5.inline(from, to, { class: span.classes }));
+          decorations.push(Decoration4.inline(from, to, { class: span.classes }));
         }
       }
       return;
@@ -125,7 +125,7 @@ function getDecorations(doc2) {
         const classes = span.classes.join(" ");
         toCache.push({ relOffset, length, classes });
         decorations.push(
-          Decoration5.inline(blockStart + relOffset, blockStart + relOffset + length, { class: classes })
+          Decoration4.inline(blockStart + relOffset, blockStart + relOffset + length, { class: classes })
         );
       }
     }
@@ -135,7 +135,7 @@ function getDecorations(doc2) {
     }
     hljsCache.set(cKey, toCache);
   });
-  return DecorationSet5.create(doc2, decorations);
+  return DecorationSet4.create(doc2, decorations);
 }
 function createHighlightPlugin() {
   let debounceTimer = null;
@@ -3435,7 +3435,7 @@ import {
   Selection,
   TextSelection as TextSelection4
 } from "prosemirror-state";
-import { Decoration as Decoration6, DecorationSet as DecorationSet6, EditorView } from "prosemirror-view";
+import { Decoration as Decoration5, DecorationSet as DecorationSet5, EditorView } from "prosemirror-view";
 import { keymap } from "prosemirror-keymap";
 import { history, redo, undo } from "prosemirror-history";
 import {
@@ -4797,7 +4797,6 @@ function createEditorPropsPlugin(opts) {
 
 // src/plugins/footnote-plugin.ts
 import { Plugin as Plugin6, PluginKey as PluginKey6 } from "prosemirror-state";
-import { Decoration as Decoration4, DecorationSet as DecorationSet4 } from "prosemirror-view";
 var footnotePluginKey = new PluginKey6("moraya-footnote");
 function findDefinition(doc2, label) {
   let hit = null;
@@ -4832,38 +4831,20 @@ function definitionText(doc2, label) {
   });
   return parts.join(" ").trim();
 }
-function buildDecorations3(doc2) {
-  const numByLabel = /* @__PURE__ */ new Map();
-  doc2.descendants((node) => {
-    if (node.type.name !== "footnote_ref") return;
-    const label = node.attrs.label || "";
-    if (!numByLabel.has(label)) numByLabel.set(label, numByLabel.size + 1);
-  });
-  const decos = [];
-  doc2.descendants((node, pos) => {
-    const name = node.type.name;
-    if (name !== "footnote_ref" && name !== "footnote_definition") return;
-    const num = numByLabel.get(node.attrs.label || "");
-    if (num === void 0) return;
-    decos.push(Decoration4.node(pos, pos + node.nodeSize, { "data-num": String(num) }));
-  });
-  return DecorationSet4.create(doc2, decos);
+function scrollToAndFlash(view, pos) {
+  const dom = view.nodeDOM(pos);
+  const el = dom instanceof HTMLElement ? dom : dom?.parentElement;
+  if (!el) return;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.add("moraya-footnote-flash");
+  view.dom.ownerDocument.defaultView?.setTimeout(() => {
+    el.classList.remove("moraya-footnote-flash");
+  }, 1200);
 }
 function createFootnotePlugin() {
   return new Plugin6({
     key: footnotePluginKey,
-    state: {
-      init(_config, state) {
-        return buildDecorations3(state.doc);
-      },
-      apply(tr, old) {
-        return tr.docChanged ? buildDecorations3(tr.doc) : old;
-      }
-    },
     props: {
-      decorations(state) {
-        return footnotePluginKey.getState(state);
-      },
       handleDOMEvents: {
         mouseover(view, event) {
           const el = event.target;
@@ -4872,12 +4853,6 @@ function createFootnotePlugin() {
             const label = refEl.dataset.label ?? "";
             const text2 = definitionText(view.state.doc, label);
             refEl.title = text2 ? `[^${label}] ${text2}` : `[^${label}] (\u672A\u5B9A\u4E49)`;
-            return false;
-          }
-          const defEl = el?.closest?.("[data-footnote-def]");
-          if (defEl instanceof HTMLElement) {
-            const label = defEl.dataset.label ?? "";
-            defEl.title = defEl.hasAttribute("data-num") ? `[^${label}]` : `[^${label}] (\u672A\u88AB\u5F15\u7528)`;
           }
           return false;
         },
@@ -4886,10 +4861,7 @@ function createFootnotePlugin() {
           const refEl = el?.closest?.("[data-footnote-ref]");
           const defEl = el?.closest?.("[data-footnote-def]");
           if (refEl instanceof HTMLElement) {
-            const label = refEl.dataset.label ?? "";
-            const first = findFirstRef(view.state.doc, label);
-            const isFirst = first !== null && view.nodeDOM(first.pos) === refEl;
-            const hit = isFirst ? findDefinition(view.state.doc, label) : first;
+            const hit = findDefinition(view.state.doc, refEl.dataset.label ?? "");
             if (!hit) return false;
             event.preventDefault();
             scrollToAndFlash(view, hit.pos);
@@ -4907,16 +4879,6 @@ function createFootnotePlugin() {
       }
     }
   });
-}
-function scrollToAndFlash(view, pos) {
-  const dom = view.nodeDOM(pos);
-  const el = dom instanceof HTMLElement ? dom : dom?.parentElement;
-  if (!el) return;
-  el.scrollIntoView({ behavior: "smooth", block: "center" });
-  el.classList.add("moraya-footnote-flash");
-  view.dom.ownerDocument.defaultView?.setTimeout(() => {
-    el.classList.remove("moraya-footnote-flash");
-  }, 1200);
 }
 
 // src/doc-cache.ts
@@ -5003,16 +4965,16 @@ function createImageSelectionPlugin() {
     props: {
       decorations(state) {
         const { from, to } = state.selection;
-        if (from === to) return DecorationSet6.empty;
+        if (from === to) return DecorationSet5.empty;
         const decos = [];
         state.doc.nodesBetween(from, to, (node, pos) => {
           if (node.type.name === "image") {
-            decos.push(Decoration6.node(pos, pos + node.nodeSize, { class: "image-in-selection" }));
+            decos.push(Decoration5.node(pos, pos + node.nodeSize, { class: "image-in-selection" }));
           } else if (node.type.name === "html_inline" && /^<img\s/i.test(node.attrs.value || "")) {
-            decos.push(Decoration6.node(pos, pos + node.nodeSize, { class: "image-in-selection" }));
+            decos.push(Decoration5.node(pos, pos + node.nodeSize, { class: "image-in-selection" }));
           }
         });
-        return decos.length ? DecorationSet6.create(state.doc, decos) : DecorationSet6.empty;
+        return decos.length ? DecorationSet5.create(state.doc, decos) : DecorationSet5.empty;
       }
     }
   });

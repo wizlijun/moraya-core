@@ -2,12 +2,13 @@ import { Plugin, PluginKey } from 'prosemirror-state';
 import { Node } from 'prosemirror-model';
 
 /**
- * Footnote plugin — 角标编号与交互。
+ * Footnote plugin — 脚注的跳转与悬停提示。
  *
- * 编号是**派生值**:按 `footnote_ref` 在正文中首次出现的顺序给每个 label 分配序号,
- * 同一 label 的多次引用共用一个编号。它不进节点 attrs(那会污染磁盘语义),而是每次
- * 文档变化时重算并以 Decoration 的形式挂上 `data-num`,由 CSS `content: attr(data-num)`
- * 渲染出来。
+ * 角标显示的就是 `[^id]` 里的 id,直接由 schema 的 `data-label` 属性驱动 CSS,
+ * 插件不参与渲染 —— 所以这里没有 decoration,只处理交互:
+ *
+ *   正文角标   → 底部对应的定义
+ *   定义前的标记 → 首次引用处
  *
  * Schema-agnostic:通过 `node.type.name` 判定,不引用 schema 单例。
  */
@@ -18,12 +19,12 @@ declare function findDefinition(doc: Node, label: string): {
     node: Node;
     pos: number;
 } | null;
-/** 按 label 查找首个引用节点,用于从定义块回跳。找不到返回 null。 */
+/** 按 label 查找首个引用节点,用于从定义回跳。找不到返回 null。 */
 declare function findFirstRef(doc: Node, label: string): {
     node: Node;
     pos: number;
 } | null;
-/** 定义的纯文本,用于 hover 浮层。多段之间用空格连接。 */
+/** 定义的纯文本,用于 hover 提示。多段之间用空格连接。 */
 declare function definitionText(doc: Node, label: string): string;
 declare function createFootnotePlugin(): Plugin;
 

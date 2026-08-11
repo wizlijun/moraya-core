@@ -115,7 +115,7 @@ exports[`plugin order fingerprint (§1.2.2) > default consumer config (Web-style
     "key": "moraya-footnote$",
     "slots": {
       "props": true,
-      "state": true,
+      "state": false,
       "view": false,
     },
   },
