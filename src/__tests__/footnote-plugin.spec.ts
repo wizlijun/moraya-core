@@ -4,7 +4,7 @@ import { DecorationSet } from 'prosemirror-view'
 import { parseMarkdown } from '../markdown'
 import { createSchema } from '../schema'
 import { BrowserMediaResolver } from '../adapters/browser-media-resolver'
-import { createFootnotePlugin, footnotePluginKey, findDefinition, definitionText } from '../plugins/footnote-plugin'
+import { createFootnotePlugin, footnotePluginKey, findDefinition, definitionText, findFirstRef } from '../plugins/footnote-plugin'
 
 const schema = createSchema({ mediaResolver: new BrowserMediaResolver() })
 
@@ -55,5 +55,19 @@ describe('footnote definition lookup', () => {
   test('无定义时 definitionText 返回空串', () => {
     const doc = parseMarkdown('裸[^none]。\n', schema)
     expect(definitionText(doc, 'none')).toBe('')
+  })
+})
+
+describe('footnote back-reference lookup', () => {
+  test('按 label 找到首个引用的位置', () => {
+    const doc = parseMarkdown('一[^x] 二[^x]。\n\n[^x]: X。\n', schema)
+    const first = findFirstRef(doc, 'x')
+    expect(first).not.toBeNull()
+    expect(doc.nodeAt(first!.pos)!.type.name).toBe('footnote_ref')
+  })
+
+  test('孤儿定义没有引用时返回 null', () => {
+    const doc = parseMarkdown('正文。\n\n[^orphan]: 孤儿。\n', schema)
+    expect(findFirstRef(doc, 'orphan')).toBeNull()
   })
 })

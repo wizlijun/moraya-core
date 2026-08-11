@@ -12,6 +12,7 @@
 import { Plugin, PluginKey } from 'prosemirror-state'
 import type { EditorState } from 'prosemirror-state'
 import { Decoration, DecorationSet } from 'prosemirror-view'
+import type { EditorView } from 'prosemirror-view'
 import type { Node as PmNode } from 'prosemirror-model'
 
 export const footnotePluginKey = new PluginKey('moraya-footnote')
@@ -22,6 +23,20 @@ export function findDefinition(doc: PmNode, label: string): { node: PmNode; pos:
   doc.descendants((node, pos) => {
     if (hit) return false
     if (node.type.name === 'footnote_definition' && node.attrs.label === label) {
+      hit = { node, pos }
+      return false
+    }
+    return true
+  })
+  return hit
+}
+
+/** 按 label 查找首个引用节点,用于从定义块回跳。找不到返回 null。 */
+export function findFirstRef(doc: PmNode, label: string): { node: PmNode; pos: number } | null {
+  let hit: { node: PmNode; pos: number } | null = null
+  doc.descendants((node, pos) => {
+    if (hit) return false
+    if (node.type.name === 'footnote_ref' && node.attrs.label === label) {
       hit = { node, pos }
       return false
     }
@@ -85,7 +100,45 @@ export function createFootnotePlugin(): Plugin {
           target.title = text ? `[^${label}] ${text}` : `[^${label}] (未定义)`
           return false
         },
+        mousedown(view, event) {
+          const el = event.target as HTMLElement | null
+          const refEl = el?.closest?.('[data-footnote-ref]')
+          const defEl = el?.closest?.('[data-footnote-def]')
+
+          // 角标 → 跳到定义
+          if (refEl instanceof HTMLElement) {
+            const hit = findDefinition(view.state.doc, refEl.dataset.label ?? '')
+            if (!hit) return false
+            event.preventDefault()
+            scrollToAndFlash(view, hit.pos)
+            return true
+          }
+
+          // 定义块 → 回跳到首个引用。只认定义块自己的空白区域(含 ::before 生成的
+          // 标记),不拦截其中的文字,否则定义内容没法正常编辑和选中。
+          if (defEl instanceof HTMLElement && el === defEl) {
+            const hit = findFirstRef(view.state.doc, defEl.dataset.label ?? '')
+            if (!hit) return false
+            event.preventDefault()
+            scrollToAndFlash(view, hit.pos)
+            return true
+          }
+
+          return false
+        },
       },
     },
   })
+}
+
+/** 滚动到指定位置并短暂高亮。 */
+function scrollToAndFlash(view: EditorView, pos: number): void {
+  const dom = view.nodeDOM(pos)
+  const el = dom instanceof HTMLElement ? dom : (dom as ChildNode | null)?.parentElement
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  el.classList.add('moraya-footnote-flash')
+  view.dom.ownerDocument.defaultView?.setTimeout(() => {
+    el.classList.remove('moraya-footnote-flash')
+  }, 1200)
 }
