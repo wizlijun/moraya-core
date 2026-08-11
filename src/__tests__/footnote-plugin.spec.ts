@@ -134,13 +134,47 @@ describe('点击跳转(挂真实 EditorView)', () => {
     expect(ref.classList.contains('moraya-footnote-flash')).toBe(true)
   })
 
-  test('点角标跳到定义,并高亮它', () => {
+  test('点首个角标(全文只有它)跳到定义', () => {
     const { def, ref, scrolled } = mount('正文引用[^a] 结束。\n\n[^a]: A 的内容。\n')
     const ev = down()
     ref.dispatchEvent(ev)
     expect(scrolled).toEqual(['def'])
     expect(ev.defaultPrevented).toBe(true)
     expect(def.classList.contains('moraya-footnote-flash')).toBe(true)
+  })
+
+  test('点后出现的角标 → 回到首次引用,而不是跳去定义', () => {
+    // 同一来源正文详述一次、文末汇总表再列一次:从汇总点回去要看的是正文。
+    const doc = parseMarkdown('正文详述[^a]。\n\n后面汇总又提[^a]。\n\n[^a]: A。\n', schema)
+    const view = new EditorView(document.createElement('div'), {
+      state: EditorState.create({ doc, plugins: [createFootnotePlugin()] }),
+    })
+    const refs = [...view.dom.querySelectorAll('[data-footnote-ref]')] as HTMLElement[]
+    const def = view.dom.querySelector('[data-footnote-def]') as HTMLElement
+    expect(refs).toHaveLength(2)
+    const scrolled: string[] = []
+    refs[0].scrollIntoView = (() => scrolled.push('ref0')) as never
+    refs[1].scrollIntoView = (() => scrolled.push('ref1')) as never
+    def.scrollIntoView = (() => scrolled.push('def')) as never
+
+    const ev = down()
+    refs[1].dispatchEvent(ev)
+    expect(scrolled).toEqual(['ref0'])
+    expect(ev.defaultPrevented).toBe(true)
+    expect(refs[0].classList.contains('moraya-footnote-flash')).toBe(true)
+
+    // 首个角标仍然跳定义
+    scrolled.length = 0
+    refs[0].dispatchEvent(down())
+    expect(scrolled).toEqual(['def'])
+  })
+
+  test('首个角标但无定义时不拦截', () => {
+    const { ref, scrolled } = mount('裸引用[^none]。\n')
+    const ev = down()
+    ref.dispatchEvent(ev)
+    expect(scrolled).toEqual([])
+    expect(ev.defaultPrevented).toBe(false)
   })
 
   test('孤儿定义没有引用可回跳时不拦截事件(否则没法正常编辑)', () => {

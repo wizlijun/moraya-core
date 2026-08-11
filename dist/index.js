@@ -4886,7 +4886,10 @@ function createFootnotePlugin() {
           const refEl = el?.closest?.("[data-footnote-ref]");
           const defEl = el?.closest?.("[data-footnote-def]");
           if (refEl instanceof HTMLElement) {
-            const hit = findDefinition(view.state.doc, refEl.dataset.label ?? "");
+            const label = refEl.dataset.label ?? "";
+            const first = findFirstRef(view.state.doc, label);
+            const isFirst = first !== null && view.nodeDOM(first.pos) === refEl;
+            const hit = isFirst ? findDefinition(view.state.doc, label) : first;
             if (!hit) return false;
             event.preventDefault();
             scrollToAndFlash(view, hit.pos);

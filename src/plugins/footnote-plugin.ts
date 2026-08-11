@@ -130,9 +130,17 @@ export function createFootnotePlugin(): Plugin {
           const refEl = el?.closest?.('[data-footnote-ref]')
           const defEl = el?.closest?.('[data-footnote-def]')
 
-          // 角标 → 跳到定义
+          // 角标 → 首次引用;自己就是首次则 → 定义。
+          //
+          // 同一条来源常被引用多次:正文里详述一次,文末的汇总表格里再列一次。
+          // 从汇总表格点回去,想看的是正文中论述它的段落,而不是又一串 URL。
+          // 所以规则按"是不是首次引用"分流,而不是判断"在不在表格里"——后者是
+          // 脉络判断,既脆弱又解释不清。
           if (refEl instanceof HTMLElement) {
-            const hit = findDefinition(view.state.doc, refEl.dataset.label ?? '')
+            const label = refEl.dataset.label ?? ''
+            const first = findFirstRef(view.state.doc, label)
+            const isFirst = first !== null && view.nodeDOM(first.pos) === refEl
+            const hit = isFirst ? findDefinition(view.state.doc, label) : first
             if (!hit) return false
             event.preventDefault()
             scrollToAndFlash(view, hit.pos)
