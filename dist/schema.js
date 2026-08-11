@@ -503,6 +503,46 @@ var note_anchor = {
     }];
   }
 };
+var footnote_ref = {
+  group: "inline",
+  inline: true,
+  atom: true,
+  selectable: true,
+  attrs: { label: { default: "" } },
+  parseDOM: [{
+    tag: "sup[data-footnote-ref]",
+    getAttrs(dom) {
+      return { label: dom.dataset.label ?? "" };
+    }
+  }],
+  toDOM(node) {
+    return ["sup", {
+      "data-footnote-ref": "",
+      "data-label": node.attrs.label,
+      class: "moraya-footnote-ref",
+      contenteditable: "false"
+    }];
+  }
+};
+var footnote_definition = {
+  group: "block",
+  content: "block+",
+  defining: true,
+  attrs: { label: { default: "" } },
+  parseDOM: [{
+    tag: "div[data-footnote-def]",
+    getAttrs(dom) {
+      return { label: dom.dataset.label ?? "" };
+    }
+  }],
+  toDOM(node) {
+    return ["div", {
+      "data-footnote-def": "",
+      "data-label": node.attrs.label,
+      class: "moraya-footnote-def"
+    }, 0];
+  }
+};
 var math_inline = {
   group: "inline",
   content: "text*",
@@ -874,7 +914,9 @@ function buildNodes(mediaResolver) {
     defList,
     defListTerm,
     defListDescription,
-    note_anchor
+    note_anchor,
+    footnote_ref,
+    footnote_definition
   };
 }
 var marks = {

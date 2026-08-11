@@ -13,8 +13,8 @@ var highlight_exports = {};
 __export(highlight_exports, {
   createHighlightPlugin: () => createHighlightPlugin
 });
-import { Plugin as Plugin6, PluginKey as PluginKey6 } from "prosemirror-state";
-import { Decoration as Decoration4, DecorationSet as DecorationSet4 } from "prosemirror-view";
+import { Plugin as Plugin7, PluginKey as PluginKey7 } from "prosemirror-state";
+import { Decoration as Decoration5, DecorationSet as DecorationSet5 } from "prosemirror-view";
 import hljs from "highlight.js/lib/core";
 import javascript from "highlight.js/lib/languages/javascript";
 import typescript from "highlight.js/lib/languages/typescript";
@@ -100,7 +100,7 @@ function getDecorations(doc2) {
         const from = blockStart + span.relOffset;
         const to = from + span.length;
         if (from < to) {
-          decorations.push(Decoration4.inline(from, to, { class: span.classes }));
+          decorations.push(Decoration5.inline(from, to, { class: span.classes }));
         }
       }
       return;
@@ -125,7 +125,7 @@ function getDecorations(doc2) {
         const classes = span.classes.join(" ");
         toCache.push({ relOffset, length, classes });
         decorations.push(
-          Decoration4.inline(blockStart + relOffset, blockStart + relOffset + length, { class: classes })
+          Decoration5.inline(blockStart + relOffset, blockStart + relOffset + length, { class: classes })
         );
       }
     }
@@ -135,13 +135,13 @@ function getDecorations(doc2) {
     }
     hljsCache.set(cKey, toCache);
   });
-  return DecorationSet4.create(doc2, decorations);
+  return DecorationSet5.create(doc2, decorations);
 }
 function createHighlightPlugin() {
   let debounceTimer = null;
   let needsRefresh = false;
   let currentView = null;
-  return new Plugin6({
+  return new Plugin7({
     key: highlightPluginKey,
     state: {
       init(_, state) {
@@ -292,7 +292,7 @@ var init_highlight = __esm({
     hljs.registerLanguage("nginx", nginx);
     hljs.registerLanguage("nginxconf", nginx);
     hljs.registerLanguage("shell", shell);
-    highlightPluginKey = new PluginKey6("moraya-syntax-highlight");
+    highlightPluginKey = new PluginKey7("moraya-syntax-highlight");
     HLJS_CACHE_MAX = 100;
     hljsCache = /* @__PURE__ */ new Map();
   }
@@ -303,10 +303,10 @@ var emoji_exports = {};
 __export(emoji_exports, {
   createEmojiPlugin: () => createEmojiPlugin
 });
-import { Plugin as Plugin7, PluginKey as PluginKey7 } from "prosemirror-state";
+import { Plugin as Plugin8, PluginKey as PluginKey8 } from "prosemirror-state";
 import { get as getEmoji } from "node-emoji";
 function createEmojiPlugin() {
-  return new Plugin7({
+  return new Plugin8({
     key: emojiPluginKey,
     props: {
       handleTextInput(view, from, to, text2) {
@@ -343,7 +343,7 @@ var emojiPluginKey;
 var init_emoji = __esm({
   "src/plugins/emoji.ts"() {
     "use strict";
-    emojiPluginKey = new PluginKey7("moraya-emoji");
+    emojiPluginKey = new PluginKey8("moraya-emoji");
   }
 });
 
@@ -1100,12 +1100,12 @@ import {
   AllSelection as AllSelection2,
   EditorState,
   NodeSelection,
-  Plugin as Plugin8,
-  PluginKey as PluginKey8,
+  Plugin as Plugin9,
+  PluginKey as PluginKey9,
   Selection,
   TextSelection as TextSelection4
 } from "prosemirror-state";
-import { Decoration as Decoration5, DecorationSet as DecorationSet5, EditorView } from "prosemirror-view";
+import { Decoration as Decoration6, DecorationSet as DecorationSet6, EditorView } from "prosemirror-view";
 import { keymap } from "prosemirror-keymap";
 import { history, redo, undo } from "prosemirror-history";
 import {
@@ -1628,6 +1628,46 @@ var note_anchor = {
     }];
   }
 };
+var footnote_ref = {
+  group: "inline",
+  inline: true,
+  atom: true,
+  selectable: true,
+  attrs: { label: { default: "" } },
+  parseDOM: [{
+    tag: "sup[data-footnote-ref]",
+    getAttrs(dom) {
+      return { label: dom.dataset.label ?? "" };
+    }
+  }],
+  toDOM(node) {
+    return ["sup", {
+      "data-footnote-ref": "",
+      "data-label": node.attrs.label,
+      class: "moraya-footnote-ref",
+      contenteditable: "false"
+    }];
+  }
+};
+var footnote_definition = {
+  group: "block",
+  content: "block+",
+  defining: true,
+  attrs: { label: { default: "" } },
+  parseDOM: [{
+    tag: "div[data-footnote-def]",
+    getAttrs(dom) {
+      return { label: dom.dataset.label ?? "" };
+    }
+  }],
+  toDOM(node) {
+    return ["div", {
+      "data-footnote-def": "",
+      "data-label": node.attrs.label,
+      class: "moraya-footnote-def"
+    }, 0];
+  }
+};
 var math_inline = {
   group: "inline",
   content: "text*",
@@ -1999,7 +2039,9 @@ function buildNodes(mediaResolver) {
     defList,
     defListTerm,
     defListDescription,
-    note_anchor
+    note_anchor,
+    footnote_ref,
+    footnote_definition
   };
 }
 var marks = {
@@ -2155,13 +2197,294 @@ function ins_plugin(md2) {
   });
 }
 
+// node_modules/.pnpm/markdown-it-footnote@4.0.0/node_modules/markdown-it-footnote/index.mjs
+function render_footnote_anchor_name(tokens, idx, options, env) {
+  const n = Number(tokens[idx].meta.id + 1).toString();
+  let prefix = "";
+  if (typeof env.docId === "string") prefix = `-${env.docId}-`;
+  return prefix + n;
+}
+function render_footnote_caption(tokens, idx) {
+  let n = Number(tokens[idx].meta.id + 1).toString();
+  if (tokens[idx].meta.subId > 0) n += `:${tokens[idx].meta.subId}`;
+  return `[${n}]`;
+}
+function render_footnote_ref(tokens, idx, options, env, slf) {
+  const id = slf.rules.footnote_anchor_name(tokens, idx, options, env, slf);
+  const caption = slf.rules.footnote_caption(tokens, idx, options, env, slf);
+  let refid = id;
+  if (tokens[idx].meta.subId > 0) refid += `:${tokens[idx].meta.subId}`;
+  return `<sup class="footnote-ref"><a href="#fn${id}" id="fnref${refid}">${caption}</a></sup>`;
+}
+function render_footnote_block_open(tokens, idx, options) {
+  return (options.xhtmlOut ? '<hr class="footnotes-sep" />\n' : '<hr class="footnotes-sep">\n') + '<section class="footnotes">\n<ol class="footnotes-list">\n';
+}
+function render_footnote_block_close() {
+  return "</ol>\n</section>\n";
+}
+function render_footnote_open(tokens, idx, options, env, slf) {
+  let id = slf.rules.footnote_anchor_name(tokens, idx, options, env, slf);
+  if (tokens[idx].meta.subId > 0) id += `:${tokens[idx].meta.subId}`;
+  return `<li id="fn${id}" class="footnote-item">`;
+}
+function render_footnote_close() {
+  return "</li>\n";
+}
+function render_footnote_anchor(tokens, idx, options, env, slf) {
+  let id = slf.rules.footnote_anchor_name(tokens, idx, options, env, slf);
+  if (tokens[idx].meta.subId > 0) id += `:${tokens[idx].meta.subId}`;
+  return ` <a href="#fnref${id}" class="footnote-backref">\u21A9\uFE0E</a>`;
+}
+function footnote_plugin(md2) {
+  const parseLinkLabel = md2.helpers.parseLinkLabel;
+  const isSpace = md2.utils.isSpace;
+  md2.renderer.rules.footnote_ref = render_footnote_ref;
+  md2.renderer.rules.footnote_block_open = render_footnote_block_open;
+  md2.renderer.rules.footnote_block_close = render_footnote_block_close;
+  md2.renderer.rules.footnote_open = render_footnote_open;
+  md2.renderer.rules.footnote_close = render_footnote_close;
+  md2.renderer.rules.footnote_anchor = render_footnote_anchor;
+  md2.renderer.rules.footnote_caption = render_footnote_caption;
+  md2.renderer.rules.footnote_anchor_name = render_footnote_anchor_name;
+  function footnote_def(state, startLine, endLine, silent) {
+    const start = state.bMarks[startLine] + state.tShift[startLine];
+    const max = state.eMarks[startLine];
+    if (start + 4 > max) return false;
+    if (state.src.charCodeAt(start) !== 91) return false;
+    if (state.src.charCodeAt(start + 1) !== 94) return false;
+    let pos;
+    for (pos = start + 2; pos < max; pos++) {
+      if (state.src.charCodeAt(pos) === 32) return false;
+      if (state.src.charCodeAt(pos) === 93) {
+        break;
+      }
+    }
+    if (pos === start + 2) return false;
+    if (pos + 1 >= max || state.src.charCodeAt(++pos) !== 58) return false;
+    if (silent) return true;
+    pos++;
+    if (!state.env.footnotes) state.env.footnotes = {};
+    if (!state.env.footnotes.refs) state.env.footnotes.refs = {};
+    const label = state.src.slice(start + 2, pos - 2);
+    state.env.footnotes.refs[`:${label}`] = -1;
+    const token_fref_o = new state.Token("footnote_reference_open", "", 1);
+    token_fref_o.meta = { label };
+    token_fref_o.level = state.level++;
+    state.tokens.push(token_fref_o);
+    const oldBMark = state.bMarks[startLine];
+    const oldTShift = state.tShift[startLine];
+    const oldSCount = state.sCount[startLine];
+    const oldParentType = state.parentType;
+    const posAfterColon = pos;
+    const initial = state.sCount[startLine] + pos - (state.bMarks[startLine] + state.tShift[startLine]);
+    let offset = initial;
+    while (pos < max) {
+      const ch = state.src.charCodeAt(pos);
+      if (isSpace(ch)) {
+        if (ch === 9) {
+          offset += 4 - offset % 4;
+        } else {
+          offset++;
+        }
+      } else {
+        break;
+      }
+      pos++;
+    }
+    state.tShift[startLine] = pos - posAfterColon;
+    state.sCount[startLine] = offset - initial;
+    state.bMarks[startLine] = posAfterColon;
+    state.blkIndent += 4;
+    state.parentType = "footnote";
+    if (state.sCount[startLine] < state.blkIndent) {
+      state.sCount[startLine] += state.blkIndent;
+    }
+    state.md.block.tokenize(state, startLine, endLine, true);
+    state.parentType = oldParentType;
+    state.blkIndent -= 4;
+    state.tShift[startLine] = oldTShift;
+    state.sCount[startLine] = oldSCount;
+    state.bMarks[startLine] = oldBMark;
+    const token_fref_c = new state.Token("footnote_reference_close", "", -1);
+    token_fref_c.level = --state.level;
+    state.tokens.push(token_fref_c);
+    return true;
+  }
+  function footnote_inline(state, silent) {
+    const max = state.posMax;
+    const start = state.pos;
+    if (start + 2 >= max) return false;
+    if (state.src.charCodeAt(start) !== 94) return false;
+    if (state.src.charCodeAt(start + 1) !== 91) return false;
+    const labelStart = start + 2;
+    const labelEnd = parseLinkLabel(state, start + 1);
+    if (labelEnd < 0) return false;
+    if (!silent) {
+      if (!state.env.footnotes) state.env.footnotes = {};
+      if (!state.env.footnotes.list) state.env.footnotes.list = [];
+      const footnoteId = state.env.footnotes.list.length;
+      const tokens = [];
+      state.md.inline.parse(
+        state.src.slice(labelStart, labelEnd),
+        state.md,
+        state.env,
+        tokens
+      );
+      const token = state.push("footnote_ref", "", 0);
+      token.meta = { id: footnoteId };
+      state.env.footnotes.list[footnoteId] = {
+        content: state.src.slice(labelStart, labelEnd),
+        tokens
+      };
+    }
+    state.pos = labelEnd + 1;
+    state.posMax = max;
+    return true;
+  }
+  function footnote_ref2(state, silent) {
+    const max = state.posMax;
+    const start = state.pos;
+    if (start + 3 > max) return false;
+    if (!state.env.footnotes || !state.env.footnotes.refs) return false;
+    if (state.src.charCodeAt(start) !== 91) return false;
+    if (state.src.charCodeAt(start + 1) !== 94) return false;
+    let pos;
+    for (pos = start + 2; pos < max; pos++) {
+      if (state.src.charCodeAt(pos) === 32) return false;
+      if (state.src.charCodeAt(pos) === 10) return false;
+      if (state.src.charCodeAt(pos) === 93) {
+        break;
+      }
+    }
+    if (pos === start + 2) return false;
+    if (pos >= max) return false;
+    pos++;
+    const label = state.src.slice(start + 2, pos - 1);
+    if (typeof state.env.footnotes.refs[`:${label}`] === "undefined") return false;
+    if (!silent) {
+      if (!state.env.footnotes.list) state.env.footnotes.list = [];
+      let footnoteId;
+      if (state.env.footnotes.refs[`:${label}`] < 0) {
+        footnoteId = state.env.footnotes.list.length;
+        state.env.footnotes.list[footnoteId] = { label, count: 0 };
+        state.env.footnotes.refs[`:${label}`] = footnoteId;
+      } else {
+        footnoteId = state.env.footnotes.refs[`:${label}`];
+      }
+      const footnoteSubId = state.env.footnotes.list[footnoteId].count;
+      state.env.footnotes.list[footnoteId].count++;
+      const token = state.push("footnote_ref", "", 0);
+      token.meta = { id: footnoteId, subId: footnoteSubId, label };
+    }
+    state.pos = pos;
+    state.posMax = max;
+    return true;
+  }
+  function footnote_tail(state) {
+    let tokens;
+    let current;
+    let currentLabel;
+    let insideRef = false;
+    const refTokens = {};
+    if (!state.env.footnotes) {
+      return;
+    }
+    state.tokens = state.tokens.filter(function(tok) {
+      if (tok.type === "footnote_reference_open") {
+        insideRef = true;
+        current = [];
+        currentLabel = tok.meta.label;
+        return false;
+      }
+      if (tok.type === "footnote_reference_close") {
+        insideRef = false;
+        refTokens[":" + currentLabel] = current;
+        return false;
+      }
+      if (insideRef) {
+        current.push(tok);
+      }
+      return !insideRef;
+    });
+    if (!state.env.footnotes.list) {
+      return;
+    }
+    const list = state.env.footnotes.list;
+    state.tokens.push(new state.Token("footnote_block_open", "", 1));
+    for (let i = 0, l = list.length; i < l; i++) {
+      const token_fo = new state.Token("footnote_open", "", 1);
+      token_fo.meta = { id: i, label: list[i].label };
+      state.tokens.push(token_fo);
+      if (list[i].tokens) {
+        tokens = [];
+        const token_po = new state.Token("paragraph_open", "p", 1);
+        token_po.block = true;
+        tokens.push(token_po);
+        const token_i = new state.Token("inline", "", 0);
+        token_i.children = list[i].tokens;
+        token_i.content = list[i].content;
+        tokens.push(token_i);
+        const token_pc = new state.Token("paragraph_close", "p", -1);
+        token_pc.block = true;
+        tokens.push(token_pc);
+      } else if (list[i].label) {
+        tokens = refTokens[`:${list[i].label}`];
+      }
+      if (tokens) state.tokens = state.tokens.concat(tokens);
+      let lastParagraph;
+      if (state.tokens[state.tokens.length - 1].type === "paragraph_close") {
+        lastParagraph = state.tokens.pop();
+      } else {
+        lastParagraph = null;
+      }
+      const t = list[i].count > 0 ? list[i].count : 1;
+      for (let j = 0; j < t; j++) {
+        const token_a = new state.Token("footnote_anchor", "", 0);
+        token_a.meta = { id: i, subId: j, label: list[i].label };
+        state.tokens.push(token_a);
+      }
+      if (lastParagraph) {
+        state.tokens.push(lastParagraph);
+      }
+      state.tokens.push(new state.Token("footnote_close", "", -1));
+    }
+    state.tokens.push(new state.Token("footnote_block_close", "", -1));
+  }
+  md2.block.ruler.before("reference", "footnote_def", footnote_def, { alt: ["paragraph", "reference"] });
+  md2.inline.ruler.after("image", "footnote_inline", footnote_inline);
+  md2.inline.ruler.after("footnote_inline", "footnote_ref", footnote_ref2);
+  md2.core.ruler.after("inline", "footnote_tail", footnote_tail);
+}
+
 // src/markdown.ts
 import { MarkdownParser, MarkdownSerializer } from "prosemirror-markdown";
 var md = new MarkdownIt({
   html: true,
   linkify: false,
   typographer: false
-}).enable(["table", "strikethrough"]).use(deflistPlugin).use(texmathPlugin).use(ins_plugin);
+}).enable(["table", "strikethrough"]).use(deflistPlugin).use(texmathPlugin).use(ins_plugin).use(footnote_plugin);
+md.core.ruler.disable("footnote_tail");
+md.inline.ruler.disable("footnote_inline");
+md.inline.ruler.after("footnote_ref", "footnote_ref_orphan", (state, silent) => {
+  const src = state.src;
+  const start = state.pos;
+  if (src.charCodeAt(start) !== 91) return false;
+  if (src.charCodeAt(start + 1) !== 94) return false;
+  let pos = start + 2;
+  for (; pos < state.posMax; pos++) {
+    const ch = src.charCodeAt(pos);
+    if (ch === 32 || ch === 10) return false;
+    if (ch === 93) break;
+  }
+  if (pos === start + 2) return false;
+  if (pos >= state.posMax) return false;
+  if (!silent) {
+    const tok = state.push("footnote_ref", "", 0);
+    tok.meta = { label: src.slice(start + 2, pos) };
+  }
+  state.pos = pos + 1;
+  return true;
+});
 md.inline.ruler.push("caret_highlight", (state, silent) => {
   const start = state.pos;
   if (state.src.charCodeAt(start) !== 94) return false;
@@ -2267,6 +2590,23 @@ function tagPairedHtmlInline(tokens) {
     }
   }
 }
+function fixFootnoteDefMaps(tokens) {
+  for (let i = 0; i < tokens.length; i++) {
+    const open = tokens[i];
+    if (!open || open.type !== "footnote_reference_open") continue;
+    let start = Infinity;
+    let end = -Infinity;
+    for (let j = i + 1; j < tokens.length; j++) {
+      const t = tokens[j];
+      if (!t) continue;
+      if (t.type === "footnote_reference_close") break;
+      if (!t.map) continue;
+      start = Math.min(start, t.map[0]);
+      end = Math.max(end, t.map[1]);
+    }
+    if (start !== Infinity && end !== -Infinity) open.map = [start, end];
+  }
+}
 function preserveBlankLines(tokens) {
   function mkToken(type, tag, nesting, extra) {
     return {
@@ -2348,6 +2688,7 @@ var _origMdParse = md.parse.bind(md);
 md.parse = function(src, env) {
   let tokens = _origMdParse(src, env);
   tagPairedHtmlInline(tokens);
+  fixFootnoteDefMaps(tokens);
   tokens = preserveBlankLines(tokens);
   return tokens;
 };
@@ -2515,6 +2856,18 @@ var parserTokens = {
   critic_note: {
     node: "note_anchor",
     getAttrs: (tok) => ({ note: tok.meta?.note ?? "" })
+  },
+  // ── Footnote tokens ──
+  // markdown-it-footnote 的引用 token(以及我们的兜底规则)都叫 footnote_ref。
+  footnote_ref: {
+    node: "footnote_ref",
+    getAttrs: (tok) => ({ label: tok.meta?.label ?? "" })
+  },
+  // 定义的 token 名是 footnote_reference_open/close —— markdown-it-footnote 的
+  // 既定命名,不是 footnote_definition_*。`block:` 规格自动配对 open/close。
+  footnote_reference: {
+    block: "footnote_definition",
+    getAttrs: (tok) => ({ label: tok.meta?.label ?? "" })
   }
 };
 var MorayaMarkdownParser = class extends MarkdownParser {
@@ -2792,6 +3145,13 @@ var serializer = new MarkdownSerializer(
     },
     note_anchor(state, node) {
       state.write(`{>>${sanitizeNote(node.attrs.note)}<<}`);
+    },
+    footnote_ref(state, node) {
+      state.write(`[^${node.attrs.label}]`);
+    },
+    footnote_definition(state, node) {
+      state.write(`[^${node.attrs.label}]: `);
+      state.wrapBlock("    ", "", node, () => state.renderContent(node));
     },
     // ── Table nodes ──
     table(state, node) {
@@ -4284,6 +4644,117 @@ function createEditorPropsPlugin(opts) {
   });
 }
 
+// src/plugins/footnote-plugin.ts
+import { Plugin as Plugin6, PluginKey as PluginKey6 } from "prosemirror-state";
+import { Decoration as Decoration4, DecorationSet as DecorationSet4 } from "prosemirror-view";
+var footnotePluginKey = new PluginKey6("moraya-footnote");
+function findDefinition(doc2, label) {
+  let hit = null;
+  doc2.descendants((node, pos) => {
+    if (hit) return false;
+    if (node.type.name === "footnote_definition" && node.attrs.label === label) {
+      hit = { node, pos };
+      return false;
+    }
+    return true;
+  });
+  return hit;
+}
+function findFirstRef(doc2, label) {
+  let hit = null;
+  doc2.descendants((node, pos) => {
+    if (hit) return false;
+    if (node.type.name === "footnote_ref" && node.attrs.label === label) {
+      hit = { node, pos };
+      return false;
+    }
+    return true;
+  });
+  return hit;
+}
+function definitionText(doc2, label) {
+  const hit = findDefinition(doc2, label);
+  if (!hit) return "";
+  const parts = [];
+  hit.node.forEach((child) => {
+    parts.push(child.textContent);
+  });
+  return parts.join(" ").trim();
+}
+function buildDecorations3(doc2) {
+  const numByLabel = /* @__PURE__ */ new Map();
+  const decos = [];
+  doc2.descendants((node, pos) => {
+    if (node.type.name !== "footnote_ref") return;
+    const label = node.attrs.label || "";
+    let num = numByLabel.get(label);
+    if (num === void 0) {
+      num = numByLabel.size + 1;
+      numByLabel.set(label, num);
+    }
+    decos.push(Decoration4.node(pos, pos + node.nodeSize, { "data-num": String(num) }));
+  });
+  return DecorationSet4.create(doc2, decos);
+}
+function createFootnotePlugin() {
+  return new Plugin6({
+    key: footnotePluginKey,
+    state: {
+      init(_config, state) {
+        return buildDecorations3(state.doc);
+      },
+      apply(tr, old) {
+        return tr.docChanged ? buildDecorations3(tr.doc) : old;
+      }
+    },
+    props: {
+      decorations(state) {
+        return footnotePluginKey.getState(state);
+      },
+      handleDOMEvents: {
+        mouseover(view, event) {
+          const target = event.target?.closest?.("[data-footnote-ref]");
+          if (!(target instanceof HTMLElement)) return false;
+          const label = target.dataset.label ?? "";
+          const text2 = definitionText(view.state.doc, label);
+          target.title = text2 ? `[^${label}] ${text2}` : `[^${label}] (\u672A\u5B9A\u4E49)`;
+          return false;
+        },
+        mousedown(view, event) {
+          const el = event.target;
+          const refEl = el?.closest?.("[data-footnote-ref]");
+          const defEl = el?.closest?.("[data-footnote-def]");
+          if (refEl instanceof HTMLElement) {
+            const hit = findDefinition(view.state.doc, refEl.dataset.label ?? "");
+            if (!hit) return false;
+            event.preventDefault();
+            scrollToAndFlash(view, hit.pos);
+            return true;
+          }
+          if (defEl instanceof HTMLElement && el === defEl) {
+            const hit = findFirstRef(view.state.doc, defEl.dataset.label ?? "");
+            if (!hit) return false;
+            event.preventDefault();
+            scrollToAndFlash(view, hit.pos);
+            return true;
+          }
+          return false;
+        }
+      }
+    }
+  });
+}
+function scrollToAndFlash(view, pos) {
+  const dom = view.nodeDOM(pos);
+  const el = dom instanceof HTMLElement ? dom : dom?.parentElement;
+  if (!el) return;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.add("moraya-footnote-flash");
+  view.dom.ownerDocument.defaultView?.setTimeout(() => {
+    el.classList.remove("moraya-footnote-flash");
+  }, 1200);
+}
+
 // src/doc-cache.ts
 var LRUDocCache = class {
   constructor(maxEntries) {
@@ -4356,21 +4827,21 @@ function preloadEnhancementPlugins(schema, rendererRegistry) {
   return tier1Loading;
 }
 function createImageSelectionPlugin() {
-  return new Plugin8({
-    key: new PluginKey8("moraya-image-selection"),
+  return new Plugin9({
+    key: new PluginKey9("moraya-image-selection"),
     props: {
       decorations(state) {
         const { from, to } = state.selection;
-        if (from === to) return DecorationSet5.empty;
+        if (from === to) return DecorationSet6.empty;
         const decos = [];
         state.doc.nodesBetween(from, to, (node, pos) => {
           if (node.type.name === "image") {
-            decos.push(Decoration5.node(pos, pos + node.nodeSize, { class: "image-in-selection" }));
+            decos.push(Decoration6.node(pos, pos + node.nodeSize, { class: "image-in-selection" }));
           } else if (node.type.name === "html_inline" && /^<img\s/i.test(node.attrs.value || "")) {
-            decos.push(Decoration5.node(pos, pos + node.nodeSize, { class: "image-in-selection" }));
+            decos.push(Decoration6.node(pos, pos + node.nodeSize, { class: "image-in-selection" }));
           }
         });
-        return decos.length ? DecorationSet5.create(state.doc, decos) : DecorationSet5.empty;
+        return decos.length ? DecorationSet6.create(state.doc, decos) : DecorationSet6.empty;
       }
     }
   });
@@ -4737,8 +5208,8 @@ function buildKeymap(schema) {
   return keymap(bindings);
 }
 function createDirtyTrackPlugin(onDocChanged) {
-  return new Plugin8({
-    key: new PluginKey8("moraya-dirty-track"),
+  return new Plugin9({
+    key: new PluginKey9("moraya-dirty-track"),
     view: () => ({
       update: (view, prevState) => {
         if (!prevState || view.state.doc.eq(prevState.doc)) return;
@@ -4749,8 +5220,8 @@ function createDirtyTrackPlugin(onDocChanged) {
 }
 function createLazyChangePlugin(onChange, debounceMs = 500) {
   let changeTimer = null;
-  return new Plugin8({
-    key: new PluginKey8("moraya-lazy-change"),
+  return new Plugin9({
+    key: new PluginKey9("moraya-lazy-change"),
     view: () => ({
       update: (view, prevState) => {
         if (!prevState || view.state.doc.eq(prevState.doc)) return;
@@ -4804,8 +5275,8 @@ async function createEditorPlugins(opts, schemaArg) {
     // List shortcuts using event.code (reliable on macOS where Option+key
     // produces special chars). Must come before keymap so this handler has
     // highest priority.
-    new Plugin8({
-      key: new PluginKey8("moraya-list-shortcuts"),
+    new Plugin9({
+      key: new PluginKey9("moraya-list-shortcuts"),
       props: {
         handleKeyDown(view, event) {
           const mod = event.metaKey || event.ctrlKey;
@@ -4837,6 +5308,7 @@ async function createEditorPlugins(opts, schemaArg) {
   plugins.push(createCursorSyntaxPlugin(opts.inlineSyntaxScope ?? "cursor"));
   plugins.push(createLinkTextPlugin());
   plugins.push(createInlineCodeConvertPlugin(opts.enableInlineMarkInputRules !== false));
+  plugins.push(createFootnotePlugin());
   if (opts.enableImageSelection !== false) {
     plugins.push(createImageSelectionPlugin());
   }
