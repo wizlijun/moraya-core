@@ -627,19 +627,26 @@ const footnote_ref: NodeSpec = {
 
 // `[^label]: 内容` 定义。content 为 block+ 而非 inline*,因为脚注定义
 // 允许缩进续行构成多个段落(markdown-it-footnote 会解析成多个 paragraph)。
+// `tight` 记的是**源文件形态**:该定义是否紧贴着上一条定义写(中间没有空行)。
+// 连续写 `[^a]: x` / `[^b]: y` 是常见排版,若不记住,序列化会在每两条之间插入
+// 空行 —— 语义不变但改写了用户的文件。这与"编号不进 attrs"不矛盾:编号是渲染
+// 层派生值,tight 是源文件里客观存在的事实(prosemirror-markdown 对 list 亦然)。
 const footnote_definition: NodeSpec = {
   group: 'block',
   content: 'block+',
   defining: true,
-  attrs: { label: { default: '' } },
+  attrs: { label: { default: '' }, tight: { default: false } },
   parseDOM: [{
     tag: 'div[data-footnote-def]',
-    getAttrs(dom: HTMLElement) { return { label: dom.dataset.label ?? '' } },
+    getAttrs(dom: HTMLElement) {
+      return { label: dom.dataset.label ?? '', tight: dom.dataset.tight === 'true' }
+    },
   }],
   toDOM(node) {
     return ['div', {
       'data-footnote-def': '',
       'data-label': node.attrs.label as string,
+      'data-tight': String(node.attrs.tight),
       class: 'moraya-footnote-def',
     }, 0]
   },

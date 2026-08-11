@@ -528,17 +528,18 @@ var footnote_definition = {
   group: "block",
   content: "block+",
   defining: true,
-  attrs: { label: { default: "" } },
+  attrs: { label: { default: "" }, tight: { default: false } },
   parseDOM: [{
     tag: "div[data-footnote-def]",
     getAttrs(dom) {
-      return { label: dom.dataset.label ?? "" };
+      return { label: dom.dataset.label ?? "", tight: dom.dataset.tight === "true" };
     }
   }],
   toDOM(node) {
     return ["div", {
       "data-footnote-def": "",
       "data-label": node.attrs.label,
+      "data-tight": String(node.attrs.tight),
       class: "moraya-footnote-def"
     }, 0];
   }

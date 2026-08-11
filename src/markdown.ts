@@ -258,6 +258,8 @@ function tagPairedHtmlInline(tokens: InlineToken[]): void {
  * 行范围取自定义内部子 token 的 map 并集。必须在 preserveBlankLines 之前跑。
  */
 function fixFootnoteDefMaps(tokens: InlineToken[]): void {
+  let prevDefEnd = -1
+
   for (let i = 0; i < tokens.length; i++) {
     const open = tokens[i]
     if (!open || open.type !== 'footnote_reference_open') continue
@@ -273,7 +275,15 @@ function fixFootnoteDefMaps(tokens: InlineToken[]): void {
       end = Math.max(end, t.map[1] as number)
     }
 
-    if (start !== Infinity && end !== -Infinity) open.map = [start, end]
+    if (start === Infinity || end === -Infinity) continue
+    open.map = [start, end]
+
+    // 紧贴上一条定义(中间没有空行)。序列化据此决定要不要插空行,否则连续写的
+    // 定义列表每保存一次就被撑开一次。
+    const meta: Record<string, unknown> = { ...(open.meta ?? {}) }
+    meta.tight = start === prevDefEnd
+    open.meta = meta
+    prevDefEnd = end
   }
 }
 
@@ -571,7 +581,10 @@ const parserTokens: Record<string, import('prosemirror-markdown').ParseSpec> = {
   // 既定命名,不是 footnote_definition_*。`block:` 规格自动配对 open/close。
   footnote_reference: {
     block: 'footnote_definition',
-    getAttrs: (tok) => ({ label: ((tok.meta as { label?: string } | null)?.label) ?? '' }),
+    getAttrs: (tok) => {
+      const meta = tok.meta as { label?: string; tight?: boolean } | null
+      return { label: meta?.label ?? '', tight: meta?.tight === true }
+    },
   },
 }
 
@@ -938,6 +951,10 @@ const serializer = new MarkdownSerializer(
       state.write(`[^${node.attrs.label as string}]`)
     },
     footnote_definition(state, node) {
+      // tight = 源文件里紧贴着上一条定义写。flushClose(1) 只换一行、不留空行,
+      // 保住 `[^a]: x` / `[^b]: y` 这种连续写法。
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (node.attrs.tight) (state as any).flushClose(1)
       state.write(`[^${node.attrs.label as string}]: `)
       // 第一段紧跟冒号,后续段落缩进 4 空格 —— 标准脚注续行写法。
       // firstDelim 传 '' 因为首段前缀已由上面的 write 写过。

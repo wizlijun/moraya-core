@@ -890,17 +890,18 @@ var footnote_definition = {
   group: "block",
   content: "block+",
   defining: true,
-  attrs: { label: { default: "" } },
+  attrs: { label: { default: "" }, tight: { default: false } },
   parseDOM: [{
     tag: "div[data-footnote-def]",
     getAttrs(dom) {
-      return { label: dom.dataset.label ?? "" };
+      return { label: dom.dataset.label ?? "", tight: dom.dataset.tight === "true" };
     }
   }],
   toDOM(node) {
     return ["div", {
       "data-footnote-def": "",
       "data-label": node.attrs.label,
+      "data-tight": String(node.attrs.tight),
       class: "moraya-footnote-def"
     }, 0];
   }
@@ -1442,6 +1443,7 @@ function tagPairedHtmlInline(tokens) {
   }
 }
 function fixFootnoteDefMaps(tokens) {
+  let prevDefEnd = -1;
   for (let i = 0; i < tokens.length; i++) {
     const open = tokens[i];
     if (!open || open.type !== "footnote_reference_open") continue;
@@ -1455,7 +1457,12 @@ function fixFootnoteDefMaps(tokens) {
       start = Math.min(start, t.map[0]);
       end = Math.max(end, t.map[1]);
     }
-    if (start !== Infinity && end !== -Infinity) open.map = [start, end];
+    if (start === Infinity || end === -Infinity) continue;
+    open.map = [start, end];
+    const meta = { ...open.meta ?? {} };
+    meta.tight = start === prevDefEnd;
+    open.meta = meta;
+    prevDefEnd = end;
   }
 }
 function preserveBlankLines(tokens) {
@@ -1718,7 +1725,10 @@ var parserTokens = {
   // 既定命名,不是 footnote_definition_*。`block:` 规格自动配对 open/close。
   footnote_reference: {
     block: "footnote_definition",
-    getAttrs: (tok) => ({ label: tok.meta?.label ?? "" })
+    getAttrs: (tok) => {
+      const meta = tok.meta;
+      return { label: meta?.label ?? "", tight: meta?.tight === true };
+    }
   }
 };
 var MorayaMarkdownParser = class extends MarkdownParser {
@@ -2001,6 +2011,7 @@ var serializer = new MarkdownSerializer(
       state.write(`[^${node.attrs.label}]`);
     },
     footnote_definition(state, node) {
+      if (node.attrs.tight) state.flushClose(1);
       state.write(`[^${node.attrs.label}]: `);
       state.wrapBlock("    ", "", node, () => state.renderContent(node));
     },

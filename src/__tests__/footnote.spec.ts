@@ -81,6 +81,18 @@ describe('footnote roundtrip byte-fidelity', () => {
     expectByteStable('引用[^m]。\n\n[^m]: 第一段。\n\n    第二段续行。\n')
   })
 
+  test('连续定义(中间无空行)不得被撑开', () => {
+    expectByteStable('甲[^a] 乙[^b] 丙[^c]。\n\n[^a]: A。\n[^b]: B。\n[^c]: C。\n')
+  })
+
+  test('空行分隔的定义保持空行', () => {
+    expectByteStable('甲[^a] 乙[^b]。\n\n[^a]: A。\n\n[^b]: B。\n')
+  })
+
+  test('紧凑与空行混排各自保持原样', () => {
+    expectByteStable('甲[^a] 乙[^b] 丙[^c]。\n\n[^a]: A。\n[^b]: B。\n\n[^c]: C。\n')
+  })
+
   // 下面两例不能断言"一次往返字节相等":prosemirror-markdown 的 esc() 会转义文本里
   // 所有的 `[` `]`,这与脚注无关(`数组 a[0]` 同样会变成 `a\[0\]`)。那是既有全局行为,
   // 且符合既有 roundtrip.spec.ts 的标准 —— 允许首次归一化,二次往返必须稳定。
