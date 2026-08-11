@@ -59,6 +59,7 @@ import { createCursorSyntaxPlugin, type InlineSyntaxScope } from './plugins/curs
 import { createLinkTextPlugin } from './plugins/link-text-plugin'
 import { createInlineCodeConvertPlugin } from './plugins/inline-code-convert'
 import { createEditorPropsPlugin } from './plugins/editor-props-plugin'
+import { createFootnotePlugin } from './plugins/footnote-plugin'
 import type {
   MediaResolver,
   LinkOpener,
@@ -839,6 +840,7 @@ export async function createEditorPlugins(
   plugins.push(createCursorSyntaxPlugin(opts.inlineSyntaxScope ?? 'cursor'))
   plugins.push(createLinkTextPlugin())
   plugins.push(createInlineCodeConvertPlugin(opts.enableInlineMarkInputRules !== false))
+  plugins.push(createFootnotePlugin())
 
   if (opts.enableImageSelection !== false) {
     plugins.push(createImageSelectionPlugin())

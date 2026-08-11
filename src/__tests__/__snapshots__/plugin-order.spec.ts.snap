@@ -112,6 +112,15 @@ exports[`plugin order fingerprint (§1.2.2) > default consumer config (Web-style
   },
   {
     "index": 12,
+    "key": "moraya-footnote$",
+    "slots": {
+      "props": true,
+      "state": true,
+      "view": false,
+    },
+  },
+  {
+    "index": 13,
     "key": "moraya-image-selection$",
     "slots": {
       "props": true,
@@ -120,7 +129,7 @@ exports[`plugin order fingerprint (§1.2.2) > default consumer config (Web-style
     },
   },
   {
-    "index": 13,
+    "index": 14,
     "key": "moraya-syntax-highlight$",
     "slots": {
       "props": true,
@@ -129,7 +138,7 @@ exports[`plugin order fingerprint (§1.2.2) > default consumer config (Web-style
     },
   },
   {
-    "index": 14,
+    "index": 15,
     "key": "moraya-emoji$",
     "slots": {
       "props": true,
@@ -154,6 +163,7 @@ exports[`plugin order fingerprint (§1.2.2) > desktop-style consumer config (ena
   "moraya-cursor-syntax$",
   "moraya-link-text$",
   "moraya-inline-code-convert$",
+  "moraya-footnote$",
   "moraya-image-selection$1",
   "moraya-syntax-highlight$",
   "moraya-emoji$",
@@ -173,6 +183,7 @@ exports[`plugin order fingerprint (§1.2.2) > history disabled (Yjs-style consum
   "moraya-cursor-syntax$",
   "moraya-link-text$",
   "moraya-inline-code-convert$",
+  "moraya-footnote$",
   "moraya-image-selection$2",
   "moraya-syntax-highlight$",
   "moraya-emoji$",
