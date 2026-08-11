@@ -8,12 +8,18 @@ import { createFootnotePlugin, footnotePluginKey, findDefinition, definitionText
 
 const schema = createSchema({ mediaResolver: new BrowserMediaResolver() })
 
-function decosFor(src: string): string[] {
+function numsFor(src: string, typeName: 'footnote_ref' | 'footnote_definition'): string[] {
   const doc = parseMarkdown(src, schema)
   const state = EditorState.create({ doc, plugins: [createFootnotePlugin()] })
   const set = footnotePluginKey.getState(state) as DecorationSet
-  return set.find().map((d) => (d as unknown as { type: { attrs: Record<string, string> } }).type.attrs['data-num'])
+  return set
+    .find()
+    .filter((d) => doc.nodeAt(d.from)?.type.name === typeName)
+    .map((d) => (d as unknown as { type: { attrs: Record<string, string> } }).type.attrs['data-num'])
 }
+
+/** 引用侧的编号。 */
+const decosFor = (src: string) => numsFor(src, 'footnote_ref')
 
 describe('footnote numbering', () => {
   test('按首次出现顺序编号', () => {
@@ -69,5 +75,35 @@ describe('footnote back-reference lookup', () => {
   test('孤儿定义没有引用时返回 null', () => {
     const doc = parseMarkdown('正文。\n\n[^orphan]: 孤儿。\n', schema)
     expect(findFirstRef(doc, 'orphan')).toBeNull()
+  })
+})
+
+describe('定义块也带编号(底部列表要等宽对齐)', () => {
+  test('定义拿到与其引用相同的编号', () => {
+    const src = '甲[^a] 乙[^b]。\n\n[^a]: A。\n\n[^b]: B。\n'
+    expect(numsFor(src, 'footnote_definition')).toEqual(['1', '2'])
+  })
+
+  test('定义书写顺序与引用顺序不一致时,编号跟引用走', () => {
+    // 正文先引 second 后引 first,但定义按 first/second 顺序写
+    const src = '先[^second] 后[^first]。\n\n[^first]: 1。\n\n[^second]: 2。\n'
+    // 定义按文档位置返回:first 的定义在前,它的编号应是 2
+    expect(numsFor(src, 'footnote_definition')).toEqual(['2', '1'])
+  })
+
+  test('定义写在引用之前也能拿到正确编号', () => {
+    const src = '[^a]: A。\n\n后引用[^a]。\n'
+    expect(numsFor(src, 'footnote_definition')).toEqual(['1'])
+  })
+
+  test('孤儿定义不挂 data-num(CSS 退回等宽占位)', () => {
+    const src = '正文无引用。\n\n[^orphan]: 孤儿。\n'
+    expect(numsFor(src, 'footnote_definition')).toEqual([])
+  })
+
+  test('同一 label 引用两次,定义仍只有一个编号', () => {
+    const src = '一[^x] 二[^x]。\n\n[^x]: X。\n'
+    expect(numsFor(src, 'footnote_ref')).toEqual(['1', '1'])
+    expect(numsFor(src, 'footnote_definition')).toEqual(['1'])
   })
 })

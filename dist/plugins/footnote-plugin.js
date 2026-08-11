@@ -37,15 +37,17 @@ function definitionText(doc, label) {
 }
 function buildDecorations(doc) {
   const numByLabel = /* @__PURE__ */ new Map();
-  const decos = [];
-  doc.descendants((node, pos) => {
+  doc.descendants((node) => {
     if (node.type.name !== "footnote_ref") return;
     const label = node.attrs.label || "";
-    let num = numByLabel.get(label);
-    if (num === void 0) {
-      num = numByLabel.size + 1;
-      numByLabel.set(label, num);
-    }
+    if (!numByLabel.has(label)) numByLabel.set(label, numByLabel.size + 1);
+  });
+  const decos = [];
+  doc.descendants((node, pos) => {
+    const name = node.type.name;
+    if (name !== "footnote_ref" && name !== "footnote_definition") return;
+    const num = numByLabel.get(node.attrs.label || "");
+    if (num === void 0) return;
     decos.push(Decoration.node(pos, pos + node.nodeSize, { "data-num": String(num) }));
   });
   return DecorationSet.create(doc, decos);
@@ -67,11 +69,19 @@ function createFootnotePlugin() {
       },
       handleDOMEvents: {
         mouseover(view, event) {
-          const target = event.target?.closest?.("[data-footnote-ref]");
-          if (!(target instanceof HTMLElement)) return false;
-          const label = target.dataset.label ?? "";
-          const text = definitionText(view.state.doc, label);
-          target.title = text ? `[^${label}] ${text}` : `[^${label}] (\u672A\u5B9A\u4E49)`;
+          const el = event.target;
+          const refEl = el?.closest?.("[data-footnote-ref]");
+          if (refEl instanceof HTMLElement) {
+            const label = refEl.dataset.label ?? "";
+            const text = definitionText(view.state.doc, label);
+            refEl.title = text ? `[^${label}] ${text}` : `[^${label}] (\u672A\u5B9A\u4E49)`;
+            return false;
+          }
+          const defEl = el?.closest?.("[data-footnote-def]");
+          if (defEl instanceof HTMLElement) {
+            const label = defEl.dataset.label ?? "";
+            defEl.title = defEl.hasAttribute("data-num") ? `[^${label}]` : `[^${label}] (\u672A\u88AB\u5F15\u7528)`;
+          }
           return false;
         },
         mousedown(view, event) {

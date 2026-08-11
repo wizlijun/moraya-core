@@ -54,19 +54,31 @@ export function definitionText(doc: PmNode, label: string): string {
   return parts.join(' ').trim()
 }
 
-/** 按首次出现顺序给每个 label 编号,并为每个引用生成一个 data-num decoration。 */
+/**
+ * 按首次出现顺序给每个 label 编号,并把编号发给**引用和定义两边**。
+ *
+ * 定义块也要编号,否则底部的定义列表只能显示 `[^label]`,长短不一、参差难读;
+ * 而编号天然等宽对齐。完整 label 退到 hover 的 tooltip 里。
+ *
+ * 编号只由**引用**的出现顺序决定,所以要先扫一遍全文建表,再挂 decoration ——
+ * 定义可能写在引用之前,一遍边扫边编号会把顺序弄反。
+ */
 function buildDecorations(doc: PmNode): DecorationSet {
   const numByLabel = new Map<string, number>()
-  const decos: Decoration[] = []
-
-  doc.descendants((node, pos) => {
+  doc.descendants((node) => {
     if (node.type.name !== 'footnote_ref') return
     const label = (node.attrs.label as string) || ''
-    let num = numByLabel.get(label)
-    if (num === undefined) {
-      num = numByLabel.size + 1
-      numByLabel.set(label, num)
-    }
+    if (!numByLabel.has(label)) numByLabel.set(label, numByLabel.size + 1)
+  })
+
+  const decos: Decoration[] = []
+  doc.descendants((node, pos) => {
+    const name = node.type.name
+    if (name !== 'footnote_ref' && name !== 'footnote_definition') return
+    // 孤儿定义(没有任何引用)拿不到编号,不挂 data-num;CSS 会退回一个等宽的占位
+    // 标记,而不是把 label 摊开 —— 否则又回到长短不一。
+    const num = numByLabel.get((node.attrs.label as string) || '')
+    if (num === undefined) return
     decos.push(Decoration.node(pos, pos + node.nodeSize, { 'data-num': String(num) }))
   })
 
@@ -91,13 +103,26 @@ export function createFootnotePlugin(): Plugin {
       },
       handleDOMEvents: {
         mouseover(view, event) {
-          const target = (event.target as HTMLElement | null)?.closest?.('[data-footnote-ref]')
-          if (!(target instanceof HTMLElement)) return false
-          const label = target.dataset.label ?? ''
-          const text = definitionText(view.state.doc, label)
+          const el = event.target as HTMLElement | null
           // 用原生 title 而不是自绘浮层:脚注 hover 是低频只读交互,自绘要处理定位、
-          // 边界、滚动跟随、销毁时机,不值当。无定义时明确提示而不是静默空白。
-          target.title = text ? `[^${label}] ${text}` : `[^${label}] (未定义)`
+          // 边界、滚动跟随、销毁时机,不值当。
+          const refEl = el?.closest?.('[data-footnote-ref]')
+          if (refEl instanceof HTMLElement) {
+            const label = refEl.dataset.label ?? ''
+            const text = definitionText(view.state.doc, label)
+            // 无定义时明确提示而不是静默空白。
+            refEl.title = text ? `[^${label}] ${text}` : `[^${label}] (未定义)`
+            return false
+          }
+          // 定义块显示的是编号,完整 label 只在 hover 时给出 —— 这是编号方案的
+          // 代价,不补上就没法从底部列表反查 label 了。
+          const defEl = el?.closest?.('[data-footnote-def]')
+          if (defEl instanceof HTMLElement) {
+            const label = defEl.dataset.label ?? ''
+            defEl.title = defEl.hasAttribute('data-num')
+              ? `[^${label}]`
+              : `[^${label}] (未被引用)`
+          }
           return false
         },
         mousedown(view, event) {
