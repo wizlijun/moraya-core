@@ -24,6 +24,7 @@ import MarkdownIt from 'markdown-it'
 import deflistPlugin from 'markdown-it-deflist'
 import texmathPlugin from 'markdown-it-texmath'
 import markPlugin from 'markdown-it-mark'
+import footnotePlugin from 'markdown-it-footnote'
 import { MarkdownParser, MarkdownSerializer } from 'prosemirror-markdown'
 import type { MarkdownSerializerState } from 'prosemirror-markdown'
 import type { Node as PmNode, Mark, Schema } from 'prosemirror-model'
@@ -40,6 +41,45 @@ const md = new MarkdownIt({
   .use(deflistPlugin)
   .use(texmathPlugin)
   .use(markPlugin)
+  .use(footnotePlugin)
+
+// markdown-it-footnote 默认把所有定义搬到文末、按引用顺序重排、并**删掉未被引用的
+// 定义** —— 这三件事全部由 core 规则 `footnote_tail` 一手包办。它的块规则本身是
+// 原位产出 token 的,所以禁掉 tail 就得到原位保真 + 孤儿定义保留。
+md.core.ruler.disable('footnote_tail')
+
+// 我们不做内联脚注 `^[内容]`。这不是"不支持"而是**必须显式禁用**:留着它会把
+// `^[内容]` 解析成没有 label 的 footnote_ref,序列化时无从知道写回什么,等于引入
+// 一种新的数据破坏。禁掉后它安分地保持纯文本。
+md.inline.ruler.disable('footnote_inline')
+
+// markdown-it-footnote 的 `footnote_ref` 规则要求 label 已在 env.footnotes.refs 里
+// 登记过(即定义必须存在),因此无定义的裸引用 `[^loop]` 不成节点,会退回纯文本并被
+// 序列化器的 esc() 加上反斜杠。兜底规则在它之后接手,产出同名 token,使有无定义都
+// 成节点(与 Obsidian 一致)。
+md.inline.ruler.after('footnote_ref', 'footnote_ref_orphan', (state, silent) => {
+  const src = state.src
+  const start = state.pos
+  if (src.charCodeAt(start) !== 0x5B /* [ */) return false
+  if (src.charCodeAt(start + 1) !== 0x5E /* ^ */) return false
+
+  let pos = start + 2
+  for (; pos < state.posMax; pos++) {
+    const ch = src.charCodeAt(pos)
+    // label 内不允许空格/换行 —— 与 markdown-it-footnote 的 label 规则一致
+    if (ch === 0x20 || ch === 0x0A) return false
+    if (ch === 0x5D /* ] */) break
+  }
+  if (pos === start + 2) return false      // 空 label
+  if (pos >= state.posMax) return false    // 未闭合
+
+  if (!silent) {
+    const tok = state.push('footnote_ref', '', 0)
+    tok.meta = { label: src.slice(start + 2, pos) }
+  }
+  state.pos = pos + 1
+  return true
+})
 
 // ── Caret highlight rule: ^^text^^ → caret_highlight_open/close ──────────────
 
@@ -207,6 +247,36 @@ function tagPairedHtmlInline(tokens: InlineToken[]): void {
  * This post-processor restores each extra blank line as an empty paragraph,
  * giving Typora-style round-trip fidelity for multi-Enter spacing.
  */
+/**
+ * 给 `footnote_reference_open` 补上 `map`。
+ *
+ * markdown-it-footnote 建这个 token 时不设行号(它原本的 `footnote_tail` 会把定义
+ * 整体搬到文末,行号对它没意义)。但我们禁掉了 tail、让定义留在原位,于是
+ * {@link preserveBlankLines} 靠 `tok.map` 追踪行号的链条就在这里断掉:定义块占的
+ * 行数被当成空行,定义后面每跟一段正文就凭空多出两个空段落,往返多出 `\n\n`。
+ *
+ * 行范围取自定义内部子 token 的 map 并集。必须在 preserveBlankLines 之前跑。
+ */
+function fixFootnoteDefMaps(tokens: InlineToken[]): void {
+  for (let i = 0; i < tokens.length; i++) {
+    const open = tokens[i]
+    if (!open || open.type !== 'footnote_reference_open') continue
+
+    let start = Infinity
+    let end = -Infinity
+    for (let j = i + 1; j < tokens.length; j++) {
+      const t = tokens[j]
+      if (!t) continue
+      if (t.type === 'footnote_reference_close') break
+      if (!t.map) continue
+      start = Math.min(start, t.map[0] as number)
+      end = Math.max(end, t.map[1] as number)
+    }
+
+    if (start !== Infinity && end !== -Infinity) open.map = [start, end]
+  }
+}
+
 function preserveBlankLines(tokens: InlineToken[]): InlineToken[] {
   function mkToken(type: string, tag: string, nesting: number, extra?: Partial<InlineToken>): InlineToken {
     return {
@@ -306,6 +376,7 @@ const _origMdParse = md.parse.bind(md)
 md.parse = function (src: string, env: unknown) {
   let tokens = _origMdParse(src, env) as unknown as InlineToken[]
   tagPairedHtmlInline(tokens)
+  fixFootnoteDefMaps(tokens)
   tokens = preserveBlankLines(tokens)
   return tokens as unknown as ReturnType<typeof _origMdParse>
 }
@@ -488,6 +559,19 @@ const parserTokens: Record<string, import('prosemirror-markdown').ParseSpec> = {
   critic_note: {
     node: 'note_anchor',
     getAttrs: (tok) => ({ note: ((tok.meta as { note?: string } | null)?.note) ?? '' }),
+  },
+
+  // ── Footnote tokens ──
+  // markdown-it-footnote 的引用 token(以及我们的兜底规则)都叫 footnote_ref。
+  footnote_ref: {
+    node: 'footnote_ref',
+    getAttrs: (tok) => ({ label: ((tok.meta as { label?: string } | null)?.label) ?? '' }),
+  },
+  // 定义的 token 名是 footnote_reference_open/close —— markdown-it-footnote 的
+  // 既定命名,不是 footnote_definition_*。`block:` 规格自动配对 open/close。
+  footnote_reference: {
+    block: 'footnote_definition',
+    getAttrs: (tok) => ({ label: ((tok.meta as { label?: string } | null)?.label) ?? '' }),
   },
 }
 
@@ -849,6 +933,15 @@ const serializer = new MarkdownSerializer(
     },
     note_anchor(state, node) {
       state.write(`{>>${sanitizeNote(node.attrs.note as string)}<<}`)
+    },
+    footnote_ref(state, node) {
+      state.write(`[^${node.attrs.label as string}]`)
+    },
+    footnote_definition(state, node) {
+      state.write(`[^${node.attrs.label as string}]: `)
+      // 第一段紧跟冒号,后续段落缩进 4 空格 —— 标准脚注续行写法。
+      // firstDelim 传 '' 因为首段前缀已由上面的 write 写过。
+      state.wrapBlock('    ', '', node, () => state.renderContent(node))
     },
 
     // ── Table nodes ──
