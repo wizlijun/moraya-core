@@ -53,6 +53,35 @@ md.core.ruler.disable('footnote_tail')
 // 一种新的数据破坏。禁掉后它安分地保持纯文本。
 md.inline.ruler.disable('footnote_inline')
 
+// Keep ASCII escapes such as %20/%23/%25 intact so Markdown destinations do
+// not lose information, while preserving the existing readable Unicode form.
+function decodeMultibytePercentSequences(value: string): string {
+  return value.replace(
+    /%[C-F][0-9A-F](?:%[89AB][0-9A-F])+/gi,
+    (match) => { try { return decodeURIComponent(match) } catch { return match } },
+  )
+}
+
+function restoreLocalWindowsSeparators(value: string): string {
+  const hasUriScheme = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)
+  const isWindowsDrivePath = /^[A-Za-z]:%5C/i.test(value)
+  return hasUriScheme && !isWindowsDrivePath ? value : value.replace(/%5C/gi, '\\')
+}
+
+function serializeImageDestination(src: string): string {
+  const normalized = decodeMultibytePercentSequences(md.normalizeLink(src))
+  // Angle destinations are the CommonMark form that safely carries encoded
+  // spaces and delimiter characters through another parse.
+  return /[%\s()<>]/.test(normalized) ? `<${normalized}>` : normalized
+}
+
+function serializeImageTitle(title: string): string {
+  return title
+    .replace(/\r?\n/g, ' ')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+}
+
 // markdown-it-footnote 的 `footnote_ref` 规则要求 label 已在 env.footnotes.refs 里
 // 登记过(即定义必须存在),因此无定义的裸引用 `[^loop]` 不成节点,会退回纯文本并被
 // 序列化器的 esc() 加上反斜杠。兜底规则在它之后接手,产出同名 token,使有无定义都
@@ -521,11 +550,14 @@ const parserTokens: Record<string, import('prosemirror-markdown').ParseSpec> = {
   image: {
     node: 'image',
     getAttrs(token) {
-      // markdown-it URL-encodes backslashes in paths (\ → %5C),
-      // which breaks Windows local paths on roundtrip.
-      // Decode to preserve the original path.
-      let src = token.attrGet('src') || ''
-      try { src = decodeURIComponent(src) } catch { /* keep as-is */ }
+      // Preserve ASCII escapes such as %20 and %25. Filesystem resolution
+      // decodes once at the I/O boundary; decoding here makes a later
+      // serialization emit invalid bare spaces and loses literal percent data.
+      // Restore only markdown-it's encoded Windows separators so absolute and
+      // relative Windows paths are still recognized before filesystem loading.
+      const src = restoreLocalWindowsSeparators(
+        decodeMultibytePercentSequences(token.attrGet('src') || ''),
+      )
       return {
         src,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -545,15 +577,11 @@ const parserTokens: Record<string, import('prosemirror-markdown').ParseSpec> = {
   link: {
     mark: 'link',
     getAttrs(token) {
-      let href = token.attrGet('href') || ''
       // Decode percent-encoded non-ASCII UTF-8 characters (e.g. Chinese/Japanese/Korean)
       // so URLs preserve original characters through roundtrips.
       // Only decodes multi-byte UTF-8 sequences (C2-FF start bytes + 80-BF continuations),
       // leaving ASCII encodings like %20 (space), %28/%29 (parens) intact.
-      href = href.replace(
-        /%[C-F][0-9A-F](?:%[89AB][0-9A-F])+/gi,
-        (m) => { try { return decodeURIComponent(m) } catch { return m } },
-      )
+      const href = decodeMultibytePercentSequences(token.attrGet('href') || '')
       return {
         href,
         title: token.attrGet('title') || null,
@@ -698,11 +726,7 @@ class MorayaMarkdownParser extends MarkdownParser {
 
       if (!hasContent) {
         // Empty-text link: insert raw markdown syntax as literal text
-        let href = tok.attrGet('href') || ''
-        href = href.replace(
-          /%[C-F][0-9A-F](?:%[89AB][0-9A-F])+/gi,
-          (m: string) => { try { return decodeURIComponent(m) } catch { return m } },
-        )
+        const href = decodeMultibytePercentSequences(tok.attrGet('href') || '')
         const title = tok.attrGet('title')
         let literal = `[](${href}`
         if (title) literal += ` "${title}"`
@@ -923,12 +947,12 @@ const serializer = new MarkdownSerializer(
     },
     image(state, node) {
       const alt = state.esc((node.attrs.alt as string) || '', false)
-      const src = (node.attrs.src as string) || ''
+      const destination = serializeImageDestination((node.attrs.src as string) || '')
       const title = node.attrs.title as string | null | undefined
       if (title) {
-        state.write(`![${alt}](${src} "${state.esc(title, false)}")`)
+        state.write(`![${alt}](${destination} "${serializeImageTitle(title)}")`)
       } else {
-        state.write(`![${alt}](${src})`)
+        state.write(`![${alt}](${destination})`)
       }
     },
     hardbreak(state) {

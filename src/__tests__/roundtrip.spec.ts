@@ -7,6 +7,7 @@
  */
 import { describe, test, expect } from 'vitest'
 import { parseMarkdown, serializeMarkdown } from '../markdown'
+import { createSchema } from '../schema'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -47,6 +48,94 @@ describe('roundtrip data traps (§4.4)', () => {
     const input = '![alt](https://example.com/img.png)\n'
     const out = serializeMarkdown(parseMarkdown(input))
     expect(out).toContain('![alt](https://example.com/img.png)')
+  })
+
+  test.each([
+    ['./Life%20in%20Three%20Dimensions/cover.jpg', './Life%20in%20Three%20Dimensions/cover.jpg'],
+    ['./A%23B/cover.jpg', './A%23B/cover.jpg'],
+    ['./100%25/cover.jpg', './100%25/cover.jpg'],
+    ['./literal%2520/cover.jpg', './literal%2520/cover.jpg'],
+    ['./中文 封面/书.jpg', './中文%20封面/书.jpg'],
+  ])('image destination %s stays encoded and reparses as an image', (src, normalizedSrc) => {
+    const out = serializeMarkdown(parseMarkdown(`![封面](<${src}>)\n`))
+    expect(out).toContain(`![封面](<${normalizedSrc}>)`)
+
+    let reparsedSrc: string | undefined
+    parseMarkdown(out).descendants((node) => {
+      if (node.type.name === 'image') reparsedSrc = node.attrs.src as string
+      return undefined
+    })
+    expect(reparsedSrc).toBe(normalizedSrc)
+    expect(serializeMarkdown(parseMarkdown(out))).toBe(out)
+  })
+
+  test('image destination with spaces and a title is serialized safely', () => {
+    const input = '![封面](<./Life in Three Dimensions/cover.jpg> "Book cover")\n'
+    const out = serializeMarkdown(parseMarkdown(input))
+    expect(out).toContain('![封面](<./Life%20in%20Three%20Dimensions/cover.jpg> "Book cover")')
+    expect(serializeMarkdown(parseMarkdown(out))).toBe(out)
+  })
+
+  test('remote image keeps an encoded backslash in its in-memory URL', () => {
+    let parsedSrc: string | undefined
+    parseMarkdown('![cover](<https://example.com/A%5CB/cover.jpg>)').descendants((node) => {
+      if (node.type.name === 'image') parsedSrc = node.attrs.src as string
+      return undefined
+    })
+    expect(parsedSrc).toBe('https://example.com/A%5CB/cover.jpg')
+  })
+
+  test.each([
+    ['./Life in Three Dimensions/cover.jpg', './Life%20in%20Three%20Dimensions/cover.jpg'],
+    ['C:\\Users\\Bruce Lee\\cover.jpg', 'C:%5CUsers%5CBruce%20Lee%5Ccover.jpg'],
+  ])('programmatic image src %s is normalized before serialization', (src, normalizedSrc) => {
+    const schema = parseMarkdown('').type.schema
+    const image = schema.nodes.image!.create({ src, alt: 'cover', title: '' })
+    const doc = schema.nodes.doc!.create(null, schema.nodes.paragraph!.create(null, image))
+    const out = serializeMarkdown(doc)
+
+    expect(out).toContain(`![cover](<${normalizedSrc}>)`)
+    expect(serializeMarkdown(parseMarkdown(out))).toBe(out)
+  })
+
+  test('programmatic image title escapes quotes and backslashes', () => {
+    const schema = parseMarkdown('').type.schema
+    const title = 'Book "cover" \\ proof'
+    const image = schema.nodes.image!.create({ src: './cover.jpg', alt: 'cover', title })
+    const doc = schema.nodes.doc!.create(null, schema.nodes.paragraph!.create(null, image))
+    const out = serializeMarkdown(doc)
+
+    let reparsedTitle: string | undefined
+    parseMarkdown(out).descendants((node) => {
+      if (node.type.name === 'image') reparsedTitle = node.attrs.title as string
+      return undefined
+    })
+    expect(reparsedTitle).toBe(title)
+    expect(serializeMarkdown(parseMarkdown(out))).toBe(out)
+  })
+
+  test.each([
+    ['/vault/Life%20in%20Three%20Dimensions/cover.jpg', '/vault/Life in Three Dimensions/cover.jpg'],
+    ['/vault/literal%2520/cover.jpg', '/vault/literal%20/cover.jpg'],
+    ['C:\\Users\\Bruce%20Lee\\cover.jpg', 'C:\\Users\\Bruce Lee\\cover.jpg'],
+  ])('filesystem image loading decodes %s exactly once', (src, filesystemPath) => {
+    const loaded: string[] = []
+    const schema = createSchema({
+      mediaResolver: {
+        async loadLocalImage(path) { loaded.push(path); return 'blob:test' },
+        async loadLocalMedia(path) { return path },
+        async loadRemoteMedia(url) { return url },
+      },
+    })
+    let imageNode: import('prosemirror-model').Node | undefined
+    parseMarkdown(`![cover](<${src}>)`, schema).descendants((node) => {
+      if (node.type.name === 'image') imageNode = node
+      return undefined
+    })
+
+    expect(imageNode).toBeDefined()
+    schema.nodes.image!.spec.toDOM!(imageNode!)
+    expect(loaded).toEqual([filesystemPath])
   })
 
   test('link with title is preserved including title', () => {

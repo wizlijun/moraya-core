@@ -2438,6 +2438,30 @@ var md = new MarkdownIt({
 }).enable(["table", "strikethrough"]).use(deflistPlugin).use(texmathPlugin).use(ins_plugin).use(footnote_plugin);
 md.core.ruler.disable("footnote_tail");
 md.inline.ruler.disable("footnote_inline");
+function decodeMultibytePercentSequences(value) {
+  return value.replace(
+    /%[C-F][0-9A-F](?:%[89AB][0-9A-F])+/gi,
+    (match) => {
+      try {
+        return decodeURIComponent(match);
+      } catch {
+        return match;
+      }
+    }
+  );
+}
+function restoreLocalWindowsSeparators(value) {
+  const hasUriScheme = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(value);
+  const isWindowsDrivePath = /^[A-Za-z]:%5C/i.test(value);
+  return hasUriScheme && !isWindowsDrivePath ? value : value.replace(/%5C/gi, "\\");
+}
+function serializeImageDestination(src) {
+  const normalized = decodeMultibytePercentSequences(md.normalizeLink(src));
+  return /[%\s()<>]/.test(normalized) ? `<${normalized}>` : normalized;
+}
+function serializeImageTitle(title) {
+  return title.replace(/\r?\n/g, " ").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
 md.inline.ruler.after("footnote_ref", "footnote_ref_orphan", (state, silent) => {
   const src = state.src;
   const start = state.pos;
@@ -2786,11 +2810,9 @@ var parserTokens = {
   image: {
     node: "image",
     getAttrs(token) {
-      let src = token.attrGet("src") || "";
-      try {
-        src = decodeURIComponent(src);
-      } catch {
-      }
+      const src = restoreLocalWindowsSeparators(
+        decodeMultibytePercentSequences(token.attrGet("src") || "")
+      );
       return {
         src,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2809,17 +2831,7 @@ var parserTokens = {
   link: {
     mark: "link",
     getAttrs(token) {
-      let href = token.attrGet("href") || "";
-      href = href.replace(
-        /%[C-F][0-9A-F](?:%[89AB][0-9A-F])+/gi,
-        (m) => {
-          try {
-            return decodeURIComponent(m);
-          } catch {
-            return m;
-          }
-        }
-      );
+      const href = decodeMultibytePercentSequences(token.attrGet("href") || "");
       return {
         href,
         title: token.attrGet("title") || null
@@ -2924,17 +2936,7 @@ var MorayaMarkdownParser = class extends MarkdownParser {
         }
       }
       if (!hasContent) {
-        let href = tok.attrGet("href") || "";
-        href = href.replace(
-          /%[C-F][0-9A-F](?:%[89AB][0-9A-F])+/gi,
-          (m) => {
-            try {
-              return decodeURIComponent(m);
-            } catch {
-              return m;
-            }
-          }
-        );
+        const href = decodeMultibytePercentSequences(tok.attrGet("href") || "");
         const title = tok.attrGet("title");
         let literal = `[](${href}`;
         if (title) literal += ` "${title}"`;
@@ -3107,12 +3109,12 @@ var serializer = new MarkdownSerializer(
     },
     image(state, node) {
       const alt = state.esc(node.attrs.alt || "", false);
-      const src = node.attrs.src || "";
+      const destination = serializeImageDestination(node.attrs.src || "");
       const title = node.attrs.title;
       if (title) {
-        state.write(`![${alt}](${src} "${state.esc(title, false)}")`);
+        state.write(`![${alt}](${destination} "${serializeImageTitle(title)}")`);
       } else {
-        state.write(`![${alt}](${src})`);
+        state.write(`![${alt}](${destination})`);
       }
     },
     hardbreak(state) {
