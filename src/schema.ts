@@ -128,7 +128,7 @@ function isAbsoluteFilePath(src: string): boolean {
 /** Check if a src is a relative file path (not a URL scheme). */
 function isRelativePath(src: string): boolean {
   if (!src) return false
-  if (/^(https?:|data:|blob:|javascript:|vbscript:|tauri:|\/\/)/i.test(src)) return false
+  if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|#|\?)/i.test(src)) return false
   if (src.startsWith('/') || /^[A-Z]:[\\/]/i.test(src)) return false
   return true
 }
@@ -149,20 +149,40 @@ function resolveRelativePath(src: string): string {
 
 // ── Image / media DI helpers ────────────────────────────────────
 
-/**
- * Apply MediaResolver-loaded URL to an <img> element. Decodes URL-encoded
- * paths first (markdown parsers URL-encode non-ASCII; filesystem expects
- * actual Unicode characters).
- */
+/** Decode only the URL path, before joining the filesystem directory. */
+function localMediaSource(src: string) {
+  const raw = src.trim()
+  const fileUrl = /^file:\/\//i.test(raw)
+  if (!fileUrl && !isAbsoluteFilePath(raw) && !isRelativePath(raw)) return null
+  let path = raw.split(/[?#]/, 1)[0] ?? ''
+  if (fileUrl) {
+    const match = /^file:\/\/([^/]*)(\/.*)$/i.exec(path)
+    if (!match) return null
+    const host = match[1]!
+    const pathname = match[2]!
+    path = host && host.toLowerCase() !== 'localhost' ? `//${host}${pathname}` : pathname
+    if (/^\/[a-z]:\//i.test(path)) path = path.slice(1)
+  }
+  try { path = decodeURIComponent(path) } catch { /* Preserve literal percent names. */ }
+  if (!path || path.includes('\0')) return null
+  return {
+    path: fileUrl || isAbsoluteFilePath(path) ? path : resolveRelativePath(path),
+    source: { src, baseDir: documentBaseDir },
+  }
+}
+
+/** Apply a local image URL while retaining its original source for the host. */
 function loadLocalImageSrc(
   img: HTMLImageElement,
   src: string,
   mediaResolver: MediaResolver
 ): void {
-  let path: string
-  try { path = decodeURIComponent(src) } catch { path = src }
-
-  mediaResolver.loadLocalImage(path).then((url) => {
+  const local = localMediaSource(src)
+  if (!local) {
+    img.src = src
+    return
+  }
+  mediaResolver.loadLocalImage(local.path, local.source).then((url) => {
     if (url) img.src = url
     else img.dispatchEvent(new Event('error'))
   }).catch(() => {
@@ -176,14 +196,9 @@ function setMediaSrc(
   src: string,
   mediaResolver: MediaResolver
 ): void {
-  if (isAbsoluteFilePath(src)) {
-    mediaResolver.loadLocalMedia(src).then((url) => {
-      if (!url) return
-      el.src = url
-      if (el instanceof HTMLMediaElement) el.load()
-    }).catch(() => { /* media load failed silently */ })
-  } else if (isRelativePath(src)) {
-    mediaResolver.loadLocalMedia(resolveRelativePath(src)).then((url) => {
+  const local = localMediaSource(src)
+  if (local) {
+    mediaResolver.loadLocalMedia(local.path, local.source).then((url) => {
       if (!url) return
       el.src = url
       if (el instanceof HTMLMediaElement) el.load()
@@ -239,7 +254,7 @@ function createMediaElement(
   const attrs = extractAllHtmlAttrs(openTag)
 
   for (const [key, val] of Object.entries(attrs)) {
-    if (key === 'src') continue
+    if (key === 'src' || (tagName === 'video' && key === 'poster')) continue
     if (key.startsWith('on')) continue
     el.setAttribute(key, val)
   }
@@ -269,6 +284,16 @@ function createMediaElement(
 
   if (attrs.src) {
     setMediaSrc(el, attrs.src, mediaResolver)
+  }
+  if (tagName === 'video' && attrs.poster) {
+    const local = localMediaSource(attrs.poster)
+    if (local) {
+      mediaResolver.loadLocalImage(local.path, local.source).then((url) => {
+        if (url) el.setAttribute('poster', url)
+      }).catch(() => { /* poster unavailable */ })
+    } else {
+      el.setAttribute('poster', attrs.poster)
+    }
   }
 
   wrapper.appendChild(el)
@@ -953,13 +978,7 @@ function buildImageNodeSpec(mediaResolver: MediaResolver): NodeSpec {
       }
 
       const src = node.attrs.src as string
-      if (isAbsoluteFilePath(src)) {
-        loadLocalImageSrc(img, src, mediaResolver)
-      } else if (isRelativePath(src)) {
-        loadLocalImageSrc(img, resolveRelativePath(src), mediaResolver)
-      } else {
-        img.src = src
-      }
+      loadLocalImageSrc(img, src, mediaResolver)
 
       container.appendChild(img)
       return container
@@ -1008,13 +1027,7 @@ function buildHtmlInlineNodeSpec(mediaResolver: MediaResolver): NodeSpec {
           img.onerror = () => {
             showBrokenImage(wrapper, value)
           }
-          if (isAbsoluteFilePath(src)) {
-            loadLocalImageSrc(img, src, mediaResolver)
-          } else if (isRelativePath(src)) {
-            loadLocalImageSrc(img, resolveRelativePath(src), mediaResolver)
-          } else {
-            img.src = src
-          }
+          loadLocalImageSrc(img, src, mediaResolver)
           wrapper.appendChild(img)
         } else {
           showBrokenImage(wrapper, value)

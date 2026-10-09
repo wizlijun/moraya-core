@@ -13,12 +13,19 @@
  * Loads local / remote media as a URL usable in `img.src` / `video.src` / etc.
  * Typically returns blob: URLs for local files (cached by the implementation).
  */
+export interface LocalMediaSource {
+  /** Original Markdown/HTML URL, before decoding or joining the directory. */
+  src: string
+  /** Filesystem directory used by core. Never URL-decode this value. */
+  baseDir: string
+}
+
 export interface MediaResolver {
-  /** Read a local image file by absolute path; return a blob: URL (implementation caches internally). */
-  loadLocalImage(absolutePath: string): Promise<string>
+  /** Read a local image. Source context lets hosts apply logical-root policies. */
+  loadLocalImage(absolutePath: string, source?: LocalMediaSource): Promise<string>
 
   /** Read a local audio/video file by absolute path; return a blob: URL. */
-  loadLocalMedia(absolutePath: string): Promise<string>
+  loadLocalMedia(absolutePath: string, source?: LocalMediaSource): Promise<string>
 
   /**
    * Fetch a remote media URL.

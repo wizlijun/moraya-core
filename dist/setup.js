@@ -1209,7 +1209,7 @@ function isAbsoluteFilePath(src) {
 }
 function isRelativePath(src) {
   if (!src) return false;
-  if (/^(https?:|data:|blob:|javascript:|vbscript:|tauri:|\/\/)/i.test(src)) return false;
+  if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|#|\?)/i.test(src)) return false;
   if (src.startsWith("/") || /^[A-Z]:[\\/]/i.test(src)) return false;
   return true;
 }
@@ -1225,14 +1225,36 @@ function resolveRelativePath(src) {
   }
   return `${base}${sep}${rel}`;
 }
-function loadLocalImageSrc(img, src, mediaResolver) {
-  let path;
-  try {
-    path = decodeURIComponent(src);
-  } catch {
-    path = src;
+function localMediaSource(src) {
+  const raw = src.trim();
+  const fileUrl = /^file:\/\//i.test(raw);
+  if (!fileUrl && !isAbsoluteFilePath(raw) && !isRelativePath(raw)) return null;
+  let path = raw.split(/[?#]/, 1)[0] ?? "";
+  if (fileUrl) {
+    const match = /^file:\/\/([^/]*)(\/.*)$/i.exec(path);
+    if (!match) return null;
+    const host = match[1];
+    const pathname = match[2];
+    path = host && host.toLowerCase() !== "localhost" ? `//${host}${pathname}` : pathname;
+    if (/^\/[a-z]:\//i.test(path)) path = path.slice(1);
   }
-  mediaResolver.loadLocalImage(path).then((url) => {
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+  }
+  if (!path || path.includes("\0")) return null;
+  return {
+    path: fileUrl || isAbsoluteFilePath(path) ? path : resolveRelativePath(path),
+    source: { src, baseDir: documentBaseDir }
+  };
+}
+function loadLocalImageSrc(img, src, mediaResolver) {
+  const local = localMediaSource(src);
+  if (!local) {
+    img.src = src;
+    return;
+  }
+  mediaResolver.loadLocalImage(local.path, local.source).then((url) => {
     if (url) img.src = url;
     else img.dispatchEvent(new Event("error"));
   }).catch(() => {
@@ -1240,15 +1262,9 @@ function loadLocalImageSrc(img, src, mediaResolver) {
   });
 }
 function setMediaSrc(el, src, mediaResolver) {
-  if (isAbsoluteFilePath(src)) {
-    mediaResolver.loadLocalMedia(src).then((url) => {
-      if (!url) return;
-      el.src = url;
-      if (el instanceof HTMLMediaElement) el.load();
-    }).catch(() => {
-    });
-  } else if (isRelativePath(src)) {
-    mediaResolver.loadLocalMedia(resolveRelativePath(src)).then((url) => {
+  const local = localMediaSource(src);
+  if (local) {
+    mediaResolver.loadLocalMedia(local.path, local.source).then((url) => {
       if (!url) return;
       el.src = url;
       if (el instanceof HTMLMediaElement) el.load();
@@ -1285,7 +1301,7 @@ function createMediaElement(tagName, value, mediaResolver) {
   const openTag = openTagMatch ? openTagMatch[0] : "";
   const attrs = extractAllHtmlAttrs(openTag);
   for (const [key, val] of Object.entries(attrs)) {
-    if (key === "src") continue;
+    if (key === "src" || tagName === "video" && key === "poster") continue;
     if (key.startsWith("on")) continue;
     el.setAttribute(key, val);
   }
@@ -1311,6 +1327,17 @@ function createMediaElement(tagName, value, mediaResolver) {
   }
   if (attrs.src) {
     setMediaSrc(el, attrs.src, mediaResolver);
+  }
+  if (tagName === "video" && attrs.poster) {
+    const local = localMediaSource(attrs.poster);
+    if (local) {
+      mediaResolver.loadLocalImage(local.path, local.source).then((url) => {
+        if (url) el.setAttribute("poster", url);
+      }).catch(() => {
+      });
+    } else {
+      el.setAttribute("poster", attrs.poster);
+    }
   }
   wrapper.appendChild(el);
   return wrapper;
@@ -1948,13 +1975,7 @@ function buildImageNodeSpec(mediaResolver) {
         showBrokenImage(container, `${alt}(${node.attrs.src}${title})`);
       };
       const src = node.attrs.src;
-      if (isAbsoluteFilePath(src)) {
-        loadLocalImageSrc(img, src, mediaResolver);
-      } else if (isRelativePath(src)) {
-        loadLocalImageSrc(img, resolveRelativePath(src), mediaResolver);
-      } else {
-        img.src = src;
-      }
+      loadLocalImageSrc(img, src, mediaResolver);
       container.appendChild(img);
       return container;
     }
@@ -1993,13 +2014,7 @@ function buildHtmlInlineNodeSpec(mediaResolver) {
           img.onerror = () => {
             showBrokenImage(wrapper, value);
           };
-          if (isAbsoluteFilePath(src)) {
-            loadLocalImageSrc(img, src, mediaResolver);
-          } else if (isRelativePath(src)) {
-            loadLocalImageSrc(img, resolveRelativePath(src), mediaResolver);
-          } else {
-            img.src = src;
-          }
+          loadLocalImageSrc(img, src, mediaResolver);
           wrapper.appendChild(img);
         } else {
           showBrokenImage(wrapper, value);
