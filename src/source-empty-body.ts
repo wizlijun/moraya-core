@@ -33,14 +33,23 @@ function escapeEmptyText(node:PmNode):string {return serializeSourceInlineBody(n
 
 export function prepareEmptyBodyTransaction(base:SourceSession,tr:Transaction,facts:readonly EmptyBody[]):EmptyAttempt {
  const reject=(reason:string):EmptyAttempt=>({kind:'unsupported',reason});
- // Decide applicability from the original target, independently of capture facts.
- const first=tr.steps[0];
- if(!(first instanceof ReplaceStep))return {kind:'not-empty'};
- let blocks=false;first.slice.content.forEach(n=>{if(n.isBlock)blocks=true});
- if(blocks)return {kind:'not-empty'};
- let target;
- try{target=tr.before.resolve(first.from)}catch{return reject('invalid-range')}
- if(!target.parent.isTextblock||target.parent.content.size!==0)return {kind:'not-empty'};
+ // Applicability belongs to the complete actual chain, including a body
+ // emptied or created by an earlier step. Structural block slices remain separate.
+ let emptyInput=false;
+ for(let i=0;i<tr.steps.length;i++){
+  const step=tr.steps[i];
+  if(!(step instanceof ReplaceStep))continue;
+  let blocks=false;step.slice.content.forEach(n=>{if(n.isBlock)blocks=true});
+  if(blocks)continue;
+  const before=tr.docs[i];if(!before)return reject('empty-chain');
+  try{
+   const parent=before.resolve(step.from).parent;
+   if(parent.isTextblock&&parent.content.size===0)emptyInput=true;
+  }catch{return reject('invalid-range')}
+ }
+ if(!emptyInput)return {kind:'not-empty'};
+ if(tr.steps.length!==1)return reject('empty-multistep');
+ const first=tr.steps[0] as ReplaceStep;
  try{
   if(tr.steps.length!==1||tr.docs.length!==1||Object.getPrototypeOf(first)!==ReplaceStep.prototype
    ||!tr.before.eq(base.doc)||!tr.docs[0]!.eq(base.doc)||(first as ReplaceStep & {structure:boolean}).structure

@@ -87,3 +87,31 @@ it('partial TAB expansion cannot supply an empty raw insertion point',()=>{
  const tr=EditorState.create({doc:b.doc}).tr.insertText('X',1),spy=vi.spyOn(markdown,'serializeSourceRootMarkdown');
  try{expect(applySourceBlockTransaction(b,tr).ok).toBe(false);expect(spy).not.toHaveBeenCalled()}finally{spy.mockRestore()}
 });
+
+it.each(['later-empty','emptied-earlier','created-earlier'] as const)('audits every actual step before empty-body fallback: %s',kind=>{
+ const raw='| H | J |\n| --- | --- |\n| A |   |\n',b=open(raw),snapshot=JSON.stringify(b);
+ const state=EditorState.create({doc:b.doc});
+ const tr=kind==='later-empty'?state.tr.insertText('B',16,17).insertText('X',21):
+  kind==='emptied-earlier'?state.tr.delete(16,17).insertText('X',16):
+  state.tr.insert(b.doc.content.size,b.doc.type.schema.nodes.paragraph!.create()).insertText('X',b.doc.content.size+1);
+ expect(tr.steps).toHaveLength(2);
+ expect(tr.docs[0]!.resolve((tr.steps[0] as ReplaceStep).from).parent.content.size).toBeGreaterThan(0);
+ expect(tr.docs[1]!.resolve((tr.steps[1] as ReplaceStep).from).parent.content.size).toBe(0);
+ const spy=vi.spyOn(markdown,'serializeSourceRootMarkdown');
+ try{
+  const result=applySourceBlockTransaction(b,tr);
+  expect(result).toEqual({ok:false,reason:'unsupported-step'});
+  expect(spy).not.toHaveBeenCalled();expect(JSON.stringify(b)).toBe(snapshot);
+ }finally{spy.mockRestore()}
+});
+
+it('pure structural block-slice chains retain the existing empty paragraph behavior',()=>{
+ const b=open(''),tr=EditorState.create({doc:b.doc}).tr.split(1).split(3);
+ expect(tr.steps).toHaveLength(2);
+ for(const step of tr.steps){
+  expect(Object.getPrototypeOf(step)).toBe(ReplaceStep.prototype);
+  expect((step as ReplaceStep).slice.content.firstChild!.isBlock).toBe(true);
+ }
+ const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(true);if(!r.ok)throw Error(r.reason);
+ expect(r.session.source).toBe('\n\n');expect(r.session.doc.eq(tr.doc)).toBe(true);expect(b.source).toBe('');
+});
