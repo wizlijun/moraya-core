@@ -200,7 +200,8 @@ it('net-zero supported steps keep raw source and revision',()=>{
 it('rejects stale docs and unsupported node attrs without source output',()=>{
  const b=open('A\n\nB')
  reject(b,EditorState.create({doc:open('X\n\nB').doc}).tr.insertText('Y',1,2))
- reject(b,transaction(b).setNodeMarkup(0,b.doc.type.schema.nodes.heading,{level:2}))
+ const heading=accept(b,transaction(b).setNodeMarkup(0,b.doc.type.schema.nodes.heading,{level:2}))
+ expect(heading.changedRoots).toEqual([0]);expect(heading.session.source).toBe('## A\n\nB')
  const table=open('| A |\n| --- |\n| B |')
  reject(table,transaction(table).setNodeMarkup(2,undefined,
   {...table.doc.firstChild!.firstChild!.firstChild!.attrs,colwidth:[100]}))

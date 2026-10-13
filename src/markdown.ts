@@ -1608,10 +1608,78 @@ const serializer = new MarkdownSerializer(
   } as any),
 )
 
+// Encode text-leaf edges before mark delimiters can consume their whitespace.
+// This callback sees text, never list markers, link destinations or fence syntax.
+function writeSourceText(state: MarkdownSerializerState, node: PmNode, parent: PmNode, index: number): void {
+  const previous = parent.maybeChild(index - 1), next = parent.maybeChild(index + 1)
+  const starts = !previous || previous.type.name === 'hardbreak'
+    || node.marks.some(mark => !previous.marks.some(other => mark.eq(other)))
+  const ends = !next || next.type.name === 'hardbreak'
+    || node.marks.some(mark => !next.marks.some(other => mark.eq(other)))
+  const value = node.text || ''
+  const lines = value.split('\n')
+  for (let line = 0; line < lines.length; line++) {
+    if (line) state.text('\n', false)
+    const text = lines[line]!, leading = line > 0 || starts ? /^[ \t]*/.exec(text)![0].length : 0
+    const trailing = line < lines.length - 1 || ends ? /[ \t]*$/.exec(text)![0].length : 0
+    const end = Math.max(leading, text.length - trailing)
+    for (let i = 0; i < leading; i++) state.text(text[i] === '\t' ? '&#9;' : '&#32;', false)
+    if (end > leading) state.text(text.slice(leading, end))
+    for (let i = end; i < text.length; i++) state.text(text[i] === '\t' ? '&#9;' : '&#32;', false)
+  }
+}
+function sourceCodeNode(state: MarkdownSerializerState, node: PmNode): void {
+  const language = node.attrs.language
+  if (typeof language !== 'string' || /[\r\n]/.test(language)) throw new UnsupportedSourceCapture()
+  const info = language === 'text' ? '' : language, character = info.includes('`') ? '~' : '`'
+  const runs = node.textContent.match(character === '`' ? /`+/g : /~+/g) || []
+  let length = 3
+  for (const run of runs) length = Math.max(length, run.length + 1)
+  const fence = character.repeat(length)
+  state.write(fence + info + '\n')
+  state.text(node.textContent, false)
+  state.write('\n' + fence)
+  state.closeBlock(node)
+}
+function sourceEmDelimiter(mark: Mark, parent: PmNode, index: number, opening: boolean): string {
+  let from = opening ? index : index - 1, to = from + 1
+  while (from > 0 && mark.isInSet(parent.child(from - 1).marks)) from--
+  while (to < parent.childCount && mark.isInSet(parent.child(to).marks)) to++
+  const left = parent.maybeChild(from - 1), right = parent.maybeChild(to)
+  // Encoded whitespace beside an adjacent strong delimiter cannot share its
+  // star run. Both ends of this one emphasis run choose the same delimiter.
+  const strong = (node: PmNode | null) => node?.marks.some(item => item.type.name === 'strong')
+  return strong(left) && /[ \t]$/.test(left!.textContent)
+    || strong(right) && /^[ \t]/.test(right!.textContent) ? '_' : '*'
+}
+function sourceCodeDelimiter(node: PmNode, opening: boolean): string {
+  const text = node.text || '', runs = text.match(/`+/g) || []
+  let length = 1
+  for (const run of runs) length = Math.max(length, run.length + 1)
+  const delimiter = '`'.repeat(length)
+  const padding = /^`|`$/.test(text) || /^ .* $/.test(text) && /[^ ]/.test(text)
+  return opening ? delimiter + (padding ? ' ' : '') : (padding ? ' ' : '') + delimiter
+}
+const sourceMarks = Object.fromEntries(Object.entries(serializer.marks).map(([name, mark]) => [
+  name, mark.expelEnclosingWhitespace ? { ...mark, expelEnclosingWhitespace: false } : mark,
+]))
+sourceMarks.em = {
+  ...sourceMarks.em!,
+  open: (_state, mark, parent, index) => sourceEmDelimiter(mark, parent, index, true),
+  close: (_state, mark, parent, index) => sourceEmDelimiter(mark, parent, index, false),
+}
+sourceMarks.code = {
+  ...sourceMarks.code!,
+  open: (_state, _mark, parent, index) => sourceCodeDelimiter(parent.child(index), true),
+  close: (_state, _mark, parent, index) => sourceCodeDelimiter(parent.child(index - 1), false),
+}
 const terminalStarts = new WeakMap<PmNode, number>()
 const sourceRootSerializer = new MarkdownSerializer({
   ...serializer.nodes,
+  text: writeSourceText,
+  code_block: sourceCodeNode,
   hardbreak(state, node, parent, index) {
+    if (node.attrs.isInline === true) { state.write('\n'); return }
     let start = terminalStarts.get(parent)
     if (start === undefined) {
       start = parent.childCount
@@ -1626,7 +1694,7 @@ const sourceRootSerializer = new MarkdownSerializer({
     else serializer.nodes.hardbreak!(state, node, parent, index)
   },
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-}, serializer.marks, ({ hardBreakNodeName: 'hardbreak', strict: false } as any))
+}, sourceMarks, ({ hardBreakNodeName: 'hardbreak', strict: false } as any))
 
 /** Internal source-root renderer; default serializeMarkdown stays unchanged. */
 export function serializeSourceRootMarkdown(doc: PmNode): string {

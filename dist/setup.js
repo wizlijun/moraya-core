@@ -4010,10 +4010,75 @@ var serializer = new MarkdownSerializer(
     strict: false
   }
 );
+function writeSourceText(state, node, parent, index) {
+  const previous = parent.maybeChild(index - 1), next = parent.maybeChild(index + 1);
+  const starts = !previous || previous.type.name === "hardbreak" || node.marks.some((mark) => !previous.marks.some((other) => mark.eq(other)));
+  const ends = !next || next.type.name === "hardbreak" || node.marks.some((mark) => !next.marks.some((other) => mark.eq(other)));
+  const value = node.text || "";
+  const lines = value.split("\n");
+  for (let line = 0; line < lines.length; line++) {
+    if (line) state.text("\n", false);
+    const text2 = lines[line], leading = line > 0 || starts ? /^[ \t]*/.exec(text2)[0].length : 0;
+    const trailing = line < lines.length - 1 || ends ? /[ \t]*$/.exec(text2)[0].length : 0;
+    const end = Math.max(leading, text2.length - trailing);
+    for (let i = 0; i < leading; i++) state.text(text2[i] === "	" ? "&#9;" : "&#32;", false);
+    if (end > leading) state.text(text2.slice(leading, end));
+    for (let i = end; i < text2.length; i++) state.text(text2[i] === "	" ? "&#9;" : "&#32;", false);
+  }
+}
+function sourceCodeNode(state, node) {
+  const language = node.attrs.language;
+  if (typeof language !== "string" || /[\r\n]/.test(language)) throw new UnsupportedSourceCapture();
+  const info = language === "text" ? "" : language, character = info.includes("`") ? "~" : "`";
+  const runs = node.textContent.match(character === "`" ? /`+/g : /~+/g) || [];
+  let length = 3;
+  for (const run of runs) length = Math.max(length, run.length + 1);
+  const fence = character.repeat(length);
+  state.write(fence + info + "\n");
+  state.text(node.textContent, false);
+  state.write("\n" + fence);
+  state.closeBlock(node);
+}
+function sourceEmDelimiter(mark, parent, index, opening) {
+  let from = opening ? index : index - 1, to = from + 1;
+  while (from > 0 && mark.isInSet(parent.child(from - 1).marks)) from--;
+  while (to < parent.childCount && mark.isInSet(parent.child(to).marks)) to++;
+  const left = parent.maybeChild(from - 1), right = parent.maybeChild(to);
+  const strong2 = (node) => node?.marks.some((item) => item.type.name === "strong");
+  return strong2(left) && /[ \t]$/.test(left.textContent) || strong2(right) && /^[ \t]/.test(right.textContent) ? "_" : "*";
+}
+function sourceCodeDelimiter(node, opening) {
+  const text2 = node.text || "", runs = text2.match(/`+/g) || [];
+  let length = 1;
+  for (const run of runs) length = Math.max(length, run.length + 1);
+  const delimiter = "`".repeat(length);
+  const padding = /^`|`$/.test(text2) || /^ .* $/.test(text2) && /[^ ]/.test(text2);
+  return opening ? delimiter + (padding ? " " : "") : (padding ? " " : "") + delimiter;
+}
+var sourceMarks = Object.fromEntries(Object.entries(serializer.marks).map(([name, mark]) => [
+  name,
+  mark.expelEnclosingWhitespace ? { ...mark, expelEnclosingWhitespace: false } : mark
+]));
+sourceMarks.em = {
+  ...sourceMarks.em,
+  open: (_state, mark, parent, index) => sourceEmDelimiter(mark, parent, index, true),
+  close: (_state, mark, parent, index) => sourceEmDelimiter(mark, parent, index, false)
+};
+sourceMarks.code = {
+  ...sourceMarks.code,
+  open: (_state, _mark, parent, index) => sourceCodeDelimiter(parent.child(index), true),
+  close: (_state, _mark, parent, index) => sourceCodeDelimiter(parent.child(index - 1), false)
+};
 var terminalStarts = /* @__PURE__ */ new WeakMap();
 var sourceRootSerializer = new MarkdownSerializer({
   ...serializer.nodes,
+  text: writeSourceText,
+  code_block: sourceCodeNode,
   hardbreak(state, node, parent, index) {
+    if (node.attrs.isInline === true) {
+      state.write("\n");
+      return;
+    }
     let start = terminalStarts.get(parent);
     if (start === void 0) {
       start = parent.childCount;
@@ -4028,7 +4093,7 @@ var sourceRootSerializer = new MarkdownSerializer({
     else serializer.nodes.hardbreak(state, node, parent, index);
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-}, serializer.marks, { hardBreakNodeName: "hardbreak", strict: false });
+}, sourceMarks, { hardBreakNodeName: "hardbreak", strict: false });
 function renderTableRow(state, row) {
   const cells = [];
   const s = state;

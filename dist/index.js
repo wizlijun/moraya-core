@@ -4050,10 +4050,75 @@ var serializer = new MarkdownSerializer(
     strict: false
   }
 );
+function writeSourceText(state, node, parent, index) {
+  const previous = parent.maybeChild(index - 1), next = parent.maybeChild(index + 1);
+  const starts = !previous || previous.type.name === "hardbreak" || node.marks.some((mark) => !previous.marks.some((other) => mark.eq(other)));
+  const ends = !next || next.type.name === "hardbreak" || node.marks.some((mark) => !next.marks.some((other) => mark.eq(other)));
+  const value = node.text || "";
+  const lines = value.split("\n");
+  for (let line = 0; line < lines.length; line++) {
+    if (line) state.text("\n", false);
+    const text2 = lines[line], leading = line > 0 || starts ? /^[ \t]*/.exec(text2)[0].length : 0;
+    const trailing = line < lines.length - 1 || ends ? /[ \t]*$/.exec(text2)[0].length : 0;
+    const end = Math.max(leading, text2.length - trailing);
+    for (let i = 0; i < leading; i++) state.text(text2[i] === "	" ? "&#9;" : "&#32;", false);
+    if (end > leading) state.text(text2.slice(leading, end));
+    for (let i = end; i < text2.length; i++) state.text(text2[i] === "	" ? "&#9;" : "&#32;", false);
+  }
+}
+function sourceCodeNode(state, node) {
+  const language = node.attrs.language;
+  if (typeof language !== "string" || /[\r\n]/.test(language)) throw new UnsupportedSourceCapture();
+  const info = language === "text" ? "" : language, character = info.includes("`") ? "~" : "`";
+  const runs = node.textContent.match(character === "`" ? /`+/g : /~+/g) || [];
+  let length = 3;
+  for (const run of runs) length = Math.max(length, run.length + 1);
+  const fence = character.repeat(length);
+  state.write(fence + info + "\n");
+  state.text(node.textContent, false);
+  state.write("\n" + fence);
+  state.closeBlock(node);
+}
+function sourceEmDelimiter(mark, parent, index, opening) {
+  let from = opening ? index : index - 1, to = from + 1;
+  while (from > 0 && mark.isInSet(parent.child(from - 1).marks)) from--;
+  while (to < parent.childCount && mark.isInSet(parent.child(to).marks)) to++;
+  const left = parent.maybeChild(from - 1), right = parent.maybeChild(to);
+  const strong2 = (node) => node?.marks.some((item) => item.type.name === "strong");
+  return strong2(left) && /[ \t]$/.test(left.textContent) || strong2(right) && /^[ \t]/.test(right.textContent) ? "_" : "*";
+}
+function sourceCodeDelimiter(node, opening) {
+  const text2 = node.text || "", runs = text2.match(/`+/g) || [];
+  let length = 1;
+  for (const run of runs) length = Math.max(length, run.length + 1);
+  const delimiter = "`".repeat(length);
+  const padding = /^`|`$/.test(text2) || /^ .* $/.test(text2) && /[^ ]/.test(text2);
+  return opening ? delimiter + (padding ? " " : "") : (padding ? " " : "") + delimiter;
+}
+var sourceMarks = Object.fromEntries(Object.entries(serializer.marks).map(([name, mark]) => [
+  name,
+  mark.expelEnclosingWhitespace ? { ...mark, expelEnclosingWhitespace: false } : mark
+]));
+sourceMarks.em = {
+  ...sourceMarks.em,
+  open: (_state, mark, parent, index) => sourceEmDelimiter(mark, parent, index, true),
+  close: (_state, mark, parent, index) => sourceEmDelimiter(mark, parent, index, false)
+};
+sourceMarks.code = {
+  ...sourceMarks.code,
+  open: (_state, _mark, parent, index) => sourceCodeDelimiter(parent.child(index), true),
+  close: (_state, _mark, parent, index) => sourceCodeDelimiter(parent.child(index - 1), false)
+};
 var terminalStarts = /* @__PURE__ */ new WeakMap();
 var sourceRootSerializer = new MarkdownSerializer({
   ...serializer.nodes,
+  text: writeSourceText,
+  code_block: sourceCodeNode,
   hardbreak(state, node, parent, index) {
+    if (node.attrs.isInline === true) {
+      state.write("\n");
+      return;
+    }
     let start = terminalStarts.get(parent);
     if (start === void 0) {
       start = parent.childCount;
@@ -4068,7 +4133,7 @@ var sourceRootSerializer = new MarkdownSerializer({
     else serializer.nodes.hardbreak(state, node, parent, index);
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-}, serializer.marks, { hardBreakNodeName: "hardbreak", strict: false });
+}, sourceMarks, { hardBreakNodeName: "hardbreak", strict: false });
 function serializeSourceRootMarkdown(doc2) {
   let result = sourceRootSerializer.serialize(doc2, { tightLists: true });
   result = relaxEscapes(result, doc2);
@@ -6479,7 +6544,7 @@ import { EditorState as EditorState2 } from "prosemirror-state";
 import { AddMarkStep as AddMarkStep2, RemoveMarkStep as RemoveMarkStep2, ReplaceStep as ReplaceStep2 } from "prosemirror-transform";
 
 // src/source-structure.ts
-import { AddMarkStep, RemoveMarkStep, ReplaceStep } from "prosemirror-transform";
+import { AddMarkStep, RemoveMarkStep, ReplaceStep, ReplaceAroundStep, AttrStep, AddNodeMarkStep, RemoveNodeMarkStep } from "prosemirror-transform";
 var UnsupportedSourceStructure = class extends Error {
 };
 function fail() {
@@ -6487,6 +6552,12 @@ function fail() {
 }
 var sameOrigin = (a, b) => a.kind === b.kind && (a.kind === "fallback" || b.kind !== "fallback" && a.id === b.id);
 var empty = (n) => n.type.name === "paragraph" && n.content.size === 0 && n.marks.length === 0;
+function assertClosedSourceFence(raw) {
+  const lines = raw.split(/\r\n|\r|\n/);
+  const opening = /^ {0,3}(`{3,}|~{3,})/.exec(lines[0] ?? "");
+  const closing = /^ {0,3}(`+|~+)[ \t]*$/.exec(lines.at(-1) ?? "");
+  if (lines.length < 2 || !opening || !closing || opening[1][0] !== closing[1][0] || closing[1].length < opening[1].length) fail();
+}
 function boundaryAt(doc2, pos) {
   if (!Number.isInteger(pos) || pos < 0 || pos > doc2.content.size) return void 0;
   const p = doc2.resolve(pos);
@@ -6502,17 +6573,32 @@ function splitsText(doc2, pos) {
   const p = doc2.resolve(pos), n = p.parent.maybeChild(p.index());
   return !!p.textOffset && !!n?.isText && /[\uD800-\uDBFF]/.test(n.text[p.textOffset - 1]) && /[\uDC00-\uDFFF]/.test(n.text[p.textOffset]);
 }
+function stepRange(doc2, step) {
+  if (step instanceof AttrStep || step instanceof AddNodeMarkStep || step instanceof RemoveNodeMarkStep) {
+    if (!Number.isInteger(step.pos) || step.pos < 0 || step.pos >= doc2.content.size) fail();
+    const node = doc2.nodeAt(step.pos);
+    if (!node) fail();
+    return { from: step.pos, to: step.pos + node.nodeSize };
+  }
+  return { from: step.from, to: step.to };
+}
+var structuralWitness = (w) => w.kind === "replace" || w.kind === "around";
 function classifyTransaction(base, tr) {
   if (tr.docs.length !== tr.steps.length || tr.doc.type.schema !== base.doc.type.schema) fail();
   let structural = false;
   for (let i = 0; i < tr.steps.length; i++) {
     const step = tr.steps[i], proto = Object.getPrototypeOf(step), before = tr.docs[i];
     if (!before || before.type.schema !== base.doc.type.schema) fail();
-    if (proto !== ReplaceStep.prototype && proto !== AddMarkStep.prototype && proto !== RemoveMarkStep.prototype) fail();
-    const { from, to } = step;
+    if (proto !== ReplaceStep.prototype && proto !== AddMarkStep.prototype && proto !== RemoveMarkStep.prototype && proto !== ReplaceAroundStep.prototype && proto !== AttrStep.prototype && proto !== AddNodeMarkStep.prototype && proto !== RemoveNodeMarkStep.prototype) fail();
+    const { from, to } = stepRange(before, step);
     childWindow(before, from, to);
     if (splitsText(before, from) || splitsText(before, to)) fail();
-    if (proto === ReplaceStep.prototype) {
+    if (proto === ReplaceAroundStep.prototype) {
+      const around = step;
+      if (!Number.isInteger(around.gapFrom) || !Number.isInteger(around.gapTo) || around.gapFrom < from || around.gapTo < around.gapFrom || around.gapTo > to || !Number.isInteger(around.insert) || around.insert < 0 || around.insert > around.slice.size || splitsText(before, around.gapFrom) || splitsText(before, around.gapTo)) fail();
+      structural = true;
+    } else if (proto === AttrStep.prototype || proto === AddNodeMarkStep.prototype || proto === RemoveNodeMarkStep.prototype) structural = true;
+    else if (proto === ReplaceStep.prototype) {
       const s = step, a = before.resolve(from), b = before.resolve(to);
       let inline = true;
       s.slice.content.forEach((n) => {
@@ -6596,7 +6682,7 @@ function representative(ledger, id) {
   return c2;
 }
 function stepWindow(before, after, step, ledger) {
-  const window2 = childWindow(before, step.from, step.to);
+  const range = stepRange(before, step), window2 = childWindow(before, range.from, range.to);
   const from = ledger.children[window2.from]?.from ?? before.content.size;
   const to = window2.to === window2.from ? from : ledger.children[window2.to - 1].to;
   const map = step.getMap(), a = boundaryAt(after, map.map(from, -1)), b = boundaryAt(after, map.map(to, 1));
@@ -6604,16 +6690,18 @@ function stepWindow(before, after, step, ledger) {
   return { before: window2, after: { from: a, to: b }, from, to };
 }
 function advanceLedger(ledger, before, after, step, index) {
-  const w = stepWindow(before, after, step, ledger), isMark = !(step instanceof ReplaceStep);
+  const w = stepWindow(before, after, step, ledger), range = stepRange(before, step);
+  const isLocal = !(step instanceof ReplaceStep || step instanceof ReplaceAroundStep);
+  const kind = step instanceof ReplaceAroundStep ? "around" : step instanceof ReplaceStep ? "replace" : step instanceof AttrStep ? "attr" : step instanceof AddNodeMarkStep || step instanceof RemoveNodeMarkStep ? "node-mark" : "mark";
   const witness = {
     step: index,
-    kind: isMark ? "mark" : "replace",
-    before: { from: step.from, to: step.to },
-    after: { from: step.getMap().map(step.from, -1), to: step.getMap().map(step.to, 1) },
+    kind,
+    before: range,
+    after: { from: step.getMap().map(range.from, -1), to: step.getMap().map(range.to, 1) },
     crossed: ledger.boundaries.slice(w.before.from, w.before.to + 1)
   };
   if (w.after.from !== w.before.from || after.childCount - before.childCount !== w.after.to - w.after.from - (w.before.to - w.before.from)) fail();
-  if (isMark) {
+  if (isLocal) {
     for (let i = w.before.from; i < w.before.to; i++) {
       const lane = ledger.children[i];
       if (lane.node.eq(after.child(i))) continue;
@@ -6738,8 +6826,8 @@ function makeRecipe(base, ledger, slots, render) {
     } else if (o.kind === "blank") blankDirty.set(o.id, c2);
   }
   const stepOf = (c2) => c2.witnesses[0].step;
-  const structuralStep = (c2) => c2.witnesses.find((w) => w.kind === "replace")?.step;
-  const deletion = components.flatMap((c2) => c2.witnesses).find((w) => w.kind === "replace" && w.before.to > w.before.from && w.after.to - w.after.from < w.before.to - w.before.from);
+  const structuralStep = (c2) => c2.witnesses.find(structuralWitness)?.step;
+  const deletion = components.flatMap((c2) => c2.witnesses).find((w) => structuralWitness(w) && w.before.to > w.before.from && w.after.to - w.after.from < w.before.to - w.before.from);
   const noVisible = ledger.children.every((l) => empty(l.node));
   let baseline = noVisible ? ledger.children.findIndex((l) => l.ref.kind === "base" && l.ref.origin.kind === "fallback") : -1;
   if (noVisible && baseline < 0) baseline = 0;
@@ -6780,7 +6868,10 @@ function makeRecipe(base, ledger, slots, render) {
     for (const o of origins) {
       const r2 = base.roots[o.id];
       if (base.protectedSources.some((p) => p.sourceFrom < r2.sourceTo && p.sourceTo > r2.sourceFrom)) fail();
-      if (!["paragraph_open", "heading_open", "bullet_list_open", "ordered_list_open", "blockquote_open", "table_open", "hr"].includes(r2.tokenType)) fail();
+      if (r2.tokenType === "fence") {
+        assertClosedSourceFence(base.source.slice(r2.sourceFrom, r2.tailFrom));
+      }
+      if (!["paragraph_open", "heading_open", "bullet_list_open", "ordered_list_open", "blockquote_open", "table_open", "hr", "fence"].includes(r2.tokenType)) fail();
     }
     const rootSlots = slots.filter((s) => (s.kind === "body" || s.kind === "terminator") && originIds.has(s.id));
     const terminal = rootSlots.filter((s) => s.kind === "terminator").at(-1);
@@ -6804,7 +6895,7 @@ function makeRecipe(base, ledger, slots, render) {
         continue;
       }
       const output = render([node]);
-      if (output.family === "closed-literal") fail();
+      if (output.family === "closed-literal" && node.type.name !== "code_block") fail();
       let text2 = output.text;
       if (output.terminal === "content-eol") {
         if (!text2.endsWith(output.eol)) fail();
@@ -6939,7 +7030,7 @@ function verifyRecipe(base, recipe) {
     const witness = recipe.witnesses.find((w) => w.step === c2.step);
     if (!Number.isInteger(c2.step) || !witness) fail();
     if (c2.kind === "separator" || c2.kind === "baseline-conversion" || c2.kind === "terminator") {
-      if (witness.kind !== "replace") fail();
+      if (!structuralWitness(witness)) fail();
     }
     if (c2.kind === "blank" || c2.kind === "separator" || c2.kind === "baseline-conversion") {
       const unit = c2.unitId === void 0 ? void 0 : base.layout.blankLines[c2.unitId];
@@ -7189,6 +7280,7 @@ function endsInTerminalHardbreak(node) {
 }
 function renderChangedRoot(base, doc2, root) {
   if (overlapsProtectedSource(base, root.sourceFrom, root.sourceTo) || !renderableRoots.has(root.tokenType)) throw new UnsupportedBlockTransaction();
+  if (root.tokenType === "fence") assertClosedSourceFence(base.source.slice(root.sourceFrom, root.tailFrom));
   const nodes = [];
   for (let i = root.childFrom; i < root.childTo; i++) nodes.push(rootRenderNode(doc2.child(i)));
   let generated = serializeSourceRootMarkdown(doc2.type.create(doc2.attrs, Fragment3.fromArray(nodes)));

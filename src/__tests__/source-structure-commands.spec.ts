@@ -1,0 +1,224 @@
+import {expect,it} from 'vitest'
+import {EditorState,TextSelection,type Transaction,type Command} from 'prosemirror-state'
+import {wrapIn,lift,splitBlock} from 'prosemirror-commands'
+import {wrapInList,splitListItem,sinkListItem,liftListItem} from 'prosemirror-schema-list'
+import {addRowAfter,addColumnAfter,deleteColumn,goToNextCell} from 'prosemirror-tables'
+import {AttrStep,AddNodeMarkStep,RemoveNodeMarkStep,ReplaceAroundStep,DocAttrStep} from 'prosemirror-transform'
+import {createSourceSession,applySourceBlockTransaction} from '../source-fidelity'
+import {wrapInTaskList} from '../commands'
+function open(raw:string){const r=createSourceSession(raw);if(!r.ok)throw Error(r.reason);return r.session}
+function state(b:ReturnType<typeof open>,from:number,to=from){
+ return EditorState.create({doc:b.doc,selection:TextSelection.create(b.doc,from,to)})
+}
+function command(s:EditorState,cmd:Command):Transaction {
+ let out:Transaction|undefined
+ expect(cmd(s,tr=>{out=tr})).toBe(true)
+ if(!out)throw Error('command did not dispatch')
+ return out
+}
+function text(doc:EditorState['doc'],needle:string){
+ let at=-1;doc.descendants((n,p)=>{if(at<0&&n.isText){const i=n.text!.indexOf(needle);if(i>=0)at=p+i}})
+ if(at<0)throw Error('missing fixture text');return at
+}
+function accept(b:ReturnType<typeof open>,tr:Transaction,expected?:string){
+ tr.doc.check();const before=JSON.stringify(b),r=applySourceBlockTransaction(b,tr)
+ expect(r.ok,r.ok?'accepted':r.reason).toBe(true);if(!r.ok)throw Error(r.reason)
+ expect(JSON.stringify(b)).toBe(before);expect(r.session.doc.eq(tr.doc)).toBe(true)
+ expect(open(r.session.source).doc.eq(tr.doc)).toBe(true)
+ expect(r.session.revision).toBe(b.revision+1)
+ if(expected!==undefined)expect(Buffer.from(r.session.source)).toEqual(Buffer.from(expected))
+ let at=0;const parts:string[]=[]
+ for(const e of r.edits){expect(e.from).toBeGreaterThanOrEqual(at);parts.push(b.source.slice(at,e.from),e.text);at=e.to}
+ parts.push(b.source.slice(at));expect(parts.join('')).toBe(r.session.source)
+ return r
+}
+function reject(b:ReturnType<typeof open>,tr:Transaction){
+ const before=JSON.stringify(b),r=applySourceBlockTransaction(b,tr)
+ expect(r.ok).toBe(false);expect(r).not.toHaveProperty('session');expect(JSON.stringify(b)).toBe(before)
+}
+const tail='\n\nTail __raw__'
+const table='| A | B |\n| --- | --- |\n| X | Y |'
+it.each(['quote','list'] as const)('actual %s wrap owns both roots',kind=>{
+ const b=open('A\n\nB'+tail),tr=command(state(b,1,4),kind==='quote'?wrapIn(b.doc.type.schema.nodes.blockquote!):wrapInList(b.doc.type.schema.nodes.bullet_list!))
+ expect(tr.steps.some(s=>s instanceof ReplaceAroundStep)).toBe(true)
+ if(kind==='list')expect(tr.steps.length).toBeGreaterThan(1)
+ const r=accept(b,tr);expect(r.changedRoots).toEqual([0,1]);expect(r.session.source.endsWith(tail)).toBe(true)
+})
+it('actual splitListItem preserves external semantic blank',()=>{
+ const b=open('- AlphaBeta\n\n\nTail __raw__'),tr=command(state(b,text(b.doc,'AlphaBeta')+5),splitListItem(b.doc.type.schema.nodes.list_item!))
+ const r=accept(b,tr);expect(r.changedRoots).toEqual([0]);expect(r.session.source.endsWith('\n\n\nTail __raw__')).toBe(true)
+})
+it('quote lift makes three roots within its one origin',()=>{
+ const b=open('> A\n>\n> B\n>\n> C'+tail),r=accept(b,command(state(b,text(b.doc,'B')),lift))
+ expect(r.changedRoots).toEqual([0]);expect(r.session.doc.childCount).toBe(4);expect(r.session.source.endsWith(tail)).toBe(true)
+})
+it.each(['sink','lift','middle'] as const)('actual list %s command preserves external raw',kind=>{
+ const b=open((kind==='lift'?'- A\n  - B':'- A\n- B\n- C')+tail),item=b.doc.type.schema.nodes.list_item!
+ const r=accept(b,command(state(b,text(b.doc,'B')),kind==='sink'?sinkListItem(item):liftListItem(item)))
+ expect(r.changedRoots).toEqual([0]);expect(r.session.source.endsWith(tail)).toBe(true)
+ if(kind==='middle')expect(r.session.doc.childCount).toBe(4)
+})
+it('ordered start AttrStep is persisted',()=>{
+ const b=open('3. A\n4. B'+tail),tr=state(b,3).tr.step(new AttrStep(0,'order',7))
+ const r=accept(b,tr);expect(r.session.source.startsWith('7. A')).toBe(true);expect(r.changedRoots).toEqual([0])
+})
+it('actual task-list producer stays atomic until checkbox source capture is supported',()=>{
+ const b=open('A\n\nB'+tail),tr=command(state(b,1,4),wrapInTaskList)
+ expect(tr.doc.child(0).child(0).attrs.checked).toBe(false)
+ expect(createSourceSession('- [ ] A\n- [ ] B'+tail)).toEqual({ok:false,reason:'unsupported-source'})
+ reject(b,tr)
+})
+it('split edit new right child and wrap share one transaction',()=>{
+ const b=open('HelloWorld'+tail),tr=command(state(b,6),splitBlock)
+ tr.insertText('!',8)
+ const s=EditorState.create({doc:tr.doc,selection:TextSelection.create(tr.doc,8)})
+ const wrapped=command(s,wrapIn(s.schema.nodes.blockquote!));for(const step of wrapped.steps)tr.step(step)
+ const r=accept(b,tr);expect(r.changedRoots).toEqual([0]);expect(r.session.source.endsWith(tail)).toBe(true)
+})
+it.each([['row',addRowAfter],['column',addColumnAfter],['delete-column',deleteColumn]] as const)('actual table %s stays local',(_name,cmd)=>{
+ const b=open(table+tail),r=accept(b,command(state(b,text(b.doc,'X')),cmd))
+ expect(r.changedRoots).toEqual([0]);expect(r.session.source.endsWith(tail)).toBe(true)
+})
+it('two distant table commands keep middle bytes and separate edits',()=>{
+ const middle='\r\n \t\r\nMiddle __raw__\n\n',b=open(table+middle+table),tr=command(state(b,text(b.doc,'X')),addRowAfter)
+ let last=-1;tr.doc.descendants((n,p)=>{if(n.isText&&n.text==='X')last=p})
+ const next=command(EditorState.create({doc:tr.doc,selection:TextSelection.create(tr.doc,last)}),addRowAfter)
+ for(const step of next.steps)tr.step(step)
+ const r=accept(b,tr);expect(r.changedRoots).toEqual([0,2]);expect(r.edits).toHaveLength(2);expect(r.session.source).toContain(middle)
+})
+it('equal tables editing only second retains first source identity',()=>{
+ const b=open(table+'\n\n'+table+tail);let last=-1;b.doc.descendants((n,p)=>{if(n.isText&&n.text==='X')last=p})
+ const r=accept(b,command(state(b,last),addRowAfter));expect(r.changedRoots).toEqual([1]);expect(r.edits.every(e=>e.from>=b.roots[1]!.sourceFrom)).toBe(true)
+})
+it.each(['right','center'])('unfixed %s aligned addRowAfter producer fails strict equality',align=>{
+ const b=open(table.replace('--- | ---',align==='right'?'---: | ---:':':---: | :---:')+tail)
+ reject(b,command(state(b,text(b.doc,'X')),addRowAfter))
+})
+it('header-only invalid doc and colwidth attrs fail atomically',()=>{
+ const b=open(table+tail),tr=state(b,text(b.doc,'X')).tr,root=b.doc.child(0)
+ tr.delete(root.child(0).nodeSize+1,root.nodeSize-1);reject(b,tr)
+ const cell=text(b.doc,'X')-2;reject(b,state(b,text(b.doc,'X')).tr.step(new AttrStep(cell,'colwidth',[120])))
+})
+it('selection-only table navigation does not revise source',()=>{
+ const b=open(table+tail),tr=command(state(b,text(b.doc,'X')),goToNextCell(1)),r=applySourceBlockTransaction(b,tr)
+ expect(r.ok).toBe(true);if(!r.ok)throw Error(r.reason);expect(r.session).toBe(b);expect(r.edits).toEqual([])
+})
+it('AttrStep code language persists without changing raw neighbors',()=>{
+ const b=open('```js\nA\n```'+tail),r=accept(b,state(b,1).tr.step(new AttrStep(0,'language','ts')))
+ expect(r.session.source.startsWith('```ts\n')).toBe(true);expect(r.session.source.endsWith(tail)).toBe(true)
+})
+it('node marks on an inline image are representable',()=>{
+ const b=open('![x](image.png)'+tail),mark=b.doc.type.schema.marks.strong!.create()
+ const added=accept(b,state(b,1).tr.step(new AddNodeMarkStep(1,mark)))
+ const removed=accept(added.session,EditorState.create({doc:added.session.doc}).tr.step(new RemoveNodeMarkStep(1,mark)))
+ expect(removed.session.doc.eq(b.doc)).toBe(true);expect(removed.session.source.endsWith(tail)).toBe(true)
+})
+it('unrepresentable block mark, empty language and DocAttr never get ignored',()=>{
+ const b=open('```js\nA\n```'+tail),tr=state(b,1).tr
+ reject(b,tr.step(new AttrStep(0,'language','')))
+ const p=open('A'+tail);expect(()=>state(p,1).tr.step(new AddNodeMarkStep(0,p.doc.type.schema.marks.strong!.create()))).toThrow('Invalid content')
+ reject(p,state(p,1).tr.step(new DocAttrStep('unsupported','x')))
+})
+it('leading text space from actual splitBlock is encoded',()=>{
+ const b=open('Hello world'+tail),r=accept(b,command(state(b,6),splitBlock))
+ expect(r.session.source).toContain('&#32;world')
+})
+it.each(['plain','strong','em','highlight','adjacent','code','softbreak','list','quote'] as const)('source-only %s whitespace preserves actual text and marks',kind=>{
+ const b=open((kind==='list'?'- AB':kind==='quote'?'> AB':'AB')+tail),at=text(b.doc,'AB'),schema=b.doc.type.schema
+ const marks=kind==='strong'||kind==='em'||kind==='highlight'||kind==='code'?[schema.marks[kind]!.create()]:[]
+ const content='  \tAB \t '
+ const tr=state(b,at).tr.replaceWith(at,at+2,kind==='softbreak'?[schema.text('A'),schema.nodes.hardbreak!.create({isInline:true}),schema.text('  \tB')]:schema.text(content,marks))
+ if(kind==='adjacent'){tr.addMark(at,at+3,schema.marks.strong!.create());tr.addMark(at+3,at+content.length,schema.marks.em!.create())}
+ const r=accept(b,tr);expect(r.session.source.endsWith(tail)).toBe(true)
+})
+it('fence content terminal LF remains distinct from closing syntax',()=>{
+ const b=open('```js\nA\n\n```'+tail),r=accept(b,state(b,1).tr.insertText('B',text(b.doc,'A')+1))
+ expect(r.session.doc.child(0).textContent).toBe('AB\n');expect(r.session.source.endsWith(tail)).toBe(true)
+})
+it('literal renderer chooses a fence longer than content and preserves trailing LFs',()=>{
+ const b=open('```js\nA\n```'+tail),tr=state(b,1).tr.insertText('\n```\n\n',2)
+ const r=accept(b,tr);expect(r.session.source.startsWith('````js\n')).toBe(true)
+})
+
+it('code-mark internal space stays on its native serialization branch',()=>{
+ const b=open('AB'+tail),tr=state(b,1).tr.replaceWith(1,3,b.doc.type.schema.text('A B',[b.doc.type.schema.marks.code!.create()]))
+ const r=accept(b,tr);expect(r.session.source.startsWith('`A B`')).toBe(true)
+})
+it('unclosed fence cannot gain structural terminal authority',()=>{
+ const b=open('```js\nA'),tr=state(b,1).tr.step(new AttrStep(0,'language','ts'));reject(b,tr)
+})
+it('unknown subclasses of newly supported steps remain rejected',()=>{
+ const b=open('A'+tail),schema=b.doc.type.schema
+ class InheritedAttr extends AttrStep {}
+ class InheritedNodeMark extends AddNodeMarkStep {}
+ class InheritedAround extends ReplaceAroundStep {}
+ reject(b,state(b,1).tr.step(new InheritedAttr(0,'unrepresented','x')))
+ const image=open('![x](image.png)'+tail);reject(image,state(image,1).tr.step(new InheritedNodeMark(1,schema.marks.strong!.create())))
+ const actual=command(state(b,1),wrapIn(schema.nodes.blockquote!)),s=actual.steps[0] as ReplaceAroundStep
+ reject(b,state(b,1).tr.step(new InheritedAround(s.from,s.to,s.gapFrom,s.gapTo,s.slice,s.insert)))
+})
+it('malformed around gaps and changed replay chain fail atomically',()=>{
+ const b=open('A\n\nB'+tail),tr=command(state(b,1,4),wrapIn(b.doc.type.schema.nodes.blockquote!))
+ const step=tr.steps[0] as ReplaceAroundStep;Object.assign(step,{gapFrom:0.5});reject(b,tr)
+ const valid=command(state(b,1,4),wrapIn(b.doc.type.schema.nodes.blockquote!));valid.insertText('X',2)
+ valid.docs[1]=open('Bad'+tail).doc;reject(b,valid)
+})
+it('structural wrap never moves nested definitions',()=>{
+ const b=open('> A\n>\n> [ref]: /u'+tail),tr=command(state(b,text(b.doc,'A')),lift);reject(b,tr)
+})
+it('adjacent same-type list birth stays strict instead of expanding neighbor ownership',()=>{
+ const b=open('- A'+tail),tr=state(b,text(b.doc,'A')).tr.insert(b.doc.child(0).nodeSize,b.doc.child(0));reject(b,tr)
+})
+it('EOF insertion after unclosed fence cannot swallow the new paragraph',()=>{
+ const b=open('```js\nA'),tr=state(b,1).tr.insert(b.doc.content.size,b.doc.type.schema.nodes.paragraph!.create(null,b.doc.type.schema.text('B')));reject(b,tr)
+})
+it('closed code AttrStep preserves CRLF terminal and semantic blank identities',()=>{
+ const b=open('```js\r\nA\r\n```\r\n \t\r\n\t\r\nTail'),tr=state(b,1).tr.step(new AttrStep(0,'language','ts'))
+ const r=accept(b,tr);expect(r.session.source.endsWith('```\r\n \t\r\n\t\r\nTail')).toBe(true)
+ expect(r.edits.every(e=>e.to<=b.roots[0]!.tailFrom)).toBe(true)
+})
+
+it.each([
+ ['em underscore','**&#32;&#32;&#9;**_AB&#32;&#9;&#32;_'],
+ ['strong underscore','__&#32;&#32;&#9;__*AB&#32;&#9;&#32;*'],
+] as const)('candidate adjacent delimiter %s preserves strict marks',(_name,source)=>{
+ const b=open('AB'),schema=b.doc.type.schema
+ const want=state(b,1).tr.replaceWith(1,3,[schema.text('  \t',[schema.marks.strong!.create()]),schema.text('AB \t ',[schema.marks.em!.create()])]).doc
+ expect(open(source).doc.eq(want)).toBe(true)
+})
+it('candidate native code padding preserves surrounding whitespace',()=>{
+ const b=open('AB'),schema=b.doc.type.schema,want=state(b,1).tr.replaceWith(1,3,schema.text('  \tAB \t ',[schema.marks.code!.create()])).doc
+ expect(open('`   \tAB \t  `').doc.eq(want)).toBe(true)
+})
+
+it.each([' A ', '  ', 'A`B', '`A`', 'A B', '  \tAB \t '])('native code delimiter preserves %j',content=>{
+ const b=open('AB'+tail),tr=state(b,1).tr.replaceWith(1,3,b.doc.type.schema.text(content,[b.doc.type.schema.marks.code!.create()]))
+ accept(b,tr)
+})
+it.each(['strong-em','em-strong','plain-em'] as const)('adjacent delimiters preserve %s without adding text',order=>{
+ const b=open('AB'+tail),schema=b.doc.type.schema
+ const first=order==='strong-em'?schema.marks.strong!.create():order==='em-strong'?schema.marks.em!.create():undefined
+ const second=order==='em-strong'?schema.marks.strong!.create():schema.marks.em!.create()
+ const tr=state(b,1).tr.replaceWith(1,3,[schema.text('A',first?[first]:[]),schema.text('B',[second])]);accept(b,tr)
+})
+
+it.each(['strong-em','em-strong'] as const)('encoded whitespace delimiter handles %s with punctuation content',order=>{
+ const b=open('AB'+tail),schema=b.doc.type.schema,strong=schema.marks.strong!.create(),em=schema.marks.em!.create()
+ const nodes=order==='strong-em'?[schema.text(' \t ',[strong]),schema.text('A_B`C \t ',[em])]:[schema.text(' \t A_B`C',[em]),schema.text(' \t ',[strong])]
+ accept(b,state(b,1).tr.replaceWith(1,3,nodes))
+})
+it('nested strong em and highlight retain all marks around whitespace',()=>{
+ const b=open('AB'+tail),schema=b.doc.type.schema,marks=[schema.marks.strong!.create(),schema.marks.em!.create(),schema.marks.highlight!.create({delimiter:'equals'})]
+ accept(b,state(b,1).tr.replaceWith(1,3,schema.text(' \t A_B`C \t ',marks)))
+})
+it('fence info with backtick uses tilde and longer content delimiter',()=>{
+ const b=open('```js\nA\n```'+tail),tr=state(b,1).tr.step(new AttrStep(0,'language','lang`x')).insertText('\n~~~~\n',2)
+ const r=accept(b,tr);expect(r.session.source.startsWith('~~~~~lang`x\n')).toBe(true)
+})
+it('newline in fence info is rejected without dropping attrs',()=>{
+ const b=open('```js\nA\n```'+tail);reject(b,state(b,1).tr.step(new AttrStep(0,'language','js\nunsafe')))
+})
+it('literal content with multiple terminal LFs is retained on AttrStep',()=>{
+ const b=open('```js\nA\n\n\n```'+tail),r=accept(b,state(b,1).tr.step(new AttrStep(0,'language','ts')))
+ expect(r.session.doc.child(0).textContent).toBe('A\n\n')
+})

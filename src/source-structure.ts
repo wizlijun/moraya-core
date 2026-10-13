@@ -1,6 +1,6 @@
 import type {Node as PMNode} from 'prosemirror-model'
 import type {Transaction} from 'prosemirror-state'
-import {AddMarkStep,RemoveMarkStep,ReplaceStep} from 'prosemirror-transform'
+import {AddMarkStep,RemoveMarkStep,ReplaceStep,ReplaceAroundStep,AttrStep,AddNodeMarkStep,RemoveNodeMarkStep} from 'prosemirror-transform'
 import type {SourceSession} from './source-fidelity'
 import type {SourceEdit} from './source-ownership'
 
@@ -16,7 +16,7 @@ type Boundary=
  |{kind:'generated';component:number}
  |{kind:'tombstone';component:number;prior:Boundary}
 type Birth={step:number;ordinal:number;anchor:Boundary}
-type StepWitness={step:number;kind:'replace'|'mark';before:RawSpan;after:RawSpan;crossed:Boundary[]}
+type StepWitness={step:number;kind:'replace'|'around'|'mark'|'attr'|'node-mark';before:RawSpan;after:RawSpan;crossed:Boundary[]}
 type Component={id:number;parent:number;origins:Origin[];births:Birth[];witnesses:StepWitness[];finalRuns:ChildRange[]}
 type Ledger={children:Lane[];boundaries:Boundary[];components:Component[]}
 type Claim=RawSpan & {kind:'body'|'terminator'|'blank'|'separator'|'baseline-conversion'|'anchor';
@@ -25,7 +25,7 @@ type Kept=RawSpan & {kind:'root'|'blank'|'protected'|'envelope';id:number}
 type Piece={kind:'raw';span:RawSpan;identity:Kept}|{kind:'generated';text:string}
 type Recipe={claims:Claim[];kept:Kept[];pieces:Piece[];edits:SourceEdit[];changedRoots:number[];witnesses:StepWitness[]}
 export type StructuralRendered={text:string;terminal:'none'|'content-eol';family:'flow'|'table'|'closed-literal';eol:'\n'|'\r\n'|'\r'}
-type Step=ReplaceStep|AddMarkStep|RemoveMarkStep
+type Step=ReplaceStep|ReplaceAroundStep|AddMarkStep|RemoveMarkStep|AttrStep|AddNodeMarkStep|RemoveNodeMarkStep
 type Slot=RawSpan & {kind:'body'|'terminator'|'blank'|'separator'|'protected'|'envelope';id:number}
 type Atom={kind:'body'|'terminator'|'blank'|'separator'|'protected'|'envelope';piece:Piece;
  anchor:number;step?:number;slot?:Slot}
@@ -33,6 +33,13 @@ function fail():never {throw new UnsupportedSourceStructure()}
 const sameOrigin=(a:Origin,b:Origin)=>a.kind===b.kind&&(a.kind==='fallback'||b.kind!=='fallback'&&a.id===b.id)
 const empty=(n:PMNode)=>n.type.name==='paragraph'&&n.content.size===0&&n.marks.length===0
 
+/** Internal shared pre-render guard: unclosed literal boundaries are a separate producer contract. */
+export function assertClosedSourceFence(raw:string):void {
+ const lines=raw.split(/\r\n|\r|\n/)
+ const opening=/^ {0,3}(`{3,}|~{3,})/.exec(lines[0]??'')
+ const closing=/^ {0,3}(`+|~+)[ \t]*$/.exec(lines.at(-1)??'')
+ if(lines.length<2||!opening||!closing||opening[1]![0]!==closing[1]![0]||closing[1]!.length<opening[1]!.length)fail()
+}
 function boundaryAt(doc:PMNode,pos:number):number|undefined {
  if(!Number.isInteger(pos)||pos<0||pos>doc.content.size)return undefined
  const p=doc.resolve(pos);return p.depth===0?p.index(0):undefined
@@ -48,6 +55,15 @@ function splitsText(doc:PMNode,pos:number):boolean {
  return !!p.textOffset&&!!n?.isText&&/[\uD800-\uDBFF]/.test(n.text![p.textOffset-1]!)
   &&/[\uDC00-\uDFFF]/.test(n.text![p.textOffset]!)
 }
+function stepRange(doc:PMNode,step:Step):RawSpan {
+ if(step instanceof AttrStep||step instanceof AddNodeMarkStep||step instanceof RemoveNodeMarkStep){
+  if(!Number.isInteger(step.pos)||step.pos<0||step.pos>=doc.content.size)fail()
+  const node=doc.nodeAt(step.pos);if(!node)fail()
+  return {from:step.pos,to:step.pos+node.nodeSize}
+ }
+ return {from:step.from,to:step.to}
+}
+const structuralWitness=(w:StepWitness)=>w.kind==='replace'||w.kind==='around'
 /** This dispatch pass is local: stable mark chains never replay or scan the doc. */
 export function classifyTransaction(base:SourceSession,tr:Transaction):'stable'|'structural' {
  if(tr.docs.length!==tr.steps.length||tr.doc.type.schema!==base.doc.type.schema)fail()
@@ -55,11 +71,21 @@ export function classifyTransaction(base:SourceSession,tr:Transaction):'stable'|
  for(let i=0;i<tr.steps.length;i++){
   const step=tr.steps[i]!,proto=Object.getPrototypeOf(step),before=tr.docs[i]
   if(!before||before.type.schema!==base.doc.type.schema)fail()
-  if(proto!==ReplaceStep.prototype&&proto!==AddMarkStep.prototype&&proto!==RemoveMarkStep.prototype)fail()
-  const {from,to}=step as Step
+  if(proto!==ReplaceStep.prototype&&proto!==AddMarkStep.prototype&&proto!==RemoveMarkStep.prototype
+   &&proto!==ReplaceAroundStep.prototype&&proto!==AttrStep.prototype
+   &&proto!==AddNodeMarkStep.prototype&&proto!==RemoveNodeMarkStep.prototype)fail()
+  const {from,to}=stepRange(before,step as Step)
   childWindow(before,from,to)
   if(splitsText(before,from)||splitsText(before,to))fail()
-  if(proto===ReplaceStep.prototype){
+  if(proto===ReplaceAroundStep.prototype){
+   const around=step as ReplaceAroundStep
+   if(!Number.isInteger(around.gapFrom)||!Number.isInteger(around.gapTo)||around.gapFrom<from
+    ||around.gapTo<around.gapFrom||around.gapTo>to||!Number.isInteger(around.insert)
+    ||around.insert<0||around.insert>around.slice.size
+    ||splitsText(before,around.gapFrom)||splitsText(before,around.gapTo))fail()
+   structural=true
+  }else if(proto===AttrStep.prototype||proto===AddNodeMarkStep.prototype||proto===RemoveNodeMarkStep.prototype)structural=true
+  else if(proto===ReplaceStep.prototype){
    const s=step as ReplaceStep,a=before.resolve(from),b=before.resolve(to)
    let inline=true;s.slice.content.forEach(n=>{if(!n.isInline)inline=false})
    if((s as ReplaceStep & {structure:boolean}).structure||!a.sameParent(b)||!a.parent.inlineContent
@@ -110,7 +136,7 @@ function representative(ledger:Ledger,id:number):Component {
  return c
 }
 function stepWindow(before:PMNode,after:PMNode,step:Step,ledger:Ledger):{before:ChildRange;after:ChildRange;from:number;to:number} {
- const window=childWindow(before,step.from,step.to)
+ const range=stepRange(before,step),window=childWindow(before,range.from,range.to)
  const from=ledger.children[window.from]?.from??before.content.size
  const to=window.to===window.from?from:ledger.children[window.to-1]!.to
  const map=step.getMap(),a=boundaryAt(after,map.map(from,-1)),b=boundaryAt(after,map.map(to,1))
@@ -118,12 +144,15 @@ function stepWindow(before:PMNode,after:PMNode,step:Step,ledger:Ledger):{before:
  return {before:window,after:{from:a,to:b},from,to}
 }
 function advanceLedger(ledger:Ledger,before:PMNode,after:PMNode,step:Step,index:number):void {
- const w=stepWindow(before,after,step,ledger),isMark=!(step instanceof ReplaceStep)
- const witness:StepWitness={step:index,kind:isMark?'mark':'replace',before:{from:step.from,to:step.to},
-  after:{from:step.getMap().map(step.from,-1),to:step.getMap().map(step.to,1)},crossed:ledger.boundaries.slice(w.before.from,w.before.to+1)}
+ const w=stepWindow(before,after,step,ledger),range=stepRange(before,step)
+ const isLocal=!(step instanceof ReplaceStep||step instanceof ReplaceAroundStep)
+ const kind:StepWitness['kind']=step instanceof ReplaceAroundStep?'around':step instanceof ReplaceStep?'replace':
+  step instanceof AttrStep?'attr':step instanceof AddNodeMarkStep||step instanceof RemoveNodeMarkStep?'node-mark':'mark'
+ const witness:StepWitness={step:index,kind,before:range,
+  after:{from:step.getMap().map(range.from,-1),to:step.getMap().map(range.to,1)},crossed:ledger.boundaries.slice(w.before.from,w.before.to+1)}
  if(w.after.from!==w.before.from||after.childCount-before.childCount!==w.after.to-w.after.from-(w.before.to-w.before.from))fail()
  // Mark ranges authorize each owner independently, never merging unrelated roots.
- if(isMark){
+ if(isLocal){
   for(let i=w.before.from;i<w.before.to;i++){
    const lane=ledger.children[i]!
    if(lane.node.eq(after.child(i)))continue
@@ -228,8 +257,8 @@ function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:
   else if(o.kind==='blank')blankDirty.set(o.id,c)
  }
  const stepOf=(c:Component)=>c.witnesses[0]!.step
- const structuralStep=(c:Component)=>c.witnesses.find(w=>w.kind==='replace')?.step
- const deletion=components.flatMap(c=>c.witnesses).find(w=>w.kind==='replace'&&w.before.to>w.before.from&&w.after.to-w.after.from<w.before.to-w.before.from)
+ const structuralStep=(c:Component)=>c.witnesses.find(structuralWitness)?.step
+ const deletion=components.flatMap(c=>c.witnesses).find(w=>structuralWitness(w)&&w.before.to>w.before.from&&w.after.to-w.after.from<w.before.to-w.before.from)
  const noVisible=ledger.children.every(l=>empty(l.node))
  let baseline=noVisible?ledger.children.findIndex(l=>l.ref.kind==='base'&&l.ref.origin.kind==='fallback'):-1
  if(noVisible&&baseline<0)baseline=0
@@ -259,7 +288,10 @@ function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:
   const originIds=new Set(origins.map(o=>o.id))
   // Independent pre-serializer guard. Final edit guards do not replace this.
   for(const o of origins){const r=base.roots[o.id]!;if(base.protectedSources.some(p=>p.sourceFrom<r.sourceTo&&p.sourceTo>r.sourceFrom))fail()
-   if(!['paragraph_open','heading_open','bullet_list_open','ordered_list_open','blockquote_open','table_open','hr'].includes(r.tokenType))fail()}
+   if(r.tokenType==='fence'){
+    assertClosedSourceFence(base.source.slice(r.sourceFrom,r.tailFrom))
+   }
+   if(!['paragraph_open','heading_open','bullet_list_open','ordered_list_open','blockquote_open','table_open','hr','fence'].includes(r.tokenType))fail()}
   const rootSlots=slots.filter(s=>(s.kind==='body'||s.kind==='terminator')&&originIds.has(s.id))
   const terminal=rootSlots.filter(s=>s.kind==='terminator').at(-1)
   let lastVisible=nodes.length-1
@@ -280,7 +312,7 @@ function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:
    const node=nodes[n]!,finalIndex=c.finalRuns[0]!.from+n
    if(empty(node)){if(finalIndex!==baseline)atoms.push(generated('blank','\n',anchor,stepOf(c)));continue}
    const output=render([node])
-   if(output.family==='closed-literal')fail()
+   if(output.family==='closed-literal'&&node.type.name!=='code_block')fail()
    let text=output.text
    if(output.terminal==='content-eol'){if(!text.endsWith(output.eol))fail();text=text.slice(0,-output.eol.length)}
    atoms.push(generated('body',text,anchor,stepOf(c)))
@@ -390,7 +422,7 @@ function verifyRecipe(base:SourceSession,recipe:Recipe):void {
   const witness=recipe.witnesses.find(w=>w.step===c.step)
   if(!Number.isInteger(c.step)||!witness)fail()
   if(c.kind==='separator'||c.kind==='baseline-conversion'||c.kind==='terminator'){
-   if(witness.kind!=='replace')fail()
+   if(!structuralWitness(witness))fail()
   }
   if(c.kind==='blank'||c.kind==='separator'||c.kind==='baseline-conversion'){
    const unit=c.unitId===undefined?undefined:base.layout.blankLines[c.unitId]

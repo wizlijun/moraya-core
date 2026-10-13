@@ -4,7 +4,7 @@ import { AddMarkStep, RemoveMarkStep, ReplaceStep } from 'prosemirror-transform'
 import { parseDocumentWithSourceCapture, serializeSourceRootMarkdown } from './markdown'
 import type { SourceLayout } from './source-layout'
 import type { SourceRoot, SourceGap, SourceEdit, ProtectedSource } from './source-ownership'
-import {classifyTransaction,applyStructuralTransaction,UnsupportedSourceStructure,type StructuralRendered} from './source-structure'
+import {classifyTransaction,applyStructuralTransaction,assertClosedSourceFence,UnsupportedSourceStructure,type StructuralRendered} from './source-structure'
 
 export type TextSourceSpan = Readonly<{
   sourceFrom: number; sourceTo: number
@@ -230,6 +230,7 @@ function endsInTerminalHardbreak(node:PmNode):boolean {
 }
 function renderChangedRoot(base:SourceSession,doc:PmNode,root:SourceRoot):string {
  if(overlapsProtectedSource(base,root.sourceFrom,root.sourceTo)||!renderableRoots.has(root.tokenType))throw new UnsupportedBlockTransaction()
+ if(root.tokenType==='fence')assertClosedSourceFence(base.source.slice(root.sourceFrom,root.tailFrom))
  const nodes:PmNode[]=[]
  for(let i=root.childFrom;i<root.childTo;i++)nodes.push(rootRenderNode(doc.child(i)))
  let generated=serializeSourceRootMarkdown(doc.type.create(doc.attrs,Fragment.fromArray(nodes)))
