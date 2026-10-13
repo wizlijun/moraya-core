@@ -2151,7 +2151,7 @@ for (const name of ["list", "blockquote", "footnote_def"]) wrapCaptureRule(md.bl
       items.push({ level: token.level + 1, line: blank.line, place: {
         kind: "nested-blank",
         range: blank.range,
-        prefix: blank.prefix,
+        prefix: blank.line === read.line && name !== "blockquote" && read.prefix ? read.prefix : blank.prefix,
         ...blank.eol ? { eol: blank.eol } : {},
         leftBody: !!left,
         rightBody: !!right

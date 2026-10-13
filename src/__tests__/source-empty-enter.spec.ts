@@ -106,3 +106,9 @@ it('empty list item actual continuation retains an additional empty paragraph',(
  const b=open('- \n  \n');expect(b.doc.firstChild!.firstChild!.childCount).toBe(2);
  typeEmpty('- \n  \n',[0,0,1],'X','- \n  X\n');
 });
+
+it.each([
+ ['- \n  B',[0,0,0],'- X\n  \n  B'],
+ ['[^e]:\n    B',[0,0],'[^e]:X\n    \n    B'],
+ ['> - \n>   B',[0,0,0,0],'> - X\n>   \n>   B'],
+] as const)('first marker blank uses continuation prefix for its new separator %j',(raw,path,expected)=>{typeEmpty(raw,path,'X',expected)});

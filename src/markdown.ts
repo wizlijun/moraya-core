@@ -688,7 +688,7 @@ for(const name of ['list','blockquote','footnote_def'])wrapCaptureRule(md.block.
    if(!children.length&&blank.line===read.line)continue
    const before=right?.index??close,target=state.tokens[before]
    const items=[...(nestedBlanks.get(target)??[])]
-   items.push({level:token.level+1,line:blank.line,place:{kind:'nested-blank',range:blank.range,prefix:blank.prefix,
+   items.push({level:token.level+1,line:blank.line,place:{kind:'nested-blank',range:blank.range,prefix:blank.line===read.line&&name!=='blockquote'&&read.prefix?read.prefix:blank.prefix,
     ...(blank.eol?{eol:blank.eol}:{}),leftBody:!!left,rightBody:!!right}})
    nestedBlanks.set(target,items)
   }
