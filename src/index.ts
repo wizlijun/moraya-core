@@ -76,8 +76,8 @@ export type {
 // always go through createSchema(config) to ensure proper DI of MediaResolver.
 
 // Experimental source-preserving paragraph editing (explicit opt-in consumers).
-export { createSourceSession, applySourceTextTransaction, applySourceBlockTransaction } from './source-fidelity'
-export type { TextSourceSpan, SourceSession, FidelityFailure, FidelityResult, SourceBlockResult } from './source-fidelity'
+export { createSourceSession, applySourceTextTransaction, applySourceBlockTransaction, prepareFileSourceEdits } from './source-fidelity'
+export type { TextSourceSpan, SourceSession, FidelityFailure, FidelityResult, SourceBlockResult, SourcePatch, FileRootCorrespondence, FileParseWork, SourceFileUpdate, FileSourceResult } from './source-fidelity'
 
 // Shared source/view line-ending projection.
 export { projectLineEndings, sourceOffsetAt, viewOffsetAt } from './source-projection'

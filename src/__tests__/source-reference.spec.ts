@@ -100,7 +100,9 @@ for(const source of ['\uFEFF[ref]: /url\r\nAlpha\r\n','[ref]: /url\n"title" garb
    expect(result.session.source).toBe(source.replace(needle,'Z'+needle.slice(1)))
    expect(result.session.protectedSources).toEqual(base.protectedSources)
   }
-  expect(Object.keys(applySourceTextTransaction(base,tr)).sort()).toEqual(['ok','session'])
+  const exact=applySourceTextTransaction(base,tr)
+  expect(Object.keys(exact).sort()).toEqual(['file','ok','session'])
+  if(exact.ok)expect(exact.file!.work.legacyParseCalls).toBe(0)
  })
 }
 it('allows insertion exactly after consumed reference and protects title rollback paragraph edits',()=>{

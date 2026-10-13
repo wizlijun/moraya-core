@@ -21,6 +21,8 @@
  */
 
 import MarkdownIt from 'markdown-it'
+import type StateBlock from 'markdown-it/lib/rules_block/state_block.mjs'
+import type { FileParseWork } from './source-fidelity'
 import deflistPlugin from 'markdown-it-deflist'
 import texmathPlugin from 'markdown-it-texmath'
 import markPlugin from 'markdown-it-mark'
@@ -425,6 +427,7 @@ export type CapturedDocument = CapturedParagraph & { roots: SourceRoot[]; gaps: 
 type SourceRun = { text: string; kind?: undefined; trace?: undefined }
   | { text: string; kind: 'linear' | 'atomic'; trace: SourceTrace }
 type Capture = {
+  file?: FileCaptureState
   source: string; blankLines: BlankDraft[]; fallback?: FallbackEmpty; lists: ListDraft[]
   trace: SourceTrace; lineStarts: number[]; protectedSources: ProtectedSource[]; runs: CapturedTextRun[]; roots: SourceRoot[]
   synthetic: { gapIndex: number; emission: SyntheticEmission }[]
@@ -457,10 +460,11 @@ export function sourceRootHasClosedFences(root: SourceRoot): boolean {
 // markdown-it rule storage and ParseState are private APIs. Keep shape-sensitive
 // access here and fail closed for capture if the installed contract changes.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function wrapCaptureRule(ruler: any, name: string, wrapper: (original: any, ...args: any[]) => any) {
+function wrapCaptureRule(ruler: any, name: string, wrapper: (original: any, ...args: any[]) => any, preserveAlternates = false) {
   const original = ruler.__rules__?.find((rule: { name: string }) => rule.name === name)?.fn
   if (typeof original !== 'function') { captureAvailable = false; return }
-  ruler.at(name, (...args: unknown[]) => wrapper(original, ...args))
+  const alt = preserveAlternates ? ruler.__rules__.find((rule: { name: string }) => rule.name === name).alt.slice() : []
+  ruler.at(name, (...args: unknown[]) => wrapper(original, ...args), { alt })
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const collectorFor = (state: any): Capture | undefined => state.env?.[captureKey]
@@ -534,23 +538,33 @@ wrapCaptureRule(md.core.ruler, 'normalize', (original, state) => {
   collector.lineStarts = lineStarts(collector.trace.text)
   return result
 })
-wrapCaptureRule(md.block.ruler, 'reference', (original, state, startLine, endLine, silent) => {
+wrapCaptureRule(md.block.ruler, 'reference', function observeReferenceCandidate(original, state, startLine, endLine, silent) {
   const collector = collectorFor(state)
+  if (!collector || silent) return original(state, startLine, endLine, silent)
   const scope = state.level === 0 && state.blkIndent === 0 ? 'top-level' : 'nested'
-  const result = original(state, startLine, endLine, silent)
-  if (!collector || !result || silent) return result
-  // bMarks is temporarily shifted inside quotes. Physical cached line starts
-  // retain all container markers. Only final state.line survives title rollback.
+  const had = Object.hasOwn(state.env, 'references'), saved = state.env.references
+  const candidates: Record<string, { href: string; title: string }> = {}
+  state.env.references = candidates
+  let result
+  try { result = original(state, startLine, endLine, silent) } finally {
+    if (had) state.env.references = saved
+    else delete state.env.references
+  }
+  if (!result) return result
+  const entries = Object.entries(candidates)
+  if (entries.length !== 1) throw new UnsupportedSourceCapture()
+  const [label, value] = entries[0]!
+  if (typeof state.env.references === 'undefined') state.env.references = {}
+  if (typeof state.env.references[label] === 'undefined') state.env.references[label] = value
   const from = collector.lineStarts[startLine], to = collector.lineStarts[state.line]
   if (from === undefined || to === undefined || to <= from) throw new UnsupportedSourceCapture()
   const raw = rawRange(collector.trace, from, to)
   if (raw) {
-    // Successful block consumption is in source order, including nested rules
-    // and duplicate labels; no per-root scanning or env-reference diff is needed.
     const previous = collector.protectedSources[collector.protectedSources.length - 1]
     if (previous && previous.sourceTo > raw.from) throw new UnsupportedSourceCapture()
-    collector.protectedSources.push(Object.freeze({ kind: 'reference-definition',
-      sourceFrom: raw.from, sourceTo: raw.to, scope }))
+    collector.protectedSources.push(Object.freeze({ kind: 'reference-definition', sourceFrom: raw.from, sourceTo: raw.to, scope }))
+    collector.file?.definitions.push({ kind: 'reference', label, href: value.href, title: value.title,
+      sourceFrom: raw.from, sourceTo: raw.to, scope })
   }
   return result
 })
@@ -601,6 +615,8 @@ wrapCaptureRule(md.block.ruler, 'paragraph', (original, state, ...args) => {
 })
 wrapCaptureRule(md.core.ruler, 'inline', (original, state) => {
   if (!collectorFor(state)) return original(state)
+  const collector = collectorFor(state)!
+  if (collector.file) collector.file.blockTokens = cloneTokenBatch(state.tokens, collector)
   const mapped = state.tokens.filter((token: object) => tokenArrays.has(token))
   const check = () => {
     for (const token of mapped) {
@@ -1293,8 +1309,8 @@ class MorayaMarkdownParser extends MarkdownParser {
    */
   public readonly schema: Schema
 
-  constructor(schemaArg: Schema = defaultSchema) {
-    super(schemaArg, md, parserTokens)
+  constructor(schemaArg: Schema = defaultSchema, tokenizer: MarkdownIt = md) {
+    super(schemaArg, tokenizer, parserTokens)
     this.schema = schemaArg
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1917,8 +1933,7 @@ export function serializeSourceRootMarkdown(doc: PmNode, options:SourceRootRende
       renderSourceList(state,node,style,' '.repeat(width),i=>String(number(i)).padStart(width-2,' ')+style.marker+' ')
     },
   },sourceRootSerializer.marks,sourceRootSerializer.options)
-  let result = current.serialize(doc, {tightLists:true})
-  result = relaxEscapes(result, doc)
+  const result = current.serialize(doc, {tightLists:true})
   return result.replace(/\u200B/g, '')
 }
 
@@ -2202,21 +2217,11 @@ class UnsupportedSourceCapture extends Error {}
 /** Internal experimental hook. Never uses parseMarkdown's empty-doc fallback. */
 export function parseDocumentWithSourceCapture(source: string, schema?: Schema):
   { ok: true; value: CapturedDocument } | { ok: false; reason: 'unsupported-source' | 'parse-error' } {
-  if (!captureAvailable) return { ok: false, reason: 'unsupported-source' }
-  try {
-    let trace = identityTrace(source)
-    if (source.charCodeAt(0) === 0xFEFF) trace = editTrace(trace, [{ from: 0, to: 1, text: '' }])
-    const mathEdits: TraceEdit[] = []
-    const math = normalizeMathBlocks(trace.text, mathEdits)
-    trace = editTrace(trace, mathEdits)
-    if (trace.text !== math) throw new UnsupportedSourceCapture()
-    const work = normalizeSmartQuotes(math, (before, after, edits) => {
-      if (trace.text !== before) throw new UnsupportedSourceCapture()
-      trace = editTrace(trace, edits)
-      if (trace.text !== after) throw new UnsupportedSourceCapture()
-    })
-    const collector: Capture = { source, trace, lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [], lists: [] }
-    const doc = getParserFor(schema).parse(work, { [captureKey]: collector })
+  return captureFilePipeline(source, schema)
+}
+
+function finalizeCapturedDocument(collector: Capture, doc: PmNode): CapturedDocument {
+  const source = collector.source
     // Build one independent PM index. Only actual top-level paragraph text
     // children qualify; atoms leave gaps, and paragraph identity is retained.
     const text: { node: PmNode; paragraph: PmNode; from: number; to: number }[] = []
@@ -2254,13 +2259,10 @@ export function parseDocumentWithSourceCapture(source: string, schema?: Schema):
     const lists = finishSourceLists(doc, collector)
     const layout = finishSourceLayout(collector.blankLines, collector.fallback, lists)
     capturedListLayouts.set(layout, { source, doc, roots: collector.roots, lists })
-    return { ok: true, value: { doc, textRuns: collector.runs,
+    return { doc, textRuns: collector.runs,
       protectedSources: Object.freeze(collector.protectedSources),
       layout,
-      roots: collector.roots, gaps: buildSourceGaps(source, collector.roots, collector.synthetic) } }
-  } catch (error) {
-    return { ok: false, reason: error instanceof UnsupportedSourceCapture || error instanceof UnsupportedOwnership ? 'unsupported-source' : 'parse-error' }
-  }
+      roots: collector.roots, gaps: buildSourceGaps(source, collector.roots, collector.synthetic) }
 }
 
 /** Compatibility hook for callers requiring a fully mapped ordinary paragraph. */
@@ -2279,4 +2281,460 @@ export function parseParagraphWithSourceCapture(source: string, schema?: Schema)
     if (!node.isText || node.marks.some(mark => !['em', 'strong', 'link'].includes(mark.type.name))) supported = false
   })
   return supported && pos === doc.content.size - 1 ? parsed : { ok: false, reason: 'unsupported-source' }
+}
+
+// A file capture owns every mutable parser object. Cached tokens are never
+// handed to the ProseMirror handlers, which consume checkbox/media tokens.
+type ActualToken = ReturnType<MarkdownIt['parse']>[number]
+export type FileWorkAccumulator = { -readonly [K in keyof FileParseWork]: FileParseWork[K] }
+export type FileDefinition = Readonly<{
+  kind: 'reference' | 'footnote'; label: string; sourceFrom: number; sourceTo: number
+  scope: 'top-level' | 'nested'; href?: string; title?: string
+}>
+type BlockScalars = Pick<StateBlock, 'parentType' | 'tight' | 'blkIndent' | 'level' | 'ddIndent' | 'listIndent'>
+export type FileCheckpoint = Readonly<{
+  line: number; offset: number; tokenIndex: number; definitionIndex: number
+  hasEmptyLines: boolean; state: BlockScalars
+}>
+type FileCaptureState = {
+  work: FileWorkAccumulator; checkpoints: FileCheckpoint[]; definitions: FileDefinition[]
+  blockTokens: ActualToken[]; effects: string[][]; activeEffects?: string[]
+}
+export type FileTokenCache = Readonly<{
+  source: string; trace: SourceTrace; lineStarts: readonly number[]
+  blockTokens: readonly ActualToken[]; inlineTokens: readonly ActualToken[]
+  checkpoints: readonly FileCheckpoint[]; definitions: readonly FileDefinition[]
+  effects: readonly (readonly string[])[]
+}>
+export type FileCaptureResult = { ok: true; value: CapturedDocument; cache: FileTokenCache }
+  | { ok: false; reason: 'unsupported-source' | 'parse-error' }
+
+function newFileWork(): FileWorkAccumulator {
+  return { mode: 'unchanged', blockWindows: [], blockParseCalls: 0, topLevelRunnerCalls: 0,
+    blockRuleCalls: 0, nestedTokenizeCalls: 0, blockLinesVisited: 0, inlineParseCalls: 0,
+    inlineInputUnits: 0, inlineRoots: [], rawTouchedBeforeRoots: [], environmentChanged: false,
+    legacyParseCalls: 0, fullCaptureCalls: 0, pmEmissionTokenCount: 0, preprocessedCodeUnits: 0,
+    lineTableCodeUnits: 0, rawSplicedCodeUnits: 0, inlineEffectReplayCount: 0 }
+}
+
+export function preprocessFileSource(source: string): SourceTrace {
+  let trace = identityTrace(source)
+  if (source.charCodeAt(0) === 0xFEFF) trace = editTrace(trace, [{ from: 0, to: 1, text: '' }])
+  const mathEdits: TraceEdit[] = []
+  const math = normalizeMathBlocks(trace.text, mathEdits)
+  trace = editTrace(trace, mathEdits)
+  if (trace.text !== math) throw new UnsupportedSourceCapture()
+  normalizeSmartQuotes(math, (before, after, edits) => {
+    if (trace.text !== before) throw new UnsupportedSourceCapture()
+    trace = editTrace(trace, edits)
+    if (trace.text !== after) throw new UnsupportedSourceCapture()
+  })
+  return trace
+}
+
+function newFileCollector(source: string, trace: SourceTrace, work: FileWorkAccumulator): Capture {
+  return { source, trace, lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [], lists: [],
+    file: { work, checkpoints: [], definitions: [], blockTokens: [], effects: [] } }
+}
+
+// The installed plugins use primitive values, arrays and ordinary records in
+// metadata. Reject an unrecognised object rather than erase its prototype.
+function cloneTokenValue(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') {
+    if (typeof value === 'function' || typeof value === 'symbol') throw new UnsupportedSourceCapture()
+    return value
+  }
+  if (Array.isArray(value)) return value.map(cloneTokenValue)
+  const proto = Object.getPrototypeOf(value)
+  if (proto !== Object.prototype && proto !== null) throw new UnsupportedSourceCapture()
+  const copy: Record<string, unknown> = Object.create(proto)
+  for (const [key, item] of Object.entries(value)) copy[key] = cloneTokenValue(item)
+  return copy
+}
+
+function shiftTrace(trace: SourceTrace, delta: number): SourceTrace {
+  return delta === 0 ? trace : { text: trace.text, pieces: trace.pieces.map(p => ({ ...p,
+    sourceFrom: p.sourceFrom + delta, sourceTo: p.sourceTo + delta })) }
+}
+
+function cloneTokenBatch(tokens: readonly ActualToken[], collector: Capture, rawDelta = 0, lineDelta = 0): ActualToken[] {
+  const clone = (token: ActualToken): ActualToken => {
+    const copy: ActualToken = Object.create(Object.getPrototypeOf(token))
+    for (const [key, value] of Object.entries(token)) {
+      if (key !== 'children') Object.defineProperty(copy, key, { value: cloneTokenValue(value), writable: true, enumerable: true, configurable: true })
+    }
+    copy.children = token.children ? token.children.map(clone) : null
+    if (copy.map) copy.map = [copy.map[0] + lineDelta, copy.map[1] + lineDelta]
+    if (token.children && copy.children) {
+      const owner = owners.get(token.children)
+      if (owner) owners.set(copy.children, shiftTrace(owner, rawDelta))
+      if (tokenArrays.has(token)) tokenArrays.set(copy, copy.children)
+    }
+    const provenance = tokenSources.get(token)
+    if (provenance) tokenSources.set(copy, { collector, runs: provenance.runs.map(run => run.trace
+      ? { text: run.text, kind: run.kind, trace: shiftTrace(run.trace, rawDelta) } : { text: run.text }) })
+    const closed = capturedFenceClosed.get(token)
+    if (closed !== undefined) capturedFenceClosed.set(copy, closed)
+    return copy
+  }
+  return tokens.map(clone)
+}
+
+function countTokens(tokens: readonly ActualToken[]): number {
+  let count = 0
+  const pending: (readonly ActualToken[])[] = [tokens]
+  while (pending.length) for (const token of pending.pop()!) {
+    count++
+    if (token.children) pending.push(token.children)
+  }
+  return count
+}
+
+function emitCapturedTokens(tokens: readonly ActualToken[], collector: Capture, schema?: Schema): PmNode {
+  let batch = cloneTokenBatch(tokens, collector)
+  tagPairedHtmlInline(batch)
+  fixFootnoteDefMaps(batch)
+  prepareListEvents(batch, collector)
+  batch = prepareRootEvents(batch, collector) as ActualToken[]
+  collector.file!.work.pmEmissionTokenCount += countTokens(batch)
+  const tokenizer: MarkdownIt = Object.create(md)
+  let used = false
+  tokenizer.parse = () => {
+    if (used) throw new UnsupportedSourceCapture()
+    used = true
+    return batch
+  }
+  const doc = new MorayaMarkdownParser(schema, tokenizer).parse(collector.trace.text, { [captureKey]: collector })
+  if (!used) throw new UnsupportedSourceCapture()
+  return doc
+}
+
+function captureFailure(error: unknown): { ok: false; reason: 'unsupported-source' | 'parse-error' } {
+  return { ok: false, reason: error instanceof UnsupportedSourceCapture || error instanceof UnsupportedOwnership ? 'unsupported-source' : 'parse-error' }
+}
+
+export function captureFilePipeline(source: string, schema?: Schema, work: FileWorkAccumulator = newFileWork()): FileCaptureResult {
+  if (!captureAvailable || !fileHooksValid()) return { ok: false, reason: 'unsupported-source' }
+  try {
+    work.fullCaptureCalls++
+    work.blockWindows = [...work.blockWindows, { sourceFrom: 0, sourceTo: source.length }]
+    work.preprocessedCodeUnits += source.length
+    const collector = newFileCollector(source, preprocessFileSource(source), work)
+    const tokens = _origMdParse(collector.trace.text, { [captureKey]: collector })
+    const file = collector.file!
+    const cache: FileTokenCache = { source, trace: collector.trace, lineStarts: collector.lineStarts,
+      blockTokens: file.blockTokens, inlineTokens: cloneTokenBatch(tokens, collector),
+      checkpoints: file.checkpoints, definitions: file.definitions, effects: file.effects }
+    const doc = emitCapturedTokens(cache.inlineTokens, collector, schema)
+    return { ok: true, value: finalizeCapturedDocument(collector, doc), cache }
+  } catch (error) { return captureFailure(error) }
+}
+
+export function replayFilePipeline(cache: FileTokenCache, schema?: Schema, work: FileWorkAccumulator = newFileWork()): FileCaptureResult {
+  if (!captureAvailable || !fileHooksValid()) return { ok: false, reason: 'unsupported-source' }
+  try {
+    const collector = newFileCollector(cache.source, cache.trace, work)
+    collector.lineStarts = [...cache.lineStarts]
+    collector.protectedSources = cache.definitions.filter(d => d.kind === 'reference').map(d => ({
+      kind: 'reference-definition', sourceFrom: d.sourceFrom, sourceTo: d.sourceTo, scope: d.scope }))
+    return { ok: true, value: finalizeCapturedDocument(collector, emitCapturedTokens(cache.inlineTokens, collector, schema)), cache }
+  } catch (error) { return captureFailure(error) }
+}
+
+function blockScalars(state: StateBlock): BlockScalars {
+  return { parentType: state.parentType, tight: state.tight, blkIndent: state.blkIndent,
+    level: state.level, ddIndent: state.ddIndent, listIndent: state.listIndent }
+}
+
+function newCheckedBlockState(src: string, env: object, tokens: ActualToken[], work: FileWorkAccumulator): StateBlock {
+  const state = new md.block.State(src, md, env, tokens)
+  work.lineTableCodeUnits += src.length
+  for (const name of ['bMarks', 'eMarks', 'tShift', 'sCount', 'bsCount'] as const) {
+    const table = state[name]
+    if (!Array.isArray(table) || table.length !== state.lineMax + 1) throw new UnsupportedSourceCapture()
+    state[name] = new Proxy(table, { get(target, key, receiver) {
+      if (typeof key === 'string' && /^(0|[1-9][0-9]*)$/.test(key)) work.blockLinesVisited++
+      return Reflect.get(target, key, receiver)
+    } })
+  }
+  if (state.src !== src || state.tokens !== tokens || state.env !== env || state.line !== 0
+    || state.parentType !== 'root' || state.level !== 0 || state.ddIndent !== -1 || state.listIndent !== -1)
+    throw new UnsupportedSourceCapture()
+  return state
+}
+
+function runTopLevelWindow(state: StateBlock, cursor: { line: number; hasEmptyLines: boolean }, stopAfterEpilogue: (checkpoint: FileCheckpoint) => boolean, work: FileWorkAccumulator): void {
+  work.topLevelRunnerCalls++
+  const file = collectorFor(state)!.file!, rules = md.block.ruler.getRules('')
+  const checkpoint = (): FileCheckpoint => ({ line: cursor.line, offset: state.bMarks[cursor.line]!,
+    tokenIndex: state.tokens.length, definitionIndex: file.definitions.length,
+    hasEmptyLines: cursor.hasEmptyLines, state: blockScalars(state) })
+  file.checkpoints.push(checkpoint())
+  while (cursor.line < state.lineMax) {
+    state.line = cursor.line = state.skipEmptyLines(cursor.line)
+    if (cursor.line >= state.lineMax || state.sCount[cursor.line]! < state.blkIndent) break
+    const maxNesting = (state.md.options as { maxNesting?: number }).maxNesting
+    if (typeof maxNesting !== 'number') throw new UnsupportedSourceCapture()
+    if (state.level >= maxNesting) { state.line = state.lineMax; break }
+    const previous = state.line
+    let accepted = false
+    for (const rule of rules) {
+      if (rule(state, cursor.line, state.lineMax, false)) { accepted = true; break }
+    }
+    if (!accepted || state.line <= previous) throw new UnsupportedSourceCapture()
+    state.tight = !cursor.hasEmptyLines
+    if (state.isEmpty(state.line - 1)) cursor.hasEmptyLines = true
+    cursor.line = state.line
+    if (cursor.line < state.lineMax && state.isEmpty(cursor.line)) { cursor.hasEmptyLines = true; state.line = ++cursor.line }
+    const next = checkpoint()
+    file.checkpoints.push(next)
+    if (stopAfterEpilogue(next)) return
+  }
+}
+
+// Fixed wrappers dispatch only when the per-call collector requests a file
+// pipeline. Ordinary Markdown parsing retains the installed parser behavior.
+md.block.parse = function (src, engine, env, tokens) {
+  const file = env?.[captureKey]?.file as FileCaptureState | undefined
+  if (!file) return Object.getPrototypeOf(md.block).parse.call(this, src, engine, env, tokens)
+  file.work.blockParseCalls++
+  if (!src) return
+  runTopLevelWindow(newCheckedBlockState(src, env, tokens, file.work), { line: 0, hasEmptyLines: false }, () => false, file.work)
+}
+const originalNestedTokenize = md.block.tokenize
+md.block.tokenize = function (state, start, end) {
+  const file = collectorFor(state)?.file
+  if (file) file.work.nestedTokenizeCalls++
+  return originalNestedTokenize.call(this, state, start, end)
+}
+md.inline.parse = function (src, engine, env, tokens) {
+  const file = env?.[captureKey]?.file as FileCaptureState | undefined
+  const outer = file && !file.activeEffects
+  if (file) {
+    file.work.inlineParseCalls++; file.work.inlineInputUnits += src.length
+    if (outer) { file.activeEffects = []; file.effects.push(file.activeEffects) }
+  }
+  try { return Object.getPrototypeOf(md.inline).parse.call(this, src, engine, env, tokens) } finally {
+    if (outer) delete file!.activeEffects
+  }
+}
+
+wrapCaptureRule(md.block.ruler, 'footnote_def', function observeFootnoteDefinition(original, state, startLine, endLine, silent) {
+  const collector = collectorFor(state), before = state.tokens.length
+  const scope = state.level === 0 && state.blkIndent === 0 ? 'top-level' : 'nested'
+  const result = original(state, startLine, endLine, silent)
+  if (!result || silent || !collector?.file) return result
+  const token = state.tokens[before]
+  if (token?.type !== 'footnote_reference_open' || typeof token.meta?.label !== 'string') throw new UnsupportedSourceCapture()
+  const from = collector.lineStarts[startLine], to = collector.lineStarts[state.line]
+  if (from === undefined || to === undefined) throw new UnsupportedSourceCapture()
+  const raw = rawRange(collector.trace, from, to)
+  if (!raw) throw new UnsupportedSourceCapture()
+  collector.file.definitions.push({ kind: 'footnote', label: token.meta.label, sourceFrom: raw.from, sourceTo: raw.to, scope })
+  return result
+}, true)
+wrapCaptureRule(md.inline.ruler, 'footnote_ref', function observeFootnoteRuntime(original, state, silent) {
+  const result = original(state, silent), file = collectorFor(state)?.file
+  if (result && !silent && file) {
+    const token = state.tokens[state.tokens.length - 1]
+    if (token?.type !== 'footnote_ref' || typeof token.meta?.label !== 'string' || !file.activeEffects) throw new UnsupportedSourceCapture()
+    file.activeEffects.push(token.meta.label)
+  }
+  return result
+})
+
+// Include failed and silent calls, including lookahead and nested dispatch.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+for (const entry of (md.block.ruler as any).__rules__) {
+  const original = entry.fn
+  md.block.ruler.at(entry.name, (state, start, end, silent) => {
+    const file = collectorFor(state)?.file
+    if (file) file.work.blockRuleCalls++
+    return original(state, start, end, silent)
+  }, { alt: entry.alt.slice() })
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const fileRuleSnapshot = [md.core.ruler, md.block.ruler, md.inline.ruler, md.inline.ruler2].map(ruler => (ruler as any).__rules__.map((r: any) => ({ name: r.name, fn: r.fn, enabled: r.enabled, alt: [...r.alt] })))
+function fileHooksValid(): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return [md.core.ruler, md.block.ruler, md.inline.ruler, md.inline.ruler2].every((ruler, i) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const current = (ruler as any).__rules__ as { name: string; fn: unknown; enabled: boolean; alt: string[] }[]
+    if (!Array.isArray(current)) return false
+    const enabled = current.filter(r => r.enabled), actual = ruler.getRules('')
+    if (enabled.length !== actual.length || enabled.some((r, j) => r.fn !== actual[j])) return false
+    return current.length === fileRuleSnapshot[i].length && current.every((r, j) => {
+      const previous = fileRuleSnapshot[i][j]
+      return r.name === previous.name && r.fn === previous.fn && r.enabled === previous.enabled && sameTokenData(r.alt, previous.alt)
+    })
+  }) && md.options.html === true && md.options.linkify === false && md.options.typographer === false && (md.options as { maxNesting?: number }).maxNesting === 100
+}
+
+function sameTokenData(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) !== Array.isArray(b)) return false
+  const left = a as Record<string, unknown>, right = b as Record<string, unknown>, keys = Object.keys(left)
+  return keys.length === Object.keys(right).length && keys.every(key => Object.hasOwn(right, key) && sameTokenData(left[key], right[key]))
+}
+
+type FileEnvironment = { references?: Record<string, { href: string; title: string }>;
+  footnotes?: { refs: Record<string, number>; list?: { label: string; count: number }[] }; [captureKey]?: Capture }
+function definitionEnvironment(events: readonly FileDefinition[]): FileEnvironment {
+  const env: FileEnvironment = {}
+  for (const event of [...events].sort((a, b) => a.sourceFrom - b.sourceFrom)) {
+    if (event.kind === 'reference') {
+      env.references ??= {}
+      if (typeof env.references[event.label] === 'undefined') env.references[event.label] = { href: event.href!, title: event.title! }
+    } else {
+      env.footnotes ??= { refs: {} }
+      env.footnotes.refs[':' + event.label] = -1
+    }
+  }
+  return env
+}
+function sameDefinitionEnvironment(a: readonly FileDefinition[], b: readonly FileDefinition[]): boolean {
+  const canonical = (events: readonly FileDefinition[]) => {
+    const env = definitionEnvironment(events)
+    return JSON.stringify({ references: Object.entries(env.references ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+      footnotes: Object.keys(env.footnotes?.refs ?? {}).sort() })
+  }
+  return canonical(a) === canonical(b)
+}
+function replayInlineEffects(labels: readonly string[], env: FileEnvironment, work: FileWorkAccumulator): void {
+  for (const label of labels) {
+    const refs = env.footnotes?.refs, key = ':' + label
+    if (!refs || typeof refs[key] !== 'number') throw new UnsupportedSourceCapture()
+    const list: { label: string; count: number }[] = env.footnotes!.list ??= []
+    if (refs[key] < 0) { refs[key] = list.length; list.push({ label, count: 0 }) }
+    const entry = list[refs[key]]
+    if (!entry || entry.label !== label) throw new UnsupportedSourceCapture()
+    entry.count++; work.inlineEffectReplayCount++
+  }
+}
+
+/** A conservative first admission: actual single-line paragraph/reference
+ * checkpoints. All candidate rules still see the complete file and true EOF. */
+export function captureFileWindow(cache: FileTokenCache, source: string,
+  patches: readonly Readonly<{ from: number; to: number; text: string }>[], schema: Schema,
+  work: FileWorkAccumulator, selection: Readonly<{ leftIndex: number; rightIndex: number }>): FileCaptureResult | null {
+  if (!fileHooksValid() || !captureAvailable) return { ok: false, reason: 'unsupported-source' }
+  if (!patches.length || cache.trace.text !== cache.source || !cache.checkpoints.length) return null
+  try {
+    work.preprocessedCodeUnits += source.length
+    const trace = preprocessFileSource(source)
+    if (trace.text !== source || /[\r\0]/.test(source)) return null
+    const collector = newFileCollector(source, trace, work), file = collector.file!
+    collector.lineStarts = lineStarts(source)
+    const { leftIndex, rightIndex } = selection, left = cache.checkpoints[leftIndex]!
+    const oldRight = cache.checkpoints[rightIndex]!
+    const admitted = (tokens: readonly ActualToken[]) => tokens.every(t => ['paragraph_open', 'inline', 'paragraph_close'].includes(t.type)
+      && (!t.map || t.map[1] - t.map[0] <= 1))
+    if (!admitted(cache.blockTokens.slice(left.tokenIndex, oldRight.tokenIndex))) return null
+    if (source.slice(0, left.offset) !== cache.source.slice(0, left.offset)) return null
+    const delta = source.length - cache.source.length
+    const tokens = cloneTokenBatch(cache.blockTokens.slice(0, left.tokenIndex), collector)
+    file.definitions = cache.definitions.filter(d => d.sourceTo <= left.offset).map(d => ({ ...d }))
+    const env = { ...definitionEnvironment(file.definitions), [captureKey]: collector }
+    const state = newCheckedBlockState(source, env, tokens, work)
+    Object.assign(state, left.state, { line: left.line })
+    let matched: FileCheckpoint | undefined, matchedIndex = -1
+    const checkpointByOffset = new Map(cache.checkpoints.map((checkpoint, index) => [checkpoint.offset, index]))
+    work.blockParseCalls++
+    runTopLevelWindow(state, { line: left.line, hasEmptyLines: left.hasEmptyLines }, checkpoint => {
+      const oldIndex = checkpointByOffset.get(checkpoint.offset - delta) ?? -1
+      if (oldIndex < rightIndex) return false
+      const previous = cache.checkpoints[oldIndex - 1], old = cache.checkpoints[oldIndex]!
+      if (JSON.stringify(old.state) !== JSON.stringify(checkpoint.state) || old.hasEmptyLines !== checkpoint.hasEmptyLines
+        || source.slice(checkpoint.offset) !== cache.source.slice(old.offset)) return false
+      const newPrevious = file.checkpoints[file.checkpoints.length - 2]
+      if (previous && newPrevious && old.offset < cache.source.length) {
+        const sentinelOld = cloneTokenBatch(cache.blockTokens.slice(previous.tokenIndex, old.tokenIndex), collector, delta, checkpoint.line - old.line)
+        const sentinelNew = tokens.slice(newPrevious.tokenIndex, checkpoint.tokenIndex)
+        if (!sameTokenData(sentinelOld, sentinelNew)) return false
+        const oldDefinitions = cache.definitions.filter(d => previous.offset <= d.sourceFrom && d.sourceFrom < old.offset)
+          .map(d => ({ ...d, sourceFrom: d.sourceFrom + delta, sourceTo: d.sourceTo + delta }))
+        const newDefinitions = file.definitions.filter(d => newPrevious.offset <= d.sourceFrom && d.sourceFrom < checkpoint.offset)
+        if (!sameTokenData(oldDefinitions, newDefinitions)) return false
+      }
+      matched = checkpoint; matchedIndex = oldIndex
+      return true
+    }, work)
+    work.blockWindows = [...work.blockWindows, { sourceFrom: left.offset, sourceTo: state.bMarks[state.line]! }]
+    if (!matched || !admitted(tokens.slice(left.tokenIndex))) return null
+    const right = cache.checkpoints[matchedIndex]!, lineDelta = matched.line - right.line
+    const tokenDelta = tokens.length - right.tokenIndex
+    const windowEnd = tokens.length
+    for (const token of cloneTokenBatch(cache.blockTokens.slice(right.tokenIndex), collector, delta, lineDelta)) tokens.push(token)
+    for (const definition of cache.definitions) if (definition.sourceFrom >= right.offset)
+      file.definitions.push({ ...definition, sourceFrom: definition.sourceFrom + delta, sourceTo: definition.sourceTo + delta })
+    file.definitions.sort((a, b) => a.sourceFrom - b.sourceFrom)
+    collector.protectedSources = file.definitions.filter(d => d.kind === 'reference').map(d => ({ kind: 'reference-definition',
+      sourceFrom: d.sourceFrom, sourceTo: d.sourceTo, scope: d.scope }))
+    const newCheckpoints = cache.checkpoints.slice(0, leftIndex).map(c => ({ ...c }))
+    for (const checkpoint of file.checkpoints) newCheckpoints.push(checkpoint)
+    const definitionDelta = file.definitions.length - cache.definitions.length
+    for (const checkpoint of cache.checkpoints.slice(matchedIndex + 1)) newCheckpoints.push({ ...checkpoint,
+      offset: checkpoint.offset + delta, line: checkpoint.line + lineDelta,
+      tokenIndex: checkpoint.tokenIndex + tokenDelta, definitionIndex: checkpoint.definitionIndex + definitionDelta })
+    file.checkpoints = newCheckpoints
+    file.blockTokens = cloneTokenBatch(tokens, collector)
+    const semanticChanged = !sameDefinitionEnvironment(cache.definitions, file.definitions)
+    const oldEffects = new Map<number, readonly string[]>()
+    let effectOrdinal = 0
+    for (let i = 0; i < cache.blockTokens.length; i++) if (cache.blockTokens[i]!.type === 'inline')
+      oldEffects.set(i, cache.effects[effectOrdinal++]!)
+    const oldWindowEffects: string[] = []
+    for (const [index, effects] of oldEffects) if (index >= left.tokenIndex && index < right.tokenIndex)
+      for (const label of effects) oldWindowEffects.push(label)
+    let parsedIndices: number[] = []
+    const parseInlineSlots = (all: boolean): { tokens: ActualToken[]; env: FileEnvironment; windowEffects: string[] } => {
+      const batch = cloneTokenBatch(file.blockTokens, collector), passEnv = { ...definitionEnvironment(file.definitions), [captureKey]: collector }
+      const windowEffects: string[] = []
+      file.effects = []
+      for (let i = 0; i < batch.length; i++) {
+        const token = batch[i]!
+        if (token.type !== 'inline') continue
+        const oldIndex = i < left.tokenIndex ? i : i >= windowEnd ? i - tokenDelta : undefined
+        if (!all && oldIndex !== undefined) {
+          const effects = oldEffects.get(oldIndex)
+          if (!effects || !cache.inlineTokens[oldIndex] || cache.inlineTokens[oldIndex]!.type !== 'inline') throw new UnsupportedSourceCapture()
+          batch[i] = cloneTokenBatch([cache.inlineTokens[oldIndex]!], collector, i >= windowEnd ? delta : 0, i >= windowEnd ? lineDelta : 0)[0]!
+          replayInlineEffects(effects, passEnv, work)
+          file.effects.push([...effects])
+        } else {
+          if (!token.children) throw new UnsupportedSourceCapture()
+          md.inline.parse(token.content, md, passEnv, token.children)
+          parsedIndices.push(i)
+          if (i >= left.tokenIndex && i < windowEnd) for (const label of file.effects[file.effects.length - 1]!) windowEffects.push(label)
+        }
+      }
+      return { tokens: batch, env: passEnv, windowEffects }
+    }
+    let pass = parseInlineSlots(semanticChanged)
+    if (!semanticChanged && JSON.stringify(pass.windowEffects) !== JSON.stringify(oldWindowEffects)) pass = parseInlineSlots(true)
+    const coreState = new md.core.State(source, md, pass.env)
+    coreState.tokens = pass.tokens
+    const coreRules = md.core.ruler.getRules('')
+    // The snapshot guard below binds the configured normalize/block/inline
+    // order; run every installed post-inline rule on this generation.
+    for (const rule of coreRules.slice(3)) rule(coreState)
+    const nextCache: FileTokenCache = { source, trace, lineStarts: collector.lineStarts, blockTokens: file.blockTokens,
+      inlineTokens: cloneTokenBatch(coreState.tokens, collector), checkpoints: file.checkpoints,
+      definitions: file.definitions, effects: file.effects }
+    const doc = emitCapturedTokens(nextCache.inlineTokens, collector, schema)
+    const value = finalizeCapturedDocument(collector, doc)
+    const dirty = new Set<number>()
+    let rootIndex = 0
+    for (const index of [...new Set(parsedIndices)].sort((a, b) => a - b)) {
+      const map = coreState.tokens[index]?.map
+      if (!map) continue
+      const from = collector.lineStarts[map[0]]!, to = collector.lineStarts[map[1]]!
+      while (rootIndex < value.roots.length && value.roots[rootIndex]!.sourceTo <= from) rootIndex++
+      for (let at = rootIndex; at < value.roots.length && value.roots[at]!.sourceFrom < to; at++) dirty.add(value.roots[at]!.id)
+    }
+    work.inlineRoots = [...dirty].sort((a, b) => a - b)
+    if (work.mode !== 'full-fallback') work.mode = matchedIndex === rightIndex ? 'local' : 'expanded'
+    return { ok: true, value, cache: nextCache }
+  } catch (error) { return captureFailure(error) }
 }

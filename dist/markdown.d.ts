@@ -1,2 +1,5 @@
+import 'markdown-it';
+import 'markdown-it/lib/rules_block/state_block.mjs';
+export { C as CapturedDocument, u as CapturedParagraph, v as CapturedTextRun, w as FileCaptureResult, x as FileCheckpoint, y as FileDefinition, z as FileTokenCache, A as FileWorkAccumulator, D as SourceListStyle, E as SourceRootRenderOptions, G as captureFilePipeline, H as captureFileWindow, I as capturedSourceLists, J as parseDocumentWithSourceCapture, q as parseMarkdown, r as parseMarkdownAsync, K as parseParagraphWithSourceCapture, M as preprocessFileSource, N as replayFilePipeline, t as serializeMarkdown, O as serializeSourceRootMarkdown, Q as sourceRootHasClosedFences } from './markdown-CDmvOQLh.js';
 import 'prosemirror-model';
-export { C as CapturedDocument, f as CapturedParagraph, g as CapturedTextRun, h as SourceListStyle, i as SourceRootRenderOptions, j as capturedSourceLists, k as parseDocumentWithSourceCapture, p as parseMarkdown, e as parseMarkdownAsync, l as parseParagraphWithSourceCapture, s as serializeMarkdown, m as serializeSourceRootMarkdown, n as sourceRootHasClosedFences } from './markdown-Bi6KIKB5.js';
+import 'prosemirror-state';

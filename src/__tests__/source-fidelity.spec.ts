@@ -184,10 +184,11 @@ it('rejects text replacement inside list containers', () => {
   }
 })
 
-it('keeps successful public exact results limited to the established session contract', () => {
+it('keeps exact results within the session contract plus file diagnostics', () => {
   const base = session('甲乙')
   const result = replace(base, 1, 2, '丙')
   expect(result.ok).toBe(true)
-  expect(Object.keys(result).sort()).toEqual(['ok', 'session'])
+  expect(Object.keys(result).sort()).toEqual(['file', 'ok', 'session'])
+  if(result.ok){expect(result.file!.work.legacyParseCalls).toBe(0);expect(result.file!.environmentVersion).toBe(0)}
   expect(output(result).source).toBe('丙乙')
 })

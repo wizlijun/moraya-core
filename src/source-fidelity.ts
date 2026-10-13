@@ -1,7 +1,8 @@
+import { prepareRawFileSourceEdits, createFileSourceSession, emptyFileParseWork, prepareVerifiedFileBase, finishUnchangedFile, prepareCandidate, type VerifiedFileBase } from './source-file-cache'
 import { Fragment, type Node as PmNode, type ResolvedPos, type Schema } from 'prosemirror-model'
 import { EditorState, type Transaction } from 'prosemirror-state'
 import { AddMarkStep, RemoveMarkStep, ReplaceStep, Mapping } from 'prosemirror-transform'
-import { parseDocumentWithSourceCapture, serializeSourceRootMarkdown, sourceRootHasClosedFences, capturedSourceLists, type SourceListStyle } from './markdown'
+import { serializeSourceRootMarkdown, sourceRootHasClosedFences, capturedSourceLists, type SourceListStyle, type FileWorkAccumulator } from './markdown'
 import type { SourceLayout, SourceListLexeme } from './source-layout'
 import type { SourceRoot, SourceGap, SourceEdit, ProtectedSource } from './source-ownership'
 import {classifyTransaction,applyStructuralTransaction,UnsupportedSourceStructure,type StructuralRendered} from './source-structure'
@@ -23,14 +24,57 @@ export type FidelityFailure = Readonly<{
   reason: 'unsupported-source' | 'parse-error' | 'stale-document'
     | 'unsupported-step' | 'unmapped-range' | 'semantic-mismatch'
 }>
-export type FidelityResult = { ok: true; session: SourceSession } | FidelityFailure
+export type FidelityResult = { ok: true; session: SourceSession; file?: SourceFileUpdate } | FidelityFailure
+
+export type SourcePatch = Readonly<{
+  from: number; to: number; removed: string; text: string
+}>
+export type FileRootCorrespondence = Readonly<{
+  beforeRoots: readonly number[]
+  afterRoots: readonly number[]
+  kind: 'untouched' | 'retained' | 'split' | 'join' | 'repartition' | 'birth' | 'deleted'
+}>
+export type FileParseWork = Readonly<{
+  mode: 'unchanged' | 'local' | 'expanded' | 'full-fallback'
+  fallbackReason?: 'cache-miss' | 'checkpoint-unproven' |
+    'preprocess-unproven' | 'private-hook-unavailable'
+  blockWindows: readonly Readonly<{sourceFrom:number;sourceTo:number}>[]
+  blockParseCalls: number
+  topLevelRunnerCalls: number
+  blockRuleCalls: number
+  nestedTokenizeCalls: number
+  blockLinesVisited: number
+  inlineParseCalls: number
+  inlineInputUnits: number
+  inlineRoots: readonly number[]
+  rawTouchedBeforeRoots: readonly number[]
+  environmentChanged: boolean
+  legacyParseCalls: number
+  fullCaptureCalls: number
+  pmEmissionTokenCount: number
+  preprocessedCodeUnits: number
+  lineTableCodeUnits: number
+  rawSplicedCodeUnits: number
+  inlineEffectReplayCount: number
+}>
+export type SourceFileUpdate = Readonly<{
+  environmentVersion: number
+  correspondence: readonly FileRootCorrespondence[]
+  work: FileParseWork
+}>
+export type FileSourceResult =
+  | {ok:true; session:SourceSession; edits:readonly SourcePatch[]; file:SourceFileUpdate}
+  | (FidelityFailure & {work:FileParseWork})
+export function prepareFileSourceEdits(
+  base:SourceSession,
+  input:Readonly<{expectedRevision:number;edits:readonly SourcePatch[]}>
+):FileSourceResult {
+  return prepareRawFileSourceEdits(base,input)
+}
 
 /** Experimental: complete raw document with sparse writable paragraph spans. */
 export function createSourceSession(source: string, schema?: Schema): FidelityResult {
-  const parsed = parseDocumentWithSourceCapture(source, schema)
-  if (!parsed.ok) return parsed
-  return { ok: true, session: { revision: 0, source, doc: parsed.value.doc, textSpans: parsed.value.textRuns,
-    roots: parsed.value.roots, gaps: parsed.value.gaps, protectedSources: parsed.value.protectedSources, layout: parsed.value.layout } }
+  return createFileSourceSession(source, schema)
 }
 
 function splitsSurrogate(text: string, offset: number): boolean {
@@ -71,15 +115,19 @@ function overlapsProtectedSource(base: SourceSession, from: number, to: number):
   return !!range && (from === to ? range.sourceFrom < from : range.sourceFrom < to)
 }
 
-type ExactTextResult = { ok: true; session: SourceSession; edit: SourceEdit } | FidelityFailure
+type ExactTextResult = { ok: true; session: SourceSession; edit: SourceEdit; file: SourceFileUpdate } | FidelityFailure
 
 /** Pure preparation: a failure never supplies output or mutates the base session. */
-function applySourceTextTransactionWithEdit(base: SourceSession, tr: Transaction): ExactTextResult {
+function applySourceTextTransactionWithEdit(base: SourceSession, tr: Transaction, context?: { verified: VerifiedFileBase; work: FileWorkAccumulator; verifyEdit?: (edit: SourceEdit) => void }): ExactTextResult {
   if (!tr.before.eq(base.doc)) return { ok: false, reason: 'stale-document' }
   if (tr.steps.length !== 1) return { ok: false, reason: 'unsupported-step' }
   if (tr.storedMarksSet) return { ok: false, reason: 'unsupported-step' }
   const step = tr.steps[0]!.toJSON()
   if (step.stepType !== 'replace' || step.structure) return { ok: false, reason: 'unsupported-step' }
+  const work = context?.work ?? emptyFileParseWork()
+  const verified = context?.verified ?? prepareVerifiedFileBase(base, work)
+  if ('ok' in verified) return verified
+  base = verified.verifiedBase
   const { from, to } = step as { from: number; to: number }
   const $from = base.doc.resolve(from), $to = base.doc.resolve(to)
   if ($from.depth !== 1 || !$from.sameParent($to) || $from.parent.type.name !== 'paragraph'
@@ -110,46 +158,24 @@ function applySourceTextTransactionWithEdit(base: SourceSession, tr: Transaction
   }
   if (overlapsProtectedSource(base, sourceFrom, sourceTo)) return { ok: false, reason: 'unsupported-step' }
   const insert = (step.slice?.content ?? []).map((node: { text: string }) => node.text).join('')
-  const candidate = base.source.slice(0, sourceFrom) + insert + base.source.slice(sourceTo)
-  const result = createSourceSession(candidate, base.doc.type.schema)
-  if (!result.ok || !result.session.doc.eq(tr.doc)) return { ok: false, reason: 'semantic-mismatch' }
-  return { ok: true, session: { ...result.session, revision: base.revision + 1 },
+  context?.verifyEdit?.({ from: sourceFrom, to: sourceTo, text: insert })
+  const result = prepareCandidate(verified, [{ from: sourceFrom, to: sourceTo,
+    removed: base.source.slice(sourceFrom, sourceTo), text: insert }], work, tr.doc)
+  if (!result.ok) return { ok: false, reason: result.reason }
+  return { ok: true, session: result.session, file: result.file,
     edit: { from: sourceFrom, to: sourceTo, text: insert } }
 }
 
 export function applySourceTextTransaction(base:SourceSession,tr:Transaction):FidelityResult {
  const result=applySourceTextTransactionWithEdit(base,tr)
- return result.ok?{ok:true,session:result.session}:result
+ return result.ok?{ok:true,session:result.session,file:result.file}:result
 }
 
 export type SourceBlockResult =
  | {ok:true;session:SourceSession;mode:'unchanged'|'exact-text'|'root-render';
-    edits:readonly SourceEdit[];changedRoots:readonly number[]}
+    edits:readonly SourceEdit[];changedRoots:readonly number[];file?:SourceFileUpdate}
  | FidelityFailure
 class UnsupportedBlockTransaction extends Error {}
-// Public metadata is observational. Only a capture binding or one fully checked
-// recapture may drive rendering (including the existing fence provenance guard).
-function sameSourceMetadata(a:unknown,b:unknown):boolean {
- if(a===b)return true
- if(!a||!b||typeof a!=='object'||typeof b!=='object'||Array.isArray(a)!==Array.isArray(b))return false
- const left=a as Record<string,unknown>,right=b as Record<string,unknown>,keys=Object.keys(left)
- return keys.length===Object.keys(right).length&&keys.every(k=>Object.hasOwn(right,k)&&sameSourceMetadata(left[k],right[k]))
-}
-function prepareListAuthority(base:SourceSession):{base:SourceSession;facts:readonly SourceListLexeme[]} {
- const bound=capturedSourceLists(base.source,base.doc,base.roots,base.layout)
- if(bound)return {base,facts:bound}
- const capture=createSourceSession(base.source,base.doc.type.schema)
- if(!capture.ok)throw new UnsupportedBlockTransaction()
- const actual=capture.session
- if(actual.doc.type.schema!==base.doc.type.schema||!actual.doc.eq(base.doc)
-  ||!sameSourceMetadata(actual.roots,base.roots)||!sameSourceMetadata(actual.gaps,base.gaps)
-  ||!sameSourceMetadata(actual.protectedSources,base.protectedSources)||!sameSourceMetadata(actual.textSpans,base.textSpans)
-  ||!sameSourceMetadata(actual.layout.blankLines,base.layout.blankLines)||!sameSourceMetadata(actual.layout.fallback,base.layout.fallback)
-  ||base.layout.lists!==undefined&&!sameSourceMetadata(actual.layout.lists,base.layout.lists))throw new UnsupportedBlockTransaction()
- const facts=capturedSourceLists(actual.source,actual.doc,actual.roots,actual.layout)
- if(!facts)throw new UnsupportedBlockTransaction()
- return {base:{...actual,revision:base.revision},facts}
-}
 type ListOrigin={kind:string;style:SourceListStyle}
 type ListShell={node:PmNode;pos:number;origins:readonly ListOrigin[]}
 type ListItem={node:PmNode;pos:number;origins:readonly ListOrigin[]}
@@ -367,9 +393,13 @@ function applySourceEdits(base:SourceSession,edits:readonly SourceEdit[],ids:rea
 }
 export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):SourceBlockResult {
  if(!tr.before.eq(base.doc))return {ok:false,reason:'stale-document'}
- const caller=base
  try {
-  const authority=prepareListAuthority(base);base=authority.base
+  const work=emptyFileParseWork(),verified=prepareVerifiedFileBase(base,work)
+  if('ok' in verified)throw new UnsupportedBlockTransaction()
+  base=verified.verifiedBase
+  const facts=capturedSourceLists(base.source,base.doc,base.roots,base.layout)
+  if(!facts)throw new UnsupportedBlockTransaction()
+  const authority={facts}
   const classification=classifyTransaction(base,tr)
   // Validate the actual standard chain before metadata mapping or rendering.
   for(let i=0;i<tr.steps.length;i++){
@@ -387,29 +417,26 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
      family:last.type.name==='table'?'table':['paragraph','heading','bullet_list','ordered_list','blockquote','horizontal_rule'].includes(last.type.name)?'flow':'closed-literal',eol:'\n'}
    }
    const result=applyStructuralTransaction(base,tr,render,sourceRootHasClosedFences)
-   if(result.unchanged)return {ok:true,session:caller,mode:'unchanged',edits:[],changedRoots:[]}
-   const parsed=createSourceSession(result.source,base.doc.type.schema)
-   if(!parsed.ok||!parsed.session.doc.eq(tr.doc))return {ok:false,reason:'semantic-mismatch'}
-   return {ok:true,session:{...parsed.session,revision:base.revision+1},mode:'root-render',
-    edits:result.edits,changedRoots:result.changedRoots}
+   if(result.unchanged)return {...finishUnchangedFile(verified,work),mode:'unchanged',edits:[],changedRoots:[]}
+   const parsed=prepareCandidate(verified,result.edits.map(edit=>({...edit,removed:base.source.slice(edit.from,edit.to)})),work,tr.doc)
+   if(!parsed.ok)return {ok:false,reason:parsed.reason}
+   return {ok:true,session:parsed.session,file:parsed.file,mode:'root-render',edits:result.edits,changedRoots:result.changedRoots}
   }
   const ownership=indexSourceRoots(base)
   const changedRoots=changedNaturalRoots(base,tr,ownership)
   if(!changedRoots.length) {
    if(!tr.doc.eq(base.doc))return {ok:false,reason:'unsupported-step'}
-   return {ok:true,session:caller,mode:'unchanged',edits:[],changedRoots:[]}
+   return {...finishUnchangedFile(verified,work),mode:'unchanged',edits:[],changedRoots:[]}
   }
   // Only a single ReplaceStep can satisfy the old exact API. Replay this one
   // document step to remove stored-mark bookkeeping without touching the caller.
   if(tr.steps.length===1&&tr.steps[0] instanceof ReplaceStep) {
    const replay=EditorState.create({doc:base.doc}).tr.step(tr.steps[0]!)
    if(!replay.doc.eq(tr.doc))return {ok:false,reason:'unsupported-step'}
-   const exact=applySourceTextTransactionWithEdit(base,replay)
+   const exact=applySourceTextTransactionWithEdit(base,replay,{verified,work,verifyEdit:edit=>{applySourceEdits(base,[edit],changedRoots,ownership)}})
    if(exact.ok) {
     const edits=[exact.edit]
-    if(applySourceEdits(base,edits,changedRoots,ownership)!==exact.session.source)
-     return {ok:false,reason:'semantic-mismatch'}
-    return {ok:true,session:exact.session,mode:'exact-text',edits,changedRoots}
+    return {ok:true,session:exact.session,file:exact.file,mode:'exact-text',edits,changedRoots}
    }
   }
   // Exact rejection is not authorization: changedNaturalRoots has already
@@ -421,11 +448,10 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
    const root=ownership.rootById[id]!
    return {from:root.sourceFrom,to:root.sourceTo,text:renderChangedRoot(base,tr.doc,root,styles)}
   })
-  const source=applySourceEdits(base,edits,changedRoots,ownership)
-  const parsed=createSourceSession(source,base.doc.type.schema)
-  if(!parsed.ok||!parsed.session.doc.eq(tr.doc))return {ok:false,reason:'semantic-mismatch'}
-  return {ok:true,session:{...parsed.session,revision:base.revision+1},
-   mode:'root-render',edits,changedRoots}
+  applySourceEdits(base,edits,changedRoots,ownership)
+  const parsed=prepareCandidate(verified,edits.map(edit=>({...edit,removed:base.source.slice(edit.from,edit.to)})),work,tr.doc)
+  if(!parsed.ok)return {ok:false,reason:parsed.reason}
+  return {ok:true,session:parsed.session,file:parsed.file,mode:'root-render',edits,changedRoots}
  }catch(error) {
   if(error instanceof UnsupportedBlockTransaction||error instanceof UnsupportedSourceStructure)return {ok:false,reason:'unsupported-step'}
   return {ok:false,reason:'parse-error'}

@@ -1,52 +1,16 @@
 export { createSchema, getDocumentBaseDir, setDocumentBaseDir } from './schema.js';
-import { S as SourceRoot, a as SourceGap, P as ProtectedSource, b as SourceLayout, c as SourceEdit } from './markdown-Bi6KIKB5.js';
-export { B as BlankLineUnit, F as FallbackEmpty, L as LayoutContainer, d as SyntheticEmission, p as parseMarkdown, e as parseMarkdownAsync, s as serializeMarkdown } from './markdown-Bi6KIKB5.js';
+export { B as BlankLineUnit, F as FallbackEmpty, a as FidelityFailure, b as FidelityResult, c as FileParseWork, d as FileRootCorrespondence, e as FileSourceResult, L as LayoutContainer, P as ProtectedSource, S as SourceBlockResult, f as SourceEdit, g as SourceFileUpdate, h as SourceGap, i as SourceLayout, j as SourcePatch, k as SourceRoot, l as SourceSession, m as SyntheticEmission, T as TextSourceSpan, n as applySourceBlockTransaction, o as applySourceTextTransaction, p as createSourceSession, q as parseMarkdown, r as parseMarkdownAsync, s as prepareFileSourceEdits, t as serializeMarkdown } from './markdown-CDmvOQLh.js';
 export { CreateEditorOptions, EditorPluginOptions, MorayaEditorInstance, createEditor, createEditorPlugins, preloadEnhancementPlugins } from './setup.js';
 export { GfmTableAction, gfmTableCommand, insertHorizontalRule, insertImage, insertMathBlock, insertTable, setHeading, toggleBlockquote, toggleBold, toggleBulletList, toggleCode, toggleCodeBlock, toggleHighlight, toggleItalic, toggleLink, toggleOrderedList, toggleStrikethrough } from './commands.js';
 export { DocCache, createDocCache, djb2Hash } from './doc-cache.js';
 export { FrontmatterViewFactory, LinkOpener, LocalMediaSource, MediaResolver, Platform, RendererPluginModule, RendererRegistry, SchemaConfig, SpreadsheetViewFactory } from './types.js';
-import { Node, Schema } from 'prosemirror-model';
-import { Transaction } from 'prosemirror-state';
+import 'prosemirror-model';
+import 'markdown-it';
+import 'markdown-it/lib/rules_block/state_block.mjs';
+import 'prosemirror-state';
 import 'prosemirror-view';
 import 'prosemirror-inputrules';
 import './plugins/cursor-syntax.js';
-
-type TextSourceSpan = Readonly<{
-    sourceFrom: number;
-    sourceTo: number;
-    pmFrom: number;
-    pmTo: number;
-    kind: 'linear' | 'atomic';
-}>;
-type SourceSession = Readonly<{
-    revision: number;
-    source: string;
-    doc: Node;
-    textSpans: readonly TextSourceSpan[];
-    roots: readonly SourceRoot[];
-    gaps: readonly SourceGap[];
-    protectedSources: readonly ProtectedSource[];
-    layout: SourceLayout;
-}>;
-type FidelityFailure = Readonly<{
-    ok: false;
-    reason: 'unsupported-source' | 'parse-error' | 'stale-document' | 'unsupported-step' | 'unmapped-range' | 'semantic-mismatch';
-}>;
-type FidelityResult = {
-    ok: true;
-    session: SourceSession;
-} | FidelityFailure;
-/** Experimental: complete raw document with sparse writable paragraph spans. */
-declare function createSourceSession(source: string, schema?: Schema): FidelityResult;
-declare function applySourceTextTransaction(base: SourceSession, tr: Transaction): FidelityResult;
-type SourceBlockResult = {
-    ok: true;
-    session: SourceSession;
-    mode: 'unchanged' | 'exact-text' | 'root-render';
-    edits: readonly SourceEdit[];
-    changedRoots: readonly number[];
-} | FidelityFailure;
-declare function applySourceBlockTransaction(base: SourceSession, tr: Transaction): SourceBlockResult;
 
 type EolChange = Readonly<{
     sourceFrom: number;
@@ -63,4 +27,4 @@ declare function projectLineEndings(source: string): EolProjection;
 declare function sourceOffsetAt(p: EolProjection, n: number): number;
 declare function viewOffsetAt(p: EolProjection, n: number, bias: -1 | 1): number;
 
-export { type EolChange, type EolProjection, type FidelityFailure, type FidelityResult, ProtectedSource, type SourceBlockResult, SourceEdit, SourceGap, SourceLayout, SourceRoot, type SourceSession, type TextSourceSpan, applySourceBlockTransaction, applySourceTextTransaction, createSourceSession, projectLineEndings, sourceOffsetAt, viewOffsetAt };
+export { type EolChange, type EolProjection, projectLineEndings, sourceOffsetAt, viewOffsetAt };

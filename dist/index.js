@@ -2963,13 +2963,14 @@ function capturedSourceLists(source, doc2, roots, layout) {
 function sourceRootHasClosedFences(root) {
   return capturedRootFencesClosed.get(root) === true;
 }
-function wrapCaptureRule(ruler, name, wrapper) {
+function wrapCaptureRule(ruler, name, wrapper, preserveAlternates = false) {
   const original = ruler.__rules__?.find((rule) => rule.name === name)?.fn;
   if (typeof original !== "function") {
     captureAvailable = false;
     return;
   }
-  ruler.at(name, (...args) => wrapper(original, ...args));
+  const alt = preserveAlternates ? ruler.__rules__.find((rule) => rule.name === name).alt.slice() : [];
+  ruler.at(name, (...args) => wrapper(original, ...args), { alt });
 }
 var collectorFor = (state) => state.env?.[captureKey];
 wrapCaptureRule(md.block.ruler, "fence", (original, state, startLine, endLine, silent) => {
@@ -3043,23 +3044,42 @@ wrapCaptureRule(md.core.ruler, "normalize", (original, state) => {
   collector.lineStarts = lineStarts(collector.trace.text);
   return result;
 });
-wrapCaptureRule(md.block.ruler, "reference", (original, state, startLine, endLine, silent) => {
+wrapCaptureRule(md.block.ruler, "reference", function observeReferenceCandidate(original, state, startLine, endLine, silent) {
   const collector = collectorFor(state);
+  if (!collector || silent) return original(state, startLine, endLine, silent);
   const scope = state.level === 0 && state.blkIndent === 0 ? "top-level" : "nested";
-  const result = original(state, startLine, endLine, silent);
-  if (!collector || !result || silent) return result;
+  const had = Object.hasOwn(state.env, "references"), saved = state.env.references;
+  const candidates = {};
+  state.env.references = candidates;
+  let result;
+  try {
+    result = original(state, startLine, endLine, silent);
+  } finally {
+    if (had) state.env.references = saved;
+    else delete state.env.references;
+  }
+  if (!result) return result;
+  const entries = Object.entries(candidates);
+  if (entries.length !== 1) throw new UnsupportedSourceCapture();
+  const [label, value] = entries[0];
+  if (typeof state.env.references === "undefined") state.env.references = {};
+  if (typeof state.env.references[label] === "undefined") state.env.references[label] = value;
   const from = collector.lineStarts[startLine], to = collector.lineStarts[state.line];
   if (from === void 0 || to === void 0 || to <= from) throw new UnsupportedSourceCapture();
   const raw = rawRange(collector.trace, from, to);
   if (raw) {
     const previous = collector.protectedSources[collector.protectedSources.length - 1];
     if (previous && previous.sourceTo > raw.from) throw new UnsupportedSourceCapture();
-    collector.protectedSources.push(Object.freeze({
-      kind: "reference-definition",
+    collector.protectedSources.push(Object.freeze({ kind: "reference-definition", sourceFrom: raw.from, sourceTo: raw.to, scope }));
+    collector.file?.definitions.push({
+      kind: "reference",
+      label,
+      href: value.href,
+      title: value.title,
       sourceFrom: raw.from,
       sourceTo: raw.to,
       scope
-    }));
+    });
   }
   return result;
 });
@@ -3114,6 +3134,8 @@ wrapCaptureRule(md.block.ruler, "paragraph", (original, state, ...args) => {
 });
 wrapCaptureRule(md.core.ruler, "inline", (original, state) => {
   if (!collectorFor(state)) return original(state);
+  const collector = collectorFor(state);
+  if (collector.file) collector.file.blockTokens = cloneTokenBatch(state.tokens, collector);
   const mapped = state.tokens.filter((token) => tokenArrays.has(token));
   const check2 = () => {
     for (const token of mapped) {
@@ -3815,8 +3837,8 @@ var MorayaMarkdownParser = class extends MarkdownParser {
    * caller-provided schema rather than the module-level defaultSchema.
    */
   schema;
-  constructor(schemaArg = defaultSchema) {
-    super(schemaArg, md, parserTokens);
+  constructor(schemaArg = defaultSchema, tokenizer = md) {
+    super(schemaArg, tokenizer, parserTokens);
     this.schema = schemaArg;
     const h = (
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -4354,8 +4376,7 @@ function serializeSourceRootMarkdown(doc2, options = {}) {
       renderSourceList(state, node, style, " ".repeat(width), (i) => String(number(i)).padStart(width - 2, " ") + style.marker + " ");
     }
   }, sourceRootSerializer.marks, sourceRootSerializer.options);
-  let result = current.serialize(doc2, { tightLists: true });
-  result = relaxEscapes(result, doc2);
+  const result = current.serialize(doc2, { tightLists: true });
   return result.replace(/\u200B/g, "");
 }
 function renderTableRow(state, row) {
@@ -4527,63 +4548,511 @@ function serializeMarkdown(doc2) {
 }
 var UnsupportedSourceCapture = class extends Error {
 };
-function parseDocumentWithSourceCapture(source, schema2) {
-  if (!captureAvailable) return { ok: false, reason: "unsupported-source" };
-  try {
-    let trace = identityTrace(source);
-    if (source.charCodeAt(0) === 65279) trace = editTrace(trace, [{ from: 0, to: 1, text: "" }]);
-    const mathEdits = [];
-    const math = normalizeMathBlocks(trace.text, mathEdits);
-    trace = editTrace(trace, mathEdits);
-    if (trace.text !== math) throw new UnsupportedSourceCapture();
-    const work = normalizeSmartQuotes(math, (before, after, edits) => {
-      if (trace.text !== before) throw new UnsupportedSourceCapture();
-      trace = editTrace(trace, edits);
-      if (trace.text !== after) throw new UnsupportedSourceCapture();
+function finalizeCapturedDocument(collector, doc2) {
+  const source = collector.source;
+  const text2 = [];
+  doc2.forEach((paragraph2, offset) => {
+    if (paragraph2.type.name !== "paragraph") return;
+    paragraph2.forEach((node, inner) => {
+      if (node.isText) text2.push({ node, paragraph: paragraph2, from: offset + 1 + inner, to: offset + 1 + inner + node.nodeSize });
     });
-    const collector = { source, trace, lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [], lists: [] };
-    const doc2 = getParserFor(schema2).parse(work, { [captureKey]: collector });
-    const text2 = [];
-    doc2.forEach((paragraph2, offset) => {
-      if (paragraph2.type.name !== "paragraph") return;
-      paragraph2.forEach((node, inner) => {
-        if (node.isText) text2.push({ node, paragraph: paragraph2, from: offset + 1 + inner, to: offset + 1 + inner + node.nodeSize });
-      });
-    });
-    let pmEnd = 0, sourceEnd = 0, textIndex = 0;
-    for (const run of collector.runs) {
-      if (run.pmFrom < pmEnd || run.pmTo <= run.pmFrom || run.pmTo > doc2.content.size || run.sourceFrom < sourceEnd || run.sourceTo <= run.sourceFrom || run.sourceTo > source.length || run.kind === "linear" && run.sourceTo - run.sourceFrom !== run.pmTo - run.pmFrom) {
+  });
+  let pmEnd = 0, sourceEnd = 0, textIndex = 0;
+  for (const run of collector.runs) {
+    if (run.pmFrom < pmEnd || run.pmTo <= run.pmFrom || run.pmTo > doc2.content.size || run.sourceFrom < sourceEnd || run.sourceTo <= run.sourceFrom || run.sourceTo > source.length || run.kind === "linear" && run.sourceTo - run.sourceFrom !== run.pmTo - run.pmFrom) {
+      throw new UnsupportedSourceCapture();
+    }
+    while (textIndex < text2.length && text2[textIndex].to <= run.pmFrom) textIndex++;
+    const paragraph2 = text2[textIndex]?.paragraph;
+    let pos = run.pmFrom;
+    while (pos < run.pmTo) {
+      const part = text2[textIndex];
+      if (!part || part.paragraph !== paragraph2 || part.from > pos || part.to <= pos || part.node.marks.some((mark) => !["em", "strong", "link"].includes(mark.type.name))) {
         throw new UnsupportedSourceCapture();
       }
-      while (textIndex < text2.length && text2[textIndex].to <= run.pmFrom) textIndex++;
-      const paragraph2 = text2[textIndex]?.paragraph;
-      let pos = run.pmFrom;
-      while (pos < run.pmTo) {
-        const part = text2[textIndex];
-        if (!part || part.paragraph !== paragraph2 || part.from > pos || part.to <= pos || part.node.marks.some((mark) => !["em", "strong", "link"].includes(mark.type.name))) {
-          throw new UnsupportedSourceCapture();
-        }
-        const end = Math.min(part.to, run.pmTo);
-        if (run.kind === "linear" && source.slice(run.sourceFrom + pos - run.pmFrom, run.sourceFrom + end - run.pmFrom) !== part.node.text.slice(pos - part.from, end - part.from)) throw new UnsupportedSourceCapture();
-        pos = end;
-        if (pos === part.to) textIndex++;
-      }
-      pmEnd = run.pmTo;
-      sourceEnd = run.sourceTo;
+      const end = Math.min(part.to, run.pmTo);
+      if (run.kind === "linear" && source.slice(run.sourceFrom + pos - run.pmFrom, run.sourceFrom + end - run.pmFrom) !== part.node.text.slice(pos - part.from, end - part.from)) throw new UnsupportedSourceCapture();
+      pos = end;
+      if (pos === part.to) textIndex++;
     }
-    const lists = finishSourceLists(doc2, collector);
-    const layout = finishSourceLayout(collector.blankLines, collector.fallback, lists);
-    capturedListLayouts.set(layout, { source, doc: doc2, roots: collector.roots, lists });
-    return { ok: true, value: {
-      doc: doc2,
-      textRuns: collector.runs,
-      protectedSources: Object.freeze(collector.protectedSources),
-      layout,
-      roots: collector.roots,
-      gaps: buildSourceGaps(source, collector.roots, collector.synthetic)
-    } };
+    pmEnd = run.pmTo;
+    sourceEnd = run.sourceTo;
+  }
+  const lists = finishSourceLists(doc2, collector);
+  const layout = finishSourceLayout(collector.blankLines, collector.fallback, lists);
+  capturedListLayouts.set(layout, { source, doc: doc2, roots: collector.roots, lists });
+  return {
+    doc: doc2,
+    textRuns: collector.runs,
+    protectedSources: Object.freeze(collector.protectedSources),
+    layout,
+    roots: collector.roots,
+    gaps: buildSourceGaps(source, collector.roots, collector.synthetic)
+  };
+}
+function newFileWork() {
+  return {
+    mode: "unchanged",
+    blockWindows: [],
+    blockParseCalls: 0,
+    topLevelRunnerCalls: 0,
+    blockRuleCalls: 0,
+    nestedTokenizeCalls: 0,
+    blockLinesVisited: 0,
+    inlineParseCalls: 0,
+    inlineInputUnits: 0,
+    inlineRoots: [],
+    rawTouchedBeforeRoots: [],
+    environmentChanged: false,
+    legacyParseCalls: 0,
+    fullCaptureCalls: 0,
+    pmEmissionTokenCount: 0,
+    preprocessedCodeUnits: 0,
+    lineTableCodeUnits: 0,
+    rawSplicedCodeUnits: 0,
+    inlineEffectReplayCount: 0
+  };
+}
+function preprocessFileSource(source) {
+  let trace = identityTrace(source);
+  if (source.charCodeAt(0) === 65279) trace = editTrace(trace, [{ from: 0, to: 1, text: "" }]);
+  const mathEdits = [];
+  const math = normalizeMathBlocks(trace.text, mathEdits);
+  trace = editTrace(trace, mathEdits);
+  if (trace.text !== math) throw new UnsupportedSourceCapture();
+  normalizeSmartQuotes(math, (before, after, edits) => {
+    if (trace.text !== before) throw new UnsupportedSourceCapture();
+    trace = editTrace(trace, edits);
+    if (trace.text !== after) throw new UnsupportedSourceCapture();
+  });
+  return trace;
+}
+function newFileCollector(source, trace, work) {
+  return {
+    source,
+    trace,
+    lineStarts: [],
+    protectedSources: [],
+    runs: [],
+    roots: [],
+    synthetic: [],
+    blankLines: [],
+    lists: [],
+    file: { work, checkpoints: [], definitions: [], blockTokens: [], effects: [] }
+  };
+}
+function cloneTokenValue(value) {
+  if (value === null || typeof value !== "object") {
+    if (typeof value === "function" || typeof value === "symbol") throw new UnsupportedSourceCapture();
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(cloneTokenValue);
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) throw new UnsupportedSourceCapture();
+  const copy = Object.create(proto);
+  for (const [key, item] of Object.entries(value)) copy[key] = cloneTokenValue(item);
+  return copy;
+}
+function shiftTrace(trace, delta) {
+  return delta === 0 ? trace : { text: trace.text, pieces: trace.pieces.map((p) => ({
+    ...p,
+    sourceFrom: p.sourceFrom + delta,
+    sourceTo: p.sourceTo + delta
+  })) };
+}
+function cloneTokenBatch(tokens, collector, rawDelta = 0, lineDelta = 0) {
+  const clone = (token) => {
+    const copy = Object.create(Object.getPrototypeOf(token));
+    for (const [key, value] of Object.entries(token)) {
+      if (key !== "children") Object.defineProperty(copy, key, { value: cloneTokenValue(value), writable: true, enumerable: true, configurable: true });
+    }
+    copy.children = token.children ? token.children.map(clone) : null;
+    if (copy.map) copy.map = [copy.map[0] + lineDelta, copy.map[1] + lineDelta];
+    if (token.children && copy.children) {
+      const owner = owners.get(token.children);
+      if (owner) owners.set(copy.children, shiftTrace(owner, rawDelta));
+      if (tokenArrays.has(token)) tokenArrays.set(copy, copy.children);
+    }
+    const provenance = tokenSources.get(token);
+    if (provenance) tokenSources.set(copy, { collector, runs: provenance.runs.map((run) => run.trace ? { text: run.text, kind: run.kind, trace: shiftTrace(run.trace, rawDelta) } : { text: run.text }) });
+    const closed = capturedFenceClosed.get(token);
+    if (closed !== void 0) capturedFenceClosed.set(copy, closed);
+    return copy;
+  };
+  return tokens.map(clone);
+}
+function countTokens(tokens) {
+  let count = 0;
+  const pending = [tokens];
+  while (pending.length) for (const token of pending.pop()) {
+    count++;
+    if (token.children) pending.push(token.children);
+  }
+  return count;
+}
+function emitCapturedTokens(tokens, collector, schema2) {
+  let batch = cloneTokenBatch(tokens, collector);
+  tagPairedHtmlInline(batch);
+  fixFootnoteDefMaps(batch);
+  prepareListEvents(batch, collector);
+  batch = prepareRootEvents(batch, collector);
+  collector.file.work.pmEmissionTokenCount += countTokens(batch);
+  const tokenizer = Object.create(md);
+  let used = false;
+  tokenizer.parse = () => {
+    if (used) throw new UnsupportedSourceCapture();
+    used = true;
+    return batch;
+  };
+  const doc2 = new MorayaMarkdownParser(schema2, tokenizer).parse(collector.trace.text, { [captureKey]: collector });
+  if (!used) throw new UnsupportedSourceCapture();
+  return doc2;
+}
+function captureFailure(error) {
+  return { ok: false, reason: error instanceof UnsupportedSourceCapture || error instanceof UnsupportedOwnership ? "unsupported-source" : "parse-error" };
+}
+function captureFilePipeline(source, schema2, work = newFileWork()) {
+  if (!captureAvailable || !fileHooksValid()) return { ok: false, reason: "unsupported-source" };
+  try {
+    work.fullCaptureCalls++;
+    work.blockWindows = [...work.blockWindows, { sourceFrom: 0, sourceTo: source.length }];
+    work.preprocessedCodeUnits += source.length;
+    const collector = newFileCollector(source, preprocessFileSource(source), work);
+    const tokens = _origMdParse(collector.trace.text, { [captureKey]: collector });
+    const file = collector.file;
+    const cache = {
+      source,
+      trace: collector.trace,
+      lineStarts: collector.lineStarts,
+      blockTokens: file.blockTokens,
+      inlineTokens: cloneTokenBatch(tokens, collector),
+      checkpoints: file.checkpoints,
+      definitions: file.definitions,
+      effects: file.effects
+    };
+    const doc2 = emitCapturedTokens(cache.inlineTokens, collector, schema2);
+    return { ok: true, value: finalizeCapturedDocument(collector, doc2), cache };
   } catch (error) {
-    return { ok: false, reason: error instanceof UnsupportedSourceCapture || error instanceof UnsupportedOwnership ? "unsupported-source" : "parse-error" };
+    return captureFailure(error);
+  }
+}
+function blockScalars(state) {
+  return {
+    parentType: state.parentType,
+    tight: state.tight,
+    blkIndent: state.blkIndent,
+    level: state.level,
+    ddIndent: state.ddIndent,
+    listIndent: state.listIndent
+  };
+}
+function newCheckedBlockState(src, env, tokens, work) {
+  const state = new md.block.State(src, md, env, tokens);
+  work.lineTableCodeUnits += src.length;
+  for (const name of ["bMarks", "eMarks", "tShift", "sCount", "bsCount"]) {
+    const table2 = state[name];
+    if (!Array.isArray(table2) || table2.length !== state.lineMax + 1) throw new UnsupportedSourceCapture();
+    state[name] = new Proxy(table2, { get(target, key, receiver) {
+      if (typeof key === "string" && /^(0|[1-9][0-9]*)$/.test(key)) work.blockLinesVisited++;
+      return Reflect.get(target, key, receiver);
+    } });
+  }
+  if (state.src !== src || state.tokens !== tokens || state.env !== env || state.line !== 0 || state.parentType !== "root" || state.level !== 0 || state.ddIndent !== -1 || state.listIndent !== -1)
+    throw new UnsupportedSourceCapture();
+  return state;
+}
+function runTopLevelWindow(state, cursor, stopAfterEpilogue, work) {
+  work.topLevelRunnerCalls++;
+  const file = collectorFor(state).file, rules = md.block.ruler.getRules("");
+  const checkpoint = () => ({
+    line: cursor.line,
+    offset: state.bMarks[cursor.line],
+    tokenIndex: state.tokens.length,
+    definitionIndex: file.definitions.length,
+    hasEmptyLines: cursor.hasEmptyLines,
+    state: blockScalars(state)
+  });
+  file.checkpoints.push(checkpoint());
+  while (cursor.line < state.lineMax) {
+    state.line = cursor.line = state.skipEmptyLines(cursor.line);
+    if (cursor.line >= state.lineMax || state.sCount[cursor.line] < state.blkIndent) break;
+    const maxNesting = state.md.options.maxNesting;
+    if (typeof maxNesting !== "number") throw new UnsupportedSourceCapture();
+    if (state.level >= maxNesting) {
+      state.line = state.lineMax;
+      break;
+    }
+    const previous = state.line;
+    let accepted = false;
+    for (const rule of rules) {
+      if (rule(state, cursor.line, state.lineMax, false)) {
+        accepted = true;
+        break;
+      }
+    }
+    if (!accepted || state.line <= previous) throw new UnsupportedSourceCapture();
+    state.tight = !cursor.hasEmptyLines;
+    if (state.isEmpty(state.line - 1)) cursor.hasEmptyLines = true;
+    cursor.line = state.line;
+    if (cursor.line < state.lineMax && state.isEmpty(cursor.line)) {
+      cursor.hasEmptyLines = true;
+      state.line = ++cursor.line;
+    }
+    const next = checkpoint();
+    file.checkpoints.push(next);
+    if (stopAfterEpilogue(next)) return;
+  }
+}
+md.block.parse = function(src, engine, env, tokens) {
+  const file = env?.[captureKey]?.file;
+  if (!file) return Object.getPrototypeOf(md.block).parse.call(this, src, engine, env, tokens);
+  file.work.blockParseCalls++;
+  if (!src) return;
+  runTopLevelWindow(newCheckedBlockState(src, env, tokens, file.work), { line: 0, hasEmptyLines: false }, () => false, file.work);
+};
+var originalNestedTokenize = md.block.tokenize;
+md.block.tokenize = function(state, start, end) {
+  const file = collectorFor(state)?.file;
+  if (file) file.work.nestedTokenizeCalls++;
+  return originalNestedTokenize.call(this, state, start, end);
+};
+md.inline.parse = function(src, engine, env, tokens) {
+  const file = env?.[captureKey]?.file;
+  const outer = file && !file.activeEffects;
+  if (file) {
+    file.work.inlineParseCalls++;
+    file.work.inlineInputUnits += src.length;
+    if (outer) {
+      file.activeEffects = [];
+      file.effects.push(file.activeEffects);
+    }
+  }
+  try {
+    return Object.getPrototypeOf(md.inline).parse.call(this, src, engine, env, tokens);
+  } finally {
+    if (outer) delete file.activeEffects;
+  }
+};
+wrapCaptureRule(md.block.ruler, "footnote_def", function observeFootnoteDefinition(original, state, startLine, endLine, silent) {
+  const collector = collectorFor(state), before = state.tokens.length;
+  const scope = state.level === 0 && state.blkIndent === 0 ? "top-level" : "nested";
+  const result = original(state, startLine, endLine, silent);
+  if (!result || silent || !collector?.file) return result;
+  const token = state.tokens[before];
+  if (token?.type !== "footnote_reference_open" || typeof token.meta?.label !== "string") throw new UnsupportedSourceCapture();
+  const from = collector.lineStarts[startLine], to = collector.lineStarts[state.line];
+  if (from === void 0 || to === void 0) throw new UnsupportedSourceCapture();
+  const raw = rawRange(collector.trace, from, to);
+  if (!raw) throw new UnsupportedSourceCapture();
+  collector.file.definitions.push({ kind: "footnote", label: token.meta.label, sourceFrom: raw.from, sourceTo: raw.to, scope });
+  return result;
+}, true);
+wrapCaptureRule(md.inline.ruler, "footnote_ref", function observeFootnoteRuntime(original, state, silent) {
+  const result = original(state, silent), file = collectorFor(state)?.file;
+  if (result && !silent && file) {
+    const token = state.tokens[state.tokens.length - 1];
+    if (token?.type !== "footnote_ref" || typeof token.meta?.label !== "string" || !file.activeEffects) throw new UnsupportedSourceCapture();
+    file.activeEffects.push(token.meta.label);
+  }
+  return result;
+});
+for (const entry of md.block.ruler.__rules__) {
+  const original = entry.fn;
+  md.block.ruler.at(entry.name, (state, start, end, silent) => {
+    const file = collectorFor(state)?.file;
+    if (file) file.work.blockRuleCalls++;
+    return original(state, start, end, silent);
+  }, { alt: entry.alt.slice() });
+}
+var fileRuleSnapshot = [md.core.ruler, md.block.ruler, md.inline.ruler, md.inline.ruler2].map((ruler) => ruler.__rules__.map((r2) => ({ name: r2.name, fn: r2.fn, enabled: r2.enabled, alt: [...r2.alt] })));
+function fileHooksValid() {
+  return [md.core.ruler, md.block.ruler, md.inline.ruler, md.inline.ruler2].every((ruler, i) => {
+    const current = ruler.__rules__;
+    if (!Array.isArray(current)) return false;
+    const enabled = current.filter((r2) => r2.enabled), actual = ruler.getRules("");
+    if (enabled.length !== actual.length || enabled.some((r2, j) => r2.fn !== actual[j])) return false;
+    return current.length === fileRuleSnapshot[i].length && current.every((r2, j) => {
+      const previous = fileRuleSnapshot[i][j];
+      return r2.name === previous.name && r2.fn === previous.fn && r2.enabled === previous.enabled && sameTokenData(r2.alt, previous.alt);
+    });
+  }) && md.options.html === true && md.options.linkify === false && md.options.typographer === false && md.options.maxNesting === 100;
+}
+function sameTokenData(a, b) {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object" || Array.isArray(a) !== Array.isArray(b)) return false;
+  const left = a, right = b, keys = Object.keys(left);
+  return keys.length === Object.keys(right).length && keys.every((key) => Object.hasOwn(right, key) && sameTokenData(left[key], right[key]));
+}
+function definitionEnvironment(events) {
+  const env = {};
+  for (const event of [...events].sort((a, b) => a.sourceFrom - b.sourceFrom)) {
+    if (event.kind === "reference") {
+      env.references ??= {};
+      if (typeof env.references[event.label] === "undefined") env.references[event.label] = { href: event.href, title: event.title };
+    } else {
+      env.footnotes ??= { refs: {} };
+      env.footnotes.refs[":" + event.label] = -1;
+    }
+  }
+  return env;
+}
+function sameDefinitionEnvironment(a, b) {
+  const canonical = (events) => {
+    const env = definitionEnvironment(events);
+    return JSON.stringify({
+      references: Object.entries(env.references ?? {}).sort(([a2], [b2]) => a2.localeCompare(b2)),
+      footnotes: Object.keys(env.footnotes?.refs ?? {}).sort()
+    });
+  };
+  return canonical(a) === canonical(b);
+}
+function replayInlineEffects(labels, env, work) {
+  for (const label of labels) {
+    const refs = env.footnotes?.refs, key = ":" + label;
+    if (!refs || typeof refs[key] !== "number") throw new UnsupportedSourceCapture();
+    const list = env.footnotes.list ??= [];
+    if (refs[key] < 0) {
+      refs[key] = list.length;
+      list.push({ label, count: 0 });
+    }
+    const entry = list[refs[key]];
+    if (!entry || entry.label !== label) throw new UnsupportedSourceCapture();
+    entry.count++;
+    work.inlineEffectReplayCount++;
+  }
+}
+function captureFileWindow(cache, source, patches, schema2, work, selection) {
+  if (!fileHooksValid() || !captureAvailable) return { ok: false, reason: "unsupported-source" };
+  if (!patches.length || cache.trace.text !== cache.source || !cache.checkpoints.length) return null;
+  try {
+    work.preprocessedCodeUnits += source.length;
+    const trace = preprocessFileSource(source);
+    if (trace.text !== source || /[\r\0]/.test(source)) return null;
+    const collector = newFileCollector(source, trace, work), file = collector.file;
+    collector.lineStarts = lineStarts(source);
+    const { leftIndex, rightIndex } = selection, left = cache.checkpoints[leftIndex];
+    const oldRight = cache.checkpoints[rightIndex];
+    const admitted = (tokens2) => tokens2.every((t) => ["paragraph_open", "inline", "paragraph_close"].includes(t.type) && (!t.map || t.map[1] - t.map[0] <= 1));
+    if (!admitted(cache.blockTokens.slice(left.tokenIndex, oldRight.tokenIndex))) return null;
+    if (source.slice(0, left.offset) !== cache.source.slice(0, left.offset)) return null;
+    const delta = source.length - cache.source.length;
+    const tokens = cloneTokenBatch(cache.blockTokens.slice(0, left.tokenIndex), collector);
+    file.definitions = cache.definitions.filter((d) => d.sourceTo <= left.offset).map((d) => ({ ...d }));
+    const env = { ...definitionEnvironment(file.definitions), [captureKey]: collector };
+    const state = newCheckedBlockState(source, env, tokens, work);
+    Object.assign(state, left.state, { line: left.line });
+    let matched, matchedIndex = -1;
+    const checkpointByOffset = new Map(cache.checkpoints.map((checkpoint, index) => [checkpoint.offset, index]));
+    work.blockParseCalls++;
+    runTopLevelWindow(state, { line: left.line, hasEmptyLines: left.hasEmptyLines }, (checkpoint) => {
+      const oldIndex = checkpointByOffset.get(checkpoint.offset - delta) ?? -1;
+      if (oldIndex < rightIndex) return false;
+      const previous = cache.checkpoints[oldIndex - 1], old = cache.checkpoints[oldIndex];
+      if (JSON.stringify(old.state) !== JSON.stringify(checkpoint.state) || old.hasEmptyLines !== checkpoint.hasEmptyLines || source.slice(checkpoint.offset) !== cache.source.slice(old.offset)) return false;
+      const newPrevious = file.checkpoints[file.checkpoints.length - 2];
+      if (previous && newPrevious && old.offset < cache.source.length) {
+        const sentinelOld = cloneTokenBatch(cache.blockTokens.slice(previous.tokenIndex, old.tokenIndex), collector, delta, checkpoint.line - old.line);
+        const sentinelNew = tokens.slice(newPrevious.tokenIndex, checkpoint.tokenIndex);
+        if (!sameTokenData(sentinelOld, sentinelNew)) return false;
+        const oldDefinitions = cache.definitions.filter((d) => previous.offset <= d.sourceFrom && d.sourceFrom < old.offset).map((d) => ({ ...d, sourceFrom: d.sourceFrom + delta, sourceTo: d.sourceTo + delta }));
+        const newDefinitions = file.definitions.filter((d) => newPrevious.offset <= d.sourceFrom && d.sourceFrom < checkpoint.offset);
+        if (!sameTokenData(oldDefinitions, newDefinitions)) return false;
+      }
+      matched = checkpoint;
+      matchedIndex = oldIndex;
+      return true;
+    }, work);
+    work.blockWindows = [...work.blockWindows, { sourceFrom: left.offset, sourceTo: state.bMarks[state.line] }];
+    if (!matched || !admitted(tokens.slice(left.tokenIndex))) return null;
+    const right = cache.checkpoints[matchedIndex], lineDelta = matched.line - right.line;
+    const tokenDelta = tokens.length - right.tokenIndex;
+    const windowEnd = tokens.length;
+    for (const token of cloneTokenBatch(cache.blockTokens.slice(right.tokenIndex), collector, delta, lineDelta)) tokens.push(token);
+    for (const definition of cache.definitions) if (definition.sourceFrom >= right.offset)
+      file.definitions.push({ ...definition, sourceFrom: definition.sourceFrom + delta, sourceTo: definition.sourceTo + delta });
+    file.definitions.sort((a, b) => a.sourceFrom - b.sourceFrom);
+    collector.protectedSources = file.definitions.filter((d) => d.kind === "reference").map((d) => ({
+      kind: "reference-definition",
+      sourceFrom: d.sourceFrom,
+      sourceTo: d.sourceTo,
+      scope: d.scope
+    }));
+    const newCheckpoints = cache.checkpoints.slice(0, leftIndex).map((c2) => ({ ...c2 }));
+    for (const checkpoint of file.checkpoints) newCheckpoints.push(checkpoint);
+    const definitionDelta = file.definitions.length - cache.definitions.length;
+    for (const checkpoint of cache.checkpoints.slice(matchedIndex + 1)) newCheckpoints.push({
+      ...checkpoint,
+      offset: checkpoint.offset + delta,
+      line: checkpoint.line + lineDelta,
+      tokenIndex: checkpoint.tokenIndex + tokenDelta,
+      definitionIndex: checkpoint.definitionIndex + definitionDelta
+    });
+    file.checkpoints = newCheckpoints;
+    file.blockTokens = cloneTokenBatch(tokens, collector);
+    const semanticChanged = !sameDefinitionEnvironment(cache.definitions, file.definitions);
+    const oldEffects = /* @__PURE__ */ new Map();
+    let effectOrdinal = 0;
+    for (let i = 0; i < cache.blockTokens.length; i++) if (cache.blockTokens[i].type === "inline")
+      oldEffects.set(i, cache.effects[effectOrdinal++]);
+    const oldWindowEffects = [];
+    for (const [index, effects] of oldEffects) if (index >= left.tokenIndex && index < right.tokenIndex)
+      for (const label of effects) oldWindowEffects.push(label);
+    let parsedIndices = [];
+    const parseInlineSlots = (all) => {
+      const batch = cloneTokenBatch(file.blockTokens, collector), passEnv = { ...definitionEnvironment(file.definitions), [captureKey]: collector };
+      const windowEffects = [];
+      file.effects = [];
+      for (let i = 0; i < batch.length; i++) {
+        const token = batch[i];
+        if (token.type !== "inline") continue;
+        const oldIndex = i < left.tokenIndex ? i : i >= windowEnd ? i - tokenDelta : void 0;
+        if (!all && oldIndex !== void 0) {
+          const effects = oldEffects.get(oldIndex);
+          if (!effects || !cache.inlineTokens[oldIndex] || cache.inlineTokens[oldIndex].type !== "inline") throw new UnsupportedSourceCapture();
+          batch[i] = cloneTokenBatch([cache.inlineTokens[oldIndex]], collector, i >= windowEnd ? delta : 0, i >= windowEnd ? lineDelta : 0)[0];
+          replayInlineEffects(effects, passEnv, work);
+          file.effects.push([...effects]);
+        } else {
+          if (!token.children) throw new UnsupportedSourceCapture();
+          md.inline.parse(token.content, md, passEnv, token.children);
+          parsedIndices.push(i);
+          if (i >= left.tokenIndex && i < windowEnd) for (const label of file.effects[file.effects.length - 1]) windowEffects.push(label);
+        }
+      }
+      return { tokens: batch, env: passEnv, windowEffects };
+    };
+    let pass = parseInlineSlots(semanticChanged);
+    if (!semanticChanged && JSON.stringify(pass.windowEffects) !== JSON.stringify(oldWindowEffects)) pass = parseInlineSlots(true);
+    const coreState = new md.core.State(source, md, pass.env);
+    coreState.tokens = pass.tokens;
+    const coreRules = md.core.ruler.getRules("");
+    for (const rule of coreRules.slice(3)) rule(coreState);
+    const nextCache = {
+      source,
+      trace,
+      lineStarts: collector.lineStarts,
+      blockTokens: file.blockTokens,
+      inlineTokens: cloneTokenBatch(coreState.tokens, collector),
+      checkpoints: file.checkpoints,
+      definitions: file.definitions,
+      effects: file.effects
+    };
+    const doc2 = emitCapturedTokens(nextCache.inlineTokens, collector, schema2);
+    const value = finalizeCapturedDocument(collector, doc2);
+    const dirty = /* @__PURE__ */ new Set();
+    let rootIndex = 0;
+    for (const index of [...new Set(parsedIndices)].sort((a, b) => a - b)) {
+      const map = coreState.tokens[index]?.map;
+      if (!map) continue;
+      const from = collector.lineStarts[map[0]], to = collector.lineStarts[map[1]];
+      while (rootIndex < value.roots.length && value.roots[rootIndex].sourceTo <= from) rootIndex++;
+      for (let at = rootIndex; at < value.roots.length && value.roots[at].sourceFrom < to; at++) dirty.add(value.roots[at].id);
+    }
+    work.inlineRoots = [...dirty].sort((a, b) => a - b);
+    if (work.mode !== "full-fallback") work.mode = matchedIndex === rightIndex ? "local" : "expanded";
+    return { ok: true, value, cache: nextCache };
+  } catch (error) {
+    return captureFailure(error);
   }
 }
 
@@ -6865,6 +7334,281 @@ async function createEditor(opts) {
   };
 }
 
+// src/source-file-cache.ts
+function emptyFileParseWork() {
+  return {
+    mode: "unchanged",
+    blockWindows: [],
+    blockParseCalls: 0,
+    topLevelRunnerCalls: 0,
+    blockRuleCalls: 0,
+    nestedTokenizeCalls: 0,
+    blockLinesVisited: 0,
+    inlineParseCalls: 0,
+    inlineInputUnits: 0,
+    inlineRoots: [],
+    rawTouchedBeforeRoots: [],
+    environmentChanged: false,
+    legacyParseCalls: 0,
+    fullCaptureCalls: 0,
+    pmEmissionTokenCount: 0,
+    preprocessedCodeUnits: 0,
+    lineTableCodeUnits: 0,
+    rawSplicedCodeUnits: 0,
+    inlineEffectReplayCount: 0
+  };
+}
+var fileCaches = /* @__PURE__ */ new WeakMap();
+function makeSession(source, value, revision) {
+  return Object.freeze({
+    revision,
+    source,
+    doc: value.doc,
+    textSpans: value.textRuns,
+    roots: value.roots,
+    gaps: value.gaps,
+    protectedSources: value.protectedSources,
+    layout: value.layout
+  });
+}
+function registerSession(source, value, revision, tokens, environmentVersion) {
+  const session = makeSession(source, value, revision);
+  fileCaches.set(session, { canonical: session, tokens, environmentVersion });
+  return session;
+}
+function createFileSourceSession(source, schema2) {
+  const parsed = captureFilePipeline(source, schema2);
+  if (!parsed.ok) return parsed;
+  return { ok: true, session: registerSession(source, parsed.value, 0, parsed.cache, 0) };
+}
+function sameMetadata(a, b) {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object" || Array.isArray(a) !== Array.isArray(b)) return false;
+  const left = a, right = b, keys = Object.keys(left);
+  return keys.length === Object.keys(right).length && keys.every((k) => Object.hasOwn(right, k) && sameMetadata(left[k], right[k]));
+}
+function prepareVerifiedFileBase(callerBase, work) {
+  const hit = fileCaches.get(callerBase);
+  if (hit) return { callerBase, verifiedBase: hit.canonical, cache: hit, recovery: false };
+  work.mode = "full-fallback";
+  work.fallbackReason = "cache-miss";
+  const parsed = captureFilePipeline(callerBase.source, callerBase.doc.type.schema, work);
+  if (!parsed.ok) return parsed;
+  const actual = makeSession(callerBase.source, parsed.value, callerBase.revision);
+  if (actual.doc.type.schema !== callerBase.doc.type.schema || !actual.doc.eq(callerBase.doc) || !sameMetadata(actual.roots, callerBase.roots) || !sameMetadata(actual.gaps, callerBase.gaps) || !sameMetadata(actual.protectedSources, callerBase.protectedSources) || !sameMetadata(actual.textSpans, callerBase.textSpans) || !sameMetadata(actual.layout.blankLines, callerBase.layout.blankLines) || !sameMetadata(actual.layout.fallback, callerBase.layout.fallback) || callerBase.layout.lists !== void 0 && !sameMetadata(actual.layout.lists, callerBase.layout.lists))
+    return { ok: false, reason: "unsupported-source" };
+  return {
+    callerBase,
+    verifiedBase: actual,
+    cache: { canonical: actual, tokens: parsed.cache, environmentVersion: 0 },
+    recovery: true
+  };
+}
+function commitRecovery(base) {
+  if (base.recovery) fileCaches.set(base.callerBase, base.cache);
+}
+function finishUnchangedFile(base, work) {
+  commitRecovery(base);
+  return { ok: true, session: base.callerBase, file: {
+    environmentVersion: base.cache.environmentVersion,
+    correspondence: base.verifiedBase.roots.map((r2) => ({ beforeRoots: [r2.id], afterRoots: [r2.id], kind: "untouched" })),
+    work
+  } };
+}
+function splitsBoundary(source, offset) {
+  if (offset <= 0 || offset >= source.length) return false;
+  return source[offset - 1] === "\r" && source[offset] === "\n" || /[\uD800-\uDBFF]/.test(source[offset - 1]) && /[\uDC00-\uDFFF]/.test(source[offset]);
+}
+function validateSourcePatches(base, input) {
+  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision !== base.revision) return { ok: false, reason: "stale-document" };
+  let end = 0, previous;
+  const patches = [];
+  for (const patch of input.edits) {
+    if (!Number.isSafeInteger(patch.from) || !Number.isSafeInteger(patch.to) || typeof patch.removed !== "string" || typeof patch.text !== "string" || patch.from < end || patch.to < patch.from || patch.to > base.source.length || previous && previous.from === patch.from || splitsBoundary(base.source, patch.from) || splitsBoundary(base.source, patch.to) || base.source.slice(patch.from, patch.to) !== patch.removed) return { ok: false, reason: "unmapped-range" };
+    previous = patch;
+    end = patch.to;
+    if (patch.text !== patch.removed) patches.push({ ...patch });
+  }
+  return patches;
+}
+function spliceSource(base, patches, work) {
+  const chunks = [], pieces = [];
+  let before = 0, after = 0;
+  const keep = (to) => {
+    if (to > before) {
+      const text2 = base.source.slice(before, to);
+      chunks.push(text2);
+      pieces.push({ beforeFrom: before, beforeTo: to, afterFrom: after, afterTo: after + text2.length, generated: false });
+      after += text2.length;
+    }
+  };
+  for (const patch of patches) {
+    keep(patch.from);
+    chunks.push(patch.text);
+    pieces.push({
+      beforeFrom: patch.from,
+      beforeTo: patch.to,
+      afterFrom: after,
+      afterTo: after + patch.text.length,
+      generated: true
+    });
+    before = patch.to;
+    after += patch.text.length;
+  }
+  keep(base.source.length);
+  const source = chunks.join("");
+  work.rawSplicedCodeUnits += source.length;
+  return { source, pieces };
+}
+function foldDefinitionEvents(events) {
+  const references = {};
+  const footnotes = /* @__PURE__ */ new Set();
+  for (const event of [...events].sort((a, b) => a.sourceFrom - b.sourceFrom)) {
+    if (event.kind === "reference") {
+      if (typeof references[event.label] === "undefined") references[event.label] = { href: event.href, title: event.title };
+    } else footnotes.add(event.label);
+  }
+  return { references, footnotes: [...footnotes].sort() };
+}
+function rawTouchedRoots(base, patches) {
+  const ids = /* @__PURE__ */ new Set();
+  for (const patch of patches) {
+    let low = 0, high = base.roots.length;
+    while (low < high) {
+      const mid = low + high >>> 1;
+      if (base.roots[mid].sourceTo <= patch.from) low = mid + 1;
+      else high = mid;
+    }
+    for (let at = low; at < base.roots.length; at++) {
+      const root = base.roots[at];
+      if (patch.from === patch.to) {
+        if (root.sourceFrom < patch.from && patch.from < root.sourceTo) ids.add(root.id);
+        break;
+      }
+      if (root.sourceFrom >= patch.to) break;
+      ids.add(root.id);
+    }
+  }
+  return [...ids].sort((a, b) => a - b);
+}
+function deriveRootCorrespondence(base, next, pieces, touchedRoots) {
+  const total = base.roots.length + next.roots.length, parent = Array.from({ length: total }, (_, i) => i);
+  const find = (n) => {
+    while (parent[n] !== n) {
+      parent[n] = parent[parent[n]];
+      n = parent[n];
+    }
+    return n;
+  };
+  const join = (a, b) => {
+    parent[find(a)] = find(b);
+  };
+  const touchedSet = new Set(touchedRoots);
+  const firstRoot = (roots, from) => {
+    let low = 0, high = roots.length;
+    while (low < high) {
+      const mid = low + high >>> 1;
+      if (roots[mid].sourceTo <= from) low = mid + 1;
+      else high = mid;
+    }
+    return low;
+  };
+  for (const piece of pieces) {
+    let oldIndex = firstRoot(base.roots, piece.beforeFrom), nextIndex = firstRoot(next.roots, piece.afterFrom);
+    if (piece.generated) {
+      const before = [], after = [];
+      for (; oldIndex < base.roots.length; oldIndex++) {
+        const root = base.roots[oldIndex];
+        if (piece.beforeFrom === piece.beforeTo) {
+          if (root.sourceFrom < piece.beforeFrom && piece.beforeFrom < root.sourceTo) before.push(root.id);
+          break;
+        }
+        if (root.sourceFrom >= piece.beforeTo) break;
+        before.push(root.id);
+      }
+      for (; nextIndex < next.roots.length && next.roots[nextIndex].sourceFrom < piece.afterTo; nextIndex++)
+        if (piece.afterFrom < piece.afterTo) after.push(nextIndex);
+      if (before.length && after.length) {
+        const representative2 = before[0];
+        for (const id of before) join(representative2, id);
+        for (const id of after) join(representative2, base.roots.length + id);
+      }
+      continue;
+    }
+    for (; oldIndex < base.roots.length && base.roots[oldIndex].sourceFrom < piece.beforeTo; oldIndex++) {
+      const old = base.roots[oldIndex];
+      const from = Math.max(old.sourceFrom, piece.beforeFrom) - piece.beforeFrom + piece.afterFrom;
+      const to = Math.min(old.sourceTo, piece.beforeTo) - piece.beforeFrom + piece.afterFrom;
+      while (nextIndex < next.roots.length && next.roots[nextIndex].sourceTo <= from) nextIndex++;
+      for (let index = nextIndex; index < next.roots.length && next.roots[index].sourceFrom < to; index++)
+        join(old.id, base.roots.length + index);
+    }
+  }
+  const groups = /* @__PURE__ */ new Map();
+  for (let i = 0; i < total; i++) {
+    const key = find(i), group = groups.get(key) ?? { beforeRoots: [], afterRoots: [] };
+    if (i < base.roots.length) group.beforeRoots.push(i);
+    else group.afterRoots.push(i - base.roots.length);
+    groups.set(key, group);
+  }
+  return [...groups.values()].map((group) => {
+    const a = group.beforeRoots.length, b = group.afterRoots.length;
+    let kind = !a ? "birth" : !b ? "deleted" : a === 1 && b === 1 ? "retained" : a === 1 ? "split" : b === 1 ? "join" : "repartition";
+    if (kind === "retained") {
+      const old = base.roots[group.beforeRoots[0]], root = next.roots[group.afterRoots[0]];
+      const touched = touchedSet.has(old.id);
+      if (!touched && old.tokenType === root.tokenType && old.tailFrom - old.sourceFrom === root.tailFrom - root.sourceFrom && base.source.slice(old.sourceFrom, old.sourceTo) === next.source.slice(root.sourceFrom, root.sourceTo)) kind = "untouched";
+    }
+    return { ...group, kind };
+  });
+}
+function selectBlockWindow(cache, patches) {
+  const first = patches[0], last = patches[patches.length - 1];
+  let containing = 0;
+  while (containing + 1 < cache.checkpoints.length && cache.checkpoints[containing + 1].offset <= first.from) containing++;
+  const leftIndex = Math.max(0, containing - 1);
+  let rightIndex = containing + 1;
+  while (rightIndex < cache.checkpoints.length && cache.checkpoints[rightIndex].offset < last.to) rightIndex++;
+  rightIndex = Math.min(cache.checkpoints.length - 1, rightIndex + 1);
+  return { leftIndex, rightIndex };
+}
+function prepareCandidate(base, patches, work, expectedDoc) {
+  if (!patches.length) {
+    if (expectedDoc && !expectedDoc.eq(base.verifiedBase.doc)) return { ok: false, reason: "semantic-mismatch", work };
+    return { ...finishUnchangedFile(base, work), edits: [] };
+  }
+  const { source, pieces } = spliceSource(base.verifiedBase, patches, work);
+  if (source === base.verifiedBase.source) {
+    if (expectedDoc && !expectedDoc.eq(base.verifiedBase.doc)) return { ok: false, reason: "semantic-mismatch", work };
+    return { ...finishUnchangedFile(base, work), edits: [] };
+  }
+  let parsed = captureFileWindow(base.cache.tokens, source, patches, base.verifiedBase.doc.type.schema, work, selectBlockWindow(base.cache.tokens, patches));
+  if (!parsed) {
+    work.mode = "full-fallback";
+    work.fallbackReason ??= "checkpoint-unproven";
+    parsed = captureFilePipeline(source, base.verifiedBase.doc.type.schema, work);
+  }
+  if (!parsed.ok) return { ...parsed, work };
+  if (expectedDoc && !parsed.value.doc.eq(expectedDoc)) return { ok: false, reason: "semantic-mismatch", work };
+  work.environmentChanged = !sameMetadata(foldDefinitionEvents(base.cache.tokens.definitions), foldDefinitionEvents(parsed.cache.definitions));
+  const environmentVersion = base.cache.environmentVersion + Number(work.environmentChanged);
+  const next = makeSession(source, parsed.value, base.verifiedBase.revision + 1);
+  work.rawTouchedBeforeRoots = rawTouchedRoots(base.verifiedBase, patches);
+  if (work.mode === "full-fallback") work.inlineRoots = next.roots.map((r2) => r2.id);
+  const correspondence = deriveRootCorrespondence(base.verifiedBase, next, pieces, work.rawTouchedBeforeRoots);
+  const session = registerSession(source, parsed.value, next.revision, parsed.cache, environmentVersion);
+  commitRecovery(base);
+  return { ok: true, session, edits: patches, file: { environmentVersion, correspondence, work } };
+}
+function prepareRawFileSourceEdits(base, input) {
+  const work = emptyFileParseWork();
+  const patches = validateSourcePatches(base, input);
+  if ("ok" in patches) return { ...patches, work };
+  const verified = prepareVerifiedFileBase(base, work);
+  if ("ok" in verified) return { ...verified, work };
+  return prepareCandidate(verified, patches, work);
+}
+
 // src/source-fidelity.ts
 import { Fragment as Fragment3 } from "prosemirror-model";
 import { EditorState as EditorState2 } from "prosemirror-state";
@@ -7426,19 +8170,11 @@ function applyStructuralTransaction(base, tr, render, rootHasClosedFences) {
 }
 
 // src/source-fidelity.ts
+function prepareFileSourceEdits(base, input) {
+  return prepareRawFileSourceEdits(base, input);
+}
 function createSourceSession(source, schema2) {
-  const parsed = parseDocumentWithSourceCapture(source, schema2);
-  if (!parsed.ok) return parsed;
-  return { ok: true, session: {
-    revision: 0,
-    source,
-    doc: parsed.value.doc,
-    textSpans: parsed.value.textRuns,
-    roots: parsed.value.roots,
-    gaps: parsed.value.gaps,
-    protectedSources: parsed.value.protectedSources,
-    layout: parsed.value.layout
-  } };
+  return createFileSourceSession(source, schema2);
 }
 function splitsSurrogate(text2, offset) {
   return offset > 0 && offset < text2.length && /[\uD800-\uDBFF]/.test(text2[offset - 1]) && /[\uDC00-\uDFFF]/.test(text2[offset]);
@@ -7470,12 +8206,16 @@ function overlapsProtectedSource(base, from, to) {
   const range = ranges[low];
   return !!range && (from === to ? range.sourceFrom < from : range.sourceFrom < to);
 }
-function applySourceTextTransactionWithEdit(base, tr) {
+function applySourceTextTransactionWithEdit(base, tr, context) {
   if (!tr.before.eq(base.doc)) return { ok: false, reason: "stale-document" };
   if (tr.steps.length !== 1) return { ok: false, reason: "unsupported-step" };
   if (tr.storedMarksSet) return { ok: false, reason: "unsupported-step" };
   const step = tr.steps[0].toJSON();
   if (step.stepType !== "replace" || step.structure) return { ok: false, reason: "unsupported-step" };
+  const work = context?.work ?? emptyFileParseWork();
+  const verified = context?.verified ?? prepareVerifiedFileBase(base, work);
+  if ("ok" in verified) return verified;
+  base = verified.verifiedBase;
   const { from, to } = step;
   const $from = base.doc.resolve(from), $to = base.doc.resolve(to);
   if ($from.depth !== 1 || !$from.sameParent($to) || $from.parent.type.name !== "paragraph" || to < from || step.slice?.openStart || step.slice?.openEnd || step.slice?.content?.some((node) => node.type !== "text")) {
@@ -7499,38 +8239,27 @@ function applySourceTextTransactionWithEdit(base, tr) {
   }
   if (overlapsProtectedSource(base, sourceFrom, sourceTo)) return { ok: false, reason: "unsupported-step" };
   const insert = (step.slice?.content ?? []).map((node) => node.text).join("");
-  const candidate = base.source.slice(0, sourceFrom) + insert + base.source.slice(sourceTo);
-  const result = createSourceSession(candidate, base.doc.type.schema);
-  if (!result.ok || !result.session.doc.eq(tr.doc)) return { ok: false, reason: "semantic-mismatch" };
+  context?.verifyEdit?.({ from: sourceFrom, to: sourceTo, text: insert });
+  const result = prepareCandidate(verified, [{
+    from: sourceFrom,
+    to: sourceTo,
+    removed: base.source.slice(sourceFrom, sourceTo),
+    text: insert
+  }], work, tr.doc);
+  if (!result.ok) return { ok: false, reason: result.reason };
   return {
     ok: true,
-    session: { ...result.session, revision: base.revision + 1 },
+    session: result.session,
+    file: result.file,
     edit: { from: sourceFrom, to: sourceTo, text: insert }
   };
 }
 function applySourceTextTransaction(base, tr) {
   const result = applySourceTextTransactionWithEdit(base, tr);
-  return result.ok ? { ok: true, session: result.session } : result;
+  return result.ok ? { ok: true, session: result.session, file: result.file } : result;
 }
 var UnsupportedBlockTransaction = class extends Error {
 };
-function sameSourceMetadata(a, b) {
-  if (a === b) return true;
-  if (!a || !b || typeof a !== "object" || typeof b !== "object" || Array.isArray(a) !== Array.isArray(b)) return false;
-  const left = a, right = b, keys = Object.keys(left);
-  return keys.length === Object.keys(right).length && keys.every((k) => Object.hasOwn(right, k) && sameSourceMetadata(left[k], right[k]));
-}
-function prepareListAuthority(base) {
-  const bound = capturedSourceLists(base.source, base.doc, base.roots, base.layout);
-  if (bound) return { base, facts: bound };
-  const capture = createSourceSession(base.source, base.doc.type.schema);
-  if (!capture.ok) throw new UnsupportedBlockTransaction();
-  const actual = capture.session;
-  if (actual.doc.type.schema !== base.doc.type.schema || !actual.doc.eq(base.doc) || !sameSourceMetadata(actual.roots, base.roots) || !sameSourceMetadata(actual.gaps, base.gaps) || !sameSourceMetadata(actual.protectedSources, base.protectedSources) || !sameSourceMetadata(actual.textSpans, base.textSpans) || !sameSourceMetadata(actual.layout.blankLines, base.layout.blankLines) || !sameSourceMetadata(actual.layout.fallback, base.layout.fallback) || base.layout.lists !== void 0 && !sameSourceMetadata(actual.layout.lists, base.layout.lists)) throw new UnsupportedBlockTransaction();
-  const facts = capturedSourceLists(actual.source, actual.doc, actual.roots, actual.layout);
-  if (!facts) throw new UnsupportedBlockTransaction();
-  return { base: { ...actual, revision: base.revision }, facts };
-}
 var isList = (node) => node.type.name === "bullet_list" || node.type.name === "ordered_list";
 function transactionListStyles(tr, facts, targets) {
   const ranges = [];
@@ -7738,10 +8467,13 @@ function applySourceEdits(base, edits, ids, ownership) {
 }
 function applySourceBlockTransaction(base, tr) {
   if (!tr.before.eq(base.doc)) return { ok: false, reason: "stale-document" };
-  const caller = base;
   try {
-    const authority = prepareListAuthority(base);
-    base = authority.base;
+    const work = emptyFileParseWork(), verified = prepareVerifiedFileBase(base, work);
+    if ("ok" in verified) throw new UnsupportedBlockTransaction();
+    base = verified.verifiedBase;
+    const facts = capturedSourceLists(base.source, base.doc, base.roots, base.layout);
+    if (!facts) throw new UnsupportedBlockTransaction();
+    const authority = { facts };
     const classification = classifyTransaction(base, tr);
     for (let i = 0; i < tr.steps.length; i++) {
       const before = tr.docs[i], after = tr.docs[i + 1] ?? tr.doc;
@@ -7762,32 +8494,26 @@ function applySourceBlockTransaction(base, tr) {
         };
       };
       const result = applyStructuralTransaction(base, tr, render, sourceRootHasClosedFences);
-      if (result.unchanged) return { ok: true, session: caller, mode: "unchanged", edits: [], changedRoots: [] };
-      const parsed2 = createSourceSession(result.source, base.doc.type.schema);
-      if (!parsed2.ok || !parsed2.session.doc.eq(tr.doc)) return { ok: false, reason: "semantic-mismatch" };
-      return {
-        ok: true,
-        session: { ...parsed2.session, revision: base.revision + 1 },
-        mode: "root-render",
-        edits: result.edits,
-        changedRoots: result.changedRoots
-      };
+      if (result.unchanged) return { ...finishUnchangedFile(verified, work), mode: "unchanged", edits: [], changedRoots: [] };
+      const parsed2 = prepareCandidate(verified, result.edits.map((edit) => ({ ...edit, removed: base.source.slice(edit.from, edit.to) })), work, tr.doc);
+      if (!parsed2.ok) return { ok: false, reason: parsed2.reason };
+      return { ok: true, session: parsed2.session, file: parsed2.file, mode: "root-render", edits: result.edits, changedRoots: result.changedRoots };
     }
     const ownership = indexSourceRoots(base);
     const changedRoots = changedNaturalRoots(base, tr, ownership);
     if (!changedRoots.length) {
       if (!tr.doc.eq(base.doc)) return { ok: false, reason: "unsupported-step" };
-      return { ok: true, session: caller, mode: "unchanged", edits: [], changedRoots: [] };
+      return { ...finishUnchangedFile(verified, work), mode: "unchanged", edits: [], changedRoots: [] };
     }
     if (tr.steps.length === 1 && tr.steps[0] instanceof ReplaceStep2) {
       const replay = EditorState2.create({ doc: base.doc }).tr.step(tr.steps[0]);
       if (!replay.doc.eq(tr.doc)) return { ok: false, reason: "unsupported-step" };
-      const exact = applySourceTextTransactionWithEdit(base, replay);
+      const exact = applySourceTextTransactionWithEdit(base, replay, { verified, work, verifyEdit: (edit) => {
+        applySourceEdits(base, [edit], changedRoots, ownership);
+      } });
       if (exact.ok) {
         const edits2 = [exact.edit];
-        if (applySourceEdits(base, edits2, changedRoots, ownership) !== exact.session.source)
-          return { ok: false, reason: "semantic-mismatch" };
-        return { ok: true, session: exact.session, mode: "exact-text", edits: edits2, changedRoots };
+        return { ok: true, session: exact.session, file: exact.file, mode: "exact-text", edits: edits2, changedRoots };
       }
     }
     const targets = [];
@@ -7802,16 +8528,10 @@ function applySourceBlockTransaction(base, tr) {
       const root = ownership.rootById[id];
       return { from: root.sourceFrom, to: root.sourceTo, text: renderChangedRoot(base, tr.doc, root, styles) };
     });
-    const source = applySourceEdits(base, edits, changedRoots, ownership);
-    const parsed = createSourceSession(source, base.doc.type.schema);
-    if (!parsed.ok || !parsed.session.doc.eq(tr.doc)) return { ok: false, reason: "semantic-mismatch" };
-    return {
-      ok: true,
-      session: { ...parsed.session, revision: base.revision + 1 },
-      mode: "root-render",
-      edits,
-      changedRoots
-    };
+    applySourceEdits(base, edits, changedRoots, ownership);
+    const parsed = prepareCandidate(verified, edits.map((edit) => ({ ...edit, removed: base.source.slice(edit.from, edit.to) })), work, tr.doc);
+    if (!parsed.ok) return { ok: false, reason: parsed.reason };
+    return { ok: true, session: parsed.session, file: parsed.file, mode: "root-render", edits, changedRoots };
   } catch (error) {
     if (error instanceof UnsupportedBlockTransaction || error instanceof UnsupportedSourceStructure) return { ok: false, reason: "unsupported-step" };
     return { ok: false, reason: "parse-error" };
@@ -7835,6 +8555,7 @@ export {
   parseMarkdown,
   parseMarkdownAsync,
   preloadEnhancementPlugins,
+  prepareFileSourceEdits,
   projectLineEndings,
   serializeMarkdown,
   setDocumentBaseDir,

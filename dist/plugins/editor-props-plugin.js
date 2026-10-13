@@ -1793,13 +1793,14 @@ var pendingSources = /* @__PURE__ */ new WeakMap();
 var capturedFenceClosed = /* @__PURE__ */ new WeakMap();
 var capturedRootFencesClosed = /* @__PURE__ */ new WeakMap();
 var captureAvailable = true;
-function wrapCaptureRule(ruler, name, wrapper) {
+function wrapCaptureRule(ruler, name, wrapper, preserveAlternates = false) {
   const original = ruler.__rules__?.find((rule) => rule.name === name)?.fn;
   if (typeof original !== "function") {
     captureAvailable = false;
     return;
   }
-  ruler.at(name, (...args) => wrapper(original, ...args));
+  const alt = preserveAlternates ? ruler.__rules__.find((rule) => rule.name === name).alt.slice() : [];
+  ruler.at(name, (...args) => wrapper(original, ...args), { alt });
 }
 var collectorFor = (state) => state.env?.[captureKey];
 wrapCaptureRule(md.block.ruler, "fence", (original, state, startLine, endLine, silent) => {
@@ -1873,23 +1874,42 @@ wrapCaptureRule(md.core.ruler, "normalize", (original, state) => {
   collector.lineStarts = lineStarts(collector.trace.text);
   return result;
 });
-wrapCaptureRule(md.block.ruler, "reference", (original, state, startLine, endLine, silent) => {
+wrapCaptureRule(md.block.ruler, "reference", function observeReferenceCandidate(original, state, startLine, endLine, silent) {
   const collector = collectorFor(state);
+  if (!collector || silent) return original(state, startLine, endLine, silent);
   const scope = state.level === 0 && state.blkIndent === 0 ? "top-level" : "nested";
-  const result = original(state, startLine, endLine, silent);
-  if (!collector || !result || silent) return result;
+  const had = Object.hasOwn(state.env, "references"), saved = state.env.references;
+  const candidates = {};
+  state.env.references = candidates;
+  let result;
+  try {
+    result = original(state, startLine, endLine, silent);
+  } finally {
+    if (had) state.env.references = saved;
+    else delete state.env.references;
+  }
+  if (!result) return result;
+  const entries = Object.entries(candidates);
+  if (entries.length !== 1) throw new UnsupportedSourceCapture();
+  const [label, value] = entries[0];
+  if (typeof state.env.references === "undefined") state.env.references = {};
+  if (typeof state.env.references[label] === "undefined") state.env.references[label] = value;
   const from = collector.lineStarts[startLine], to = collector.lineStarts[state.line];
   if (from === void 0 || to === void 0 || to <= from) throw new UnsupportedSourceCapture();
   const raw = rawRange(collector.trace, from, to);
   if (raw) {
     const previous = collector.protectedSources[collector.protectedSources.length - 1];
     if (previous && previous.sourceTo > raw.from) throw new UnsupportedSourceCapture();
-    collector.protectedSources.push(Object.freeze({
-      kind: "reference-definition",
+    collector.protectedSources.push(Object.freeze({ kind: "reference-definition", sourceFrom: raw.from, sourceTo: raw.to, scope }));
+    collector.file?.definitions.push({
+      kind: "reference",
+      label,
+      href: value.href,
+      title: value.title,
       sourceFrom: raw.from,
       sourceTo: raw.to,
       scope
-    }));
+    });
   }
   return result;
 });
@@ -1944,6 +1964,8 @@ wrapCaptureRule(md.block.ruler, "paragraph", (original, state, ...args) => {
 });
 wrapCaptureRule(md.core.ruler, "inline", (original, state) => {
   if (!collectorFor(state)) return original(state);
+  const collector = collectorFor(state);
+  if (collector.file) collector.file.blockTokens = cloneTokenBatch(state.tokens, collector);
   const mapped = state.tokens.filter((token) => tokenArrays.has(token));
   const check = () => {
     for (const token of mapped) {
@@ -2581,8 +2603,8 @@ var MorayaMarkdownParser = class extends MarkdownParser {
    * caller-provided schema rather than the module-level defaultSchema.
    */
   schema;
-  constructor(schemaArg = defaultSchema) {
-    super(schemaArg, md, parserTokens);
+  constructor(schemaArg = defaultSchema, tokenizer = md) {
+    super(schemaArg, tokenizer, parserTokens);
     this.schema = schemaArg;
     const h = (
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3208,6 +3230,175 @@ function parseMarkdown(markdown, schemaArg) {
 }
 var UnsupportedSourceCapture = class extends Error {
 };
+function cloneTokenValue(value) {
+  if (value === null || typeof value !== "object") {
+    if (typeof value === "function" || typeof value === "symbol") throw new UnsupportedSourceCapture();
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(cloneTokenValue);
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) throw new UnsupportedSourceCapture();
+  const copy = Object.create(proto);
+  for (const [key, item] of Object.entries(value)) copy[key] = cloneTokenValue(item);
+  return copy;
+}
+function shiftTrace(trace, delta) {
+  return delta === 0 ? trace : { text: trace.text, pieces: trace.pieces.map((p) => ({
+    ...p,
+    sourceFrom: p.sourceFrom + delta,
+    sourceTo: p.sourceTo + delta
+  })) };
+}
+function cloneTokenBatch(tokens, collector, rawDelta = 0, lineDelta = 0) {
+  const clone = (token) => {
+    const copy = Object.create(Object.getPrototypeOf(token));
+    for (const [key, value] of Object.entries(token)) {
+      if (key !== "children") Object.defineProperty(copy, key, { value: cloneTokenValue(value), writable: true, enumerable: true, configurable: true });
+    }
+    copy.children = token.children ? token.children.map(clone) : null;
+    if (copy.map) copy.map = [copy.map[0] + lineDelta, copy.map[1] + lineDelta];
+    if (token.children && copy.children) {
+      const owner = owners.get(token.children);
+      if (owner) owners.set(copy.children, shiftTrace(owner, rawDelta));
+      if (tokenArrays.has(token)) tokenArrays.set(copy, copy.children);
+    }
+    const provenance = tokenSources.get(token);
+    if (provenance) tokenSources.set(copy, { collector, runs: provenance.runs.map((run) => run.trace ? { text: run.text, kind: run.kind, trace: shiftTrace(run.trace, rawDelta) } : { text: run.text }) });
+    const closed = capturedFenceClosed.get(token);
+    if (closed !== void 0) capturedFenceClosed.set(copy, closed);
+    return copy;
+  };
+  return tokens.map(clone);
+}
+function blockScalars(state) {
+  return {
+    parentType: state.parentType,
+    tight: state.tight,
+    blkIndent: state.blkIndent,
+    level: state.level,
+    ddIndent: state.ddIndent,
+    listIndent: state.listIndent
+  };
+}
+function newCheckedBlockState(src, env, tokens, work) {
+  const state = new md.block.State(src, md, env, tokens);
+  work.lineTableCodeUnits += src.length;
+  for (const name of ["bMarks", "eMarks", "tShift", "sCount", "bsCount"]) {
+    const table2 = state[name];
+    if (!Array.isArray(table2) || table2.length !== state.lineMax + 1) throw new UnsupportedSourceCapture();
+    state[name] = new Proxy(table2, { get(target, key, receiver) {
+      if (typeof key === "string" && /^(0|[1-9][0-9]*)$/.test(key)) work.blockLinesVisited++;
+      return Reflect.get(target, key, receiver);
+    } });
+  }
+  if (state.src !== src || state.tokens !== tokens || state.env !== env || state.line !== 0 || state.parentType !== "root" || state.level !== 0 || state.ddIndent !== -1 || state.listIndent !== -1)
+    throw new UnsupportedSourceCapture();
+  return state;
+}
+function runTopLevelWindow(state, cursor, stopAfterEpilogue, work) {
+  work.topLevelRunnerCalls++;
+  const file = collectorFor(state).file, rules = md.block.ruler.getRules("");
+  const checkpoint = () => ({
+    line: cursor.line,
+    offset: state.bMarks[cursor.line],
+    tokenIndex: state.tokens.length,
+    definitionIndex: file.definitions.length,
+    hasEmptyLines: cursor.hasEmptyLines,
+    state: blockScalars(state)
+  });
+  file.checkpoints.push(checkpoint());
+  while (cursor.line < state.lineMax) {
+    state.line = cursor.line = state.skipEmptyLines(cursor.line);
+    if (cursor.line >= state.lineMax || state.sCount[cursor.line] < state.blkIndent) break;
+    const maxNesting = state.md.options.maxNesting;
+    if (typeof maxNesting !== "number") throw new UnsupportedSourceCapture();
+    if (state.level >= maxNesting) {
+      state.line = state.lineMax;
+      break;
+    }
+    const previous = state.line;
+    let accepted = false;
+    for (const rule of rules) {
+      if (rule(state, cursor.line, state.lineMax, false)) {
+        accepted = true;
+        break;
+      }
+    }
+    if (!accepted || state.line <= previous) throw new UnsupportedSourceCapture();
+    state.tight = !cursor.hasEmptyLines;
+    if (state.isEmpty(state.line - 1)) cursor.hasEmptyLines = true;
+    cursor.line = state.line;
+    if (cursor.line < state.lineMax && state.isEmpty(cursor.line)) {
+      cursor.hasEmptyLines = true;
+      state.line = ++cursor.line;
+    }
+    const next = checkpoint();
+    file.checkpoints.push(next);
+    if (stopAfterEpilogue(next)) return;
+  }
+}
+md.block.parse = function(src, engine, env, tokens) {
+  const file = env?.[captureKey]?.file;
+  if (!file) return Object.getPrototypeOf(md.block).parse.call(this, src, engine, env, tokens);
+  file.work.blockParseCalls++;
+  if (!src) return;
+  runTopLevelWindow(newCheckedBlockState(src, env, tokens, file.work), { line: 0, hasEmptyLines: false }, () => false, file.work);
+};
+var originalNestedTokenize = md.block.tokenize;
+md.block.tokenize = function(state, start, end) {
+  const file = collectorFor(state)?.file;
+  if (file) file.work.nestedTokenizeCalls++;
+  return originalNestedTokenize.call(this, state, start, end);
+};
+md.inline.parse = function(src, engine, env, tokens) {
+  const file = env?.[captureKey]?.file;
+  const outer = file && !file.activeEffects;
+  if (file) {
+    file.work.inlineParseCalls++;
+    file.work.inlineInputUnits += src.length;
+    if (outer) {
+      file.activeEffects = [];
+      file.effects.push(file.activeEffects);
+    }
+  }
+  try {
+    return Object.getPrototypeOf(md.inline).parse.call(this, src, engine, env, tokens);
+  } finally {
+    if (outer) delete file.activeEffects;
+  }
+};
+wrapCaptureRule(md.block.ruler, "footnote_def", function observeFootnoteDefinition(original, state, startLine, endLine, silent) {
+  const collector = collectorFor(state), before = state.tokens.length;
+  const scope = state.level === 0 && state.blkIndent === 0 ? "top-level" : "nested";
+  const result = original(state, startLine, endLine, silent);
+  if (!result || silent || !collector?.file) return result;
+  const token = state.tokens[before];
+  if (token?.type !== "footnote_reference_open" || typeof token.meta?.label !== "string") throw new UnsupportedSourceCapture();
+  const from = collector.lineStarts[startLine], to = collector.lineStarts[state.line];
+  if (from === void 0 || to === void 0) throw new UnsupportedSourceCapture();
+  const raw = rawRange(collector.trace, from, to);
+  if (!raw) throw new UnsupportedSourceCapture();
+  collector.file.definitions.push({ kind: "footnote", label: token.meta.label, sourceFrom: raw.from, sourceTo: raw.to, scope });
+  return result;
+}, true);
+wrapCaptureRule(md.inline.ruler, "footnote_ref", function observeFootnoteRuntime(original, state, silent) {
+  const result = original(state, silent), file = collectorFor(state)?.file;
+  if (result && !silent && file) {
+    const token = state.tokens[state.tokens.length - 1];
+    if (token?.type !== "footnote_ref" || typeof token.meta?.label !== "string" || !file.activeEffects) throw new UnsupportedSourceCapture();
+    file.activeEffects.push(token.meta.label);
+  }
+  return result;
+});
+for (const entry of md.block.ruler.__rules__) {
+  const original = entry.fn;
+  md.block.ruler.at(entry.name, (state, start, end, silent) => {
+    const file = collectorFor(state)?.file;
+    if (file) file.work.blockRuleCalls++;
+    return original(state, start, end, silent);
+  }, { alt: entry.alt.slice() });
+}
+var fileRuleSnapshot = [md.core.ruler, md.block.ruler, md.inline.ruler, md.inline.ruler2].map((ruler) => ruler.__rules__.map((r) => ({ name: r.name, fn: r.fn, enabled: r.enabled, alt: [...r.alt] })));
 
 // src/plugins/editor-props-plugin.ts
 var editorPropsKey = new PluginKey("moraya-editor-props");

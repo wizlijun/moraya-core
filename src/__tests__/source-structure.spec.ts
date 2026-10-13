@@ -5,6 +5,7 @@ import * as markdown from '../markdown'
 vi.mock('../markdown',async importOriginal=>{
  const real=await importOriginal<typeof import('../markdown')>()
  return {...real,parseDocumentWithSourceCapture:vi.fn(real.parseDocumentWithSourceCapture),
+  captureFilePipeline:vi.fn(real.captureFilePipeline),captureFileWindow:vi.fn(real.captureFileWindow),
   serializeSourceRootMarkdown:vi.fn(real.serializeSourceRootMarkdown)}
 })
 import {EditorState,TextSelection,type Transaction,type Command} from 'prosemirror-state'
@@ -222,13 +223,16 @@ it('nested reference guard rejects structural rendering before serializer invoca
  vi.mocked(markdown.serializeSourceRootMarkdown).mockClear()
  reject(b,tr);expect(markdown.serializeSourceRootMarkdown).not.toHaveBeenCalled()
 })
-it('structural preparation captures once and serializes only dirty children',()=>{
+it('structural preparation prepares one candidate and serializes only dirty children',()=>{
  const b=open('HelloWorld\n\nMiddle __raw__\n\nByeWorld')
  const tr=EditorState.create({doc:b.doc}).tr.split(text(b.doc,'ByeWorld')+3).split(6)
- vi.mocked(markdown.parseDocumentWithSourceCapture).mockClear()
+ vi.mocked(markdown.captureFilePipeline).mockClear()
+ vi.mocked(markdown.captureFileWindow).mockClear()
  vi.mocked(markdown.serializeSourceRootMarkdown).mockClear()
  const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(true)
- expect(markdown.parseDocumentWithSourceCapture).toHaveBeenCalledTimes(1)
+ expect(markdown.captureFileWindow).toHaveBeenCalledTimes(1)
+ expect(markdown.captureFilePipeline).not.toHaveBeenCalled()
+ if(r.ok){expect(r.file!.work.topLevelRunnerCalls).toBe(1);expect(r.file!.work.fullCaptureCalls).toBe(0)}
  const inputs=vi.mocked(markdown.serializeSourceRootMarkdown).mock.calls.map(args=>args[0])
  expect(inputs.length).toBeGreaterThan(0)
  expect(inputs.every(doc=>doc.childCount<b.doc.childCount&&!doc.textContent.includes('Middle'))).toBe(true)
