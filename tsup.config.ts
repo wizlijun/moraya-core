@@ -11,6 +11,7 @@ import { defineConfig } from 'tsup'
 export default defineConfig({
   entry: [
     'src/index.ts',
+    'src/source-history.ts',
     'src/schema.ts',
     'src/markdown.ts',
     'src/setup.ts',

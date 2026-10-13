@@ -9978,7 +9978,7 @@ function prepareRawFileSourceEdits(base, input) {
 }
 
 // src/source-fidelity.ts
-import { Fragment as Fragment4 } from "prosemirror-model";
+import { Fragment as Fragment4, Slice as Slice2 } from "prosemirror-model";
 import { EditorState as EditorState2 } from "prosemirror-state";
 import { AddMarkStep as AddMarkStep3, RemoveMarkStep as RemoveMarkStep3, ReplaceStep as ReplaceStep4, Mapping } from "prosemirror-transform";
 function prepareFileSourceEdits(base, input) {
@@ -10476,6 +10476,44 @@ function applySourceBlockTransaction(base, tr) {
     return { ok: false, reason: "parse-error" };
   }
 }
+function prepareSourceListBoundarySteps(base, tr) {
+  if (!tr.before.eq(base.doc)) return { ok: false, reason: "stale-document" };
+  try {
+    classifyTransaction(base, tr);
+    for (let i = 0; i < tr.steps.length; i++) {
+      const result = tr.steps[i].apply(tr.docs[i]);
+      if (!result.doc?.eq(tr.docs[i + 1] ?? tr.doc)) throw new UnsupportedBlockTransaction();
+    }
+    tr.doc.check();
+    const facts = capturedSourceLists(base.source, base.doc, base.roots, base.layout);
+    if (!facts) throw new UnsupportedBlockTransaction();
+    const targets = [];
+    tr.doc.forEach((node, pos) => targets.push({ node, pos }));
+    const styles = transactionListStyles(tr, facts, targets), positions = [];
+    const visit = (parent, start) => {
+      parent.forEach((node, offset, index) => {
+        const pos = start + offset, previous = parent.maybeChild(index - 1);
+        if (previous && isList(node) && previous.type === node.type) {
+          const left = styles.get(pos - previous.nodeSize), right = styles.get(pos);
+          if (!left || !right) throw new UnsupportedBlockTransaction();
+          if (left.marker === right.marker) positions.push(pos);
+        }
+        if (!node.isLeaf) visit(node, pos + 1);
+      });
+    };
+    visit(tr.doc, 0);
+    const steps = [];
+    for (const pos of positions.sort((a, b) => b - a)) {
+      const node = base.doc.type.schema.nodes.html_block.create(null, base.doc.type.schema.text("<!-- notemd:list-boundary -->"));
+      const at = tr.doc.resolve(pos), slice = new Slice2(Fragment4.from(node), 0, 0);
+      if (!at.parent.canReplace(at.index(), at.index(), slice.content)) throw new UnsupportedBlockTransaction();
+      steps.push(new ReplaceStep4(pos, pos, slice));
+    }
+    return { ok: true, steps };
+  } catch {
+    return { ok: false, reason: "unsupported-step" };
+  }
+}
 export {
   applySourceBlockTransaction,
   applySourceTextTransaction,
@@ -10495,6 +10533,7 @@ export {
   parseMarkdownAsync,
   preloadEnhancementPlugins,
   prepareFileSourceEdits,
+  prepareSourceListBoundarySteps,
   projectLineEndings,
   serializeMarkdown,
   setDocumentBaseDir,

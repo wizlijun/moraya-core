@@ -1,5 +1,6 @@
 import { Node, Schema, Mark } from 'prosemirror-model';
 import { Transaction } from 'prosemirror-state';
+import { ReplaceStep } from 'prosemirror-transform';
 import MarkdownIt from 'markdown-it';
 import StateBlock from 'markdown-it/lib/rules_block/state_block.mjs';
 
@@ -182,6 +183,11 @@ type SourceBlockResult = {
     file?: SourceFileUpdate;
 } | FidelityFailure;
 declare function applySourceBlockTransaction(base: SourceSession, tr: Transaction): SourceBlockResult;
+type SourceListBoundaryResult = {
+    ok: true;
+    steps: readonly ReplaceStep[];
+} | FidelityFailure;
+declare function prepareSourceListBoundarySteps(base: SourceSession, tr: Transaction): SourceListBoundaryResult;
 
 type RawRange = Readonly<{
     from: number;
@@ -457,4 +463,4 @@ declare function captureFileWindow(cache: FileTokenCache, source: string, patche
     rightIndex: number;
 }>): FileCaptureResult | null;
 
-export { type FileWorkAccumulator as A, type BlankLineUnit as B, type CapturedDocument as C, type SourceListStyle as D, type SourceRootRenderOptions as E, type FallbackEmpty as F, captureFilePipeline as G, captureFileWindow as H, capturedEmptyBodies as I, capturedInlineBodies as J, capturedInlineRecipeFacts as K, type LayoutContainer as L, capturedSourceLists as M, parseDocumentWithSourceCapture as N, parseParagraphWithSourceCapture as O, type ProtectedSource as P, preprocessFileSource as Q, replayFilePipeline as R, type SourceBlockResult as S, type TextSourceSpan as T, serializeSourceInlineBody as U, serializeSourceRootMarkdown as V, sourceCodeDelimiter as W, sourceEmDelimiter as X, sourceFenceLength as Y, sourceRootHasClosedFences as Z, type FidelityFailure as a, type FidelityResult as b, type FileParseWork as c, type FileRootCorrespondence as d, type FileSourceResult as e, type SourceEdit as f, type SourceFileUpdate as g, type SourceGap as h, type SourceLayout as i, type SourcePatch as j, type SourceRoot as k, type SourceSession as l, type SyntheticEmission as m, applySourceBlockTransaction as n, applySourceTextTransaction as o, createSourceSession as p, parseMarkdown as q, parseMarkdownAsync as r, prepareFileSourceEdits as s, serializeMarkdown as t, type CapturedParagraph as u, type CapturedTextRun as v, type FileCaptureResult as w, type FileCheckpoint as x, type FileDefinition as y, type FileTokenCache as z };
+export { sourceRootHasClosedFences as $, type FileDefinition as A, type BlankLineUnit as B, type CapturedDocument as C, type FileTokenCache as D, type FileWorkAccumulator as E, type FallbackEmpty as F, type SourceListStyle as G, type SourceRootRenderOptions as H, captureFilePipeline as I, captureFileWindow as J, capturedEmptyBodies as K, type LayoutContainer as L, capturedInlineBodies as M, capturedInlineRecipeFacts as N, capturedSourceLists as O, type ProtectedSource as P, parseDocumentWithSourceCapture as Q, parseParagraphWithSourceCapture as R, type SourceBlockResult as S, type TextSourceSpan as T, preprocessFileSource as U, replayFilePipeline as V, serializeSourceInlineBody as W, serializeSourceRootMarkdown as X, sourceCodeDelimiter as Y, sourceEmDelimiter as Z, sourceFenceLength as _, type FidelityFailure as a, type FidelityResult as b, type FileParseWork as c, type FileRootCorrespondence as d, type FileSourceResult as e, type SourceEdit as f, type SourceFileUpdate as g, type SourceGap as h, type SourceLayout as i, type SourceListBoundaryResult as j, type SourcePatch as k, type SourceRoot as l, type SourceSession as m, type SyntheticEmission as n, applySourceBlockTransaction as o, applySourceTextTransaction as p, createSourceSession as q, parseMarkdown as r, parseMarkdownAsync as s, prepareFileSourceEdits as t, prepareSourceListBoundarySteps as u, serializeMarkdown as v, type CapturedParagraph as w, type CapturedTextRun as x, type FileCaptureResult as y, type FileCheckpoint as z };

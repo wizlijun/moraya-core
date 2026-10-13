@@ -2,7 +2,7 @@ import {prepareInlineRecipe,prepareClosedFenceRecipe} from './source-inline-reci
 import {capturedInlineRecipeFacts} from './markdown'
 import {prepareEmptyBodyTransaction} from './source-empty-body'
 import { prepareRawFileSourceEdits, createFileSourceSession, emptyFileParseWork, prepareVerifiedFileBase, finishUnchangedFile, prepareCandidate, preparePreservingSourceCandidate, type VerifiedFileBase } from './source-file-cache'
-import { Fragment, type Node as PmNode, type ResolvedPos, type Schema } from 'prosemirror-model'
+import { Fragment, Slice, type Node as PmNode, type ResolvedPos, type Schema } from 'prosemirror-model'
 import { EditorState, type Transaction } from 'prosemirror-state'
 import { AddMarkStep, RemoveMarkStep, ReplaceStep, Mapping } from 'prosemirror-transform'
 import { serializeSourceRootMarkdown, serializeSourceInlineBody, capturedInlineBodies, capturedEmptyBodies, sourceRootHasClosedFences, capturedSourceLists, type SourceListStyle, type FileWorkAccumulator } from './markdown'
@@ -564,4 +564,41 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
   if(error instanceof UnsupportedBlockTransaction||error instanceof UnsupportedSourceStructure)return {ok:false,reason:'unsupported-step'}
   return {ok:false,reason:'parse-error'}
  }
+}
+
+export type SourceListBoundaryResult = {ok:true;steps:readonly ReplaceStep[]}|FidelityFailure
+export function prepareSourceListBoundarySteps(base:SourceSession,tr:Transaction):SourceListBoundaryResult {
+ if(!tr.before.eq(base.doc))return {ok:false,reason:'stale-document'}
+ try {
+  classifyTransaction(base,tr)
+  for(let i=0;i<tr.steps.length;i++){
+   const result=tr.steps[i]!.apply(tr.docs[i]!)
+   if(!result.doc?.eq(tr.docs[i+1]??tr.doc))throw new UnsupportedBlockTransaction()
+  }
+  tr.doc.check()
+  const facts=capturedSourceLists(base.source,base.doc,base.roots,base.layout)
+  if(!facts)throw new UnsupportedBlockTransaction()
+  const targets:{node:PmNode;pos:number}[]=[];tr.doc.forEach((node,pos)=>targets.push({node,pos}))
+  const styles=transactionListStyles(tr,facts,targets),positions:number[]=[]
+  const visit=(parent:PmNode,start:number)=>{
+   parent.forEach((node,offset,index)=>{
+    const pos=start+offset,previous=parent.maybeChild(index-1)
+    if(previous&&isList(node)&&previous.type===node.type){
+     const left=styles.get(pos-previous.nodeSize),right=styles.get(pos)
+     if(!left||!right)throw new UnsupportedBlockTransaction()
+     if(left.marker===right.marker)positions.push(pos)
+    }
+    if(!node.isLeaf)visit(node,pos+1)
+   })
+  }
+  visit(tr.doc,0)
+  const steps:ReplaceStep[]=[]
+  for(const pos of positions.sort((a,b)=>b-a)){
+   const node=base.doc.type.schema.nodes.html_block!.create(null,base.doc.type.schema.text('<!-- notemd:list-boundary -->'))
+   const at=tr.doc.resolve(pos),slice=new Slice(Fragment.from(node),0,0)
+   if(!at.parent.canReplace(at.index(),at.index(),slice.content))throw new UnsupportedBlockTransaction()
+   steps.push(new ReplaceStep(pos,pos,slice))
+  }
+  return {ok:true,steps}
+ }catch{return {ok:false,reason:'unsupported-step'}}
 }

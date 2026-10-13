@@ -86,3 +86,5 @@ export type { EolChange, EolProjection } from './source-projection'
 export type { SourceRoot, SourceGap, SyntheticEmission, SourceEdit, ProtectedSource } from './source-ownership'
 
 export type { LayoutContainer, BlankLineUnit, FallbackEmpty, SourceLayout } from './source-layout'
+
+export { prepareSourceListBoundarySteps, type SourceListBoundaryResult } from './source-fidelity'
