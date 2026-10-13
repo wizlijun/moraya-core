@@ -31,7 +31,7 @@ function object(value:unknown,required:readonly string[],optional:readonly strin
  return value as Record<string,unknown>
 }
 function array(value:unknown):unknown[] {
- if(!Array.isArray(value)||Reflect.ownKeys(value).length!==value.length+1)invalid()
+ if(!Array.isArray(value)||Object.getPrototypeOf(value)!==Array.prototype||Reflect.ownKeys(value).length!==value.length+1)invalid()
  for(let i=0;i<value.length;i++){const d=Object.getOwnPropertyDescriptor(value,String(i));if(!d||!('value' in d))invalid()}
  return value
 }

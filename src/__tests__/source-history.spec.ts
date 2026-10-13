@@ -81,3 +81,10 @@ it('known Step failure marks all nested synchronous attempts, then unwinds',()=>
  expect(()=>withSourceHistoryAttempt(()=>{throw Error('callback')})).toThrow('callback')
  expect(withSourceHistoryAttempt(()=>2).failed).toBe(false)
 })
+
+it('rejects non-JSON array prototypes and accessor fields without running them',()=>{
+ class ForeignArray extends Array<RawDelta> {}
+ expect(()=>new SourceHistoryStep(new ForeignArray(delta()))).toThrow()
+ const d={...delta()};Object.defineProperty(d,'beforeHash',{get(){throw Error('accessor invoked')},enumerable:true})
+ expect(()=>new SourceHistoryStep([d])).toThrow('Invalid source history payload')
+})

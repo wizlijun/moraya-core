@@ -29,7 +29,7 @@ function object(value, required, optional = []) {
   return value;
 }
 function array(value) {
-  if (!Array.isArray(value) || Reflect.ownKeys(value).length !== value.length + 1) invalid();
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || Reflect.ownKeys(value).length !== value.length + 1) invalid();
   for (let i = 0; i < value.length; i++) {
     const d = Object.getOwnPropertyDescriptor(value, String(i));
     if (!d || !("value" in d)) invalid();
