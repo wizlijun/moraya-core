@@ -29,7 +29,7 @@ it('unaugmented same-marker adjacent list target still fails',()=>{
 it.each([
  ['+ A\n+ B','+ Z\n+ B'],['* A\n\n* B','* Z\n\n* B'],['0) A\n1) B','0) Z\n1) B'],
  ['* outer\n  + A\n\n  + B\n* end','* outer\n  + Z\n\n  + B\n* end'],
- ['* outer\n\n* end\n  + A\n  + B','* outer\n\n* end\n\n  + Z\n  + B'],
+ ['* outer\n\n* end\n  + A\n  + B','* outer\n\n* end\n  + Z\n  + B'],
  ['0) outer\n\n   3. A\n   4. B\n\n1) end','0) outer\n\n   3. Z\n   4. B\n\n1) end'],
  ['* outer\n  + A\n\n  + B\n* end\n  - C\n  - D','* outer\n  + Z\n\n  + B\n* end\n  - C\n  - D'],
 ] as const)('source-only styles on nested text edit %s',(raw,expected)=>{const b=open(raw+tail),at=text(b.doc,'A');accept(b,state(b,'A').tr.insertText('Z',at,at+1),expected+tail)})
@@ -142,7 +142,11 @@ it.each(['protected','unclosed','subclass','chain','stale'])('R1 and real guards
  if(kind==='subclass'){class Inherited extends ReplaceStep{};const step=tr.steps[0] as ReplaceStep;tr=state(b,'A').tr.step(new Inherited(step.from,step.to,step.slice))}
  if(kind==='chain'){tr.insertText('Q',text(tr.doc,'Z'));tr.docs[1]=open('* bad'+tail).doc}
  if(kind==='stale')tr=state(open('* different'+tail),'different').tr.insertText('Z',3,4)
- const spy=vi.spyOn(MarkdownSerializer.prototype,'serialize');try{reject(b,tr);expect(spy).not.toHaveBeenCalled()}finally{spy.mockRestore()}
+ const spy=vi.spyOn(MarkdownSerializer.prototype,'serialize');try{
+  if(kind==='protected'){const r=accept(b,tr,'> * Z\n>\n> [ref]: /u');expect(r.mode).toBe('exact-text');expect(r.session.protectedSources).toEqual(b.protectedSources)}
+  else reject(b,tr)
+  expect(spy).not.toHaveBeenCalled()
+ }finally{spy.mockRestore()}
 })
 it('per-list tight is consumed in nesting order and finally restores after exceptions',()=>{
  const b=open('* outer\n  + A\n\n  + B\n* end\n  - C\n  - D'),lists=b.layout.lists!.map(f=>({node:b.doc.nodeAt(f.pmFrom)!,style:{marker:f.marker,tight:f.tight}}))
@@ -160,7 +164,7 @@ it('per-list tight is consumed in nesting order and finally restores after excep
 })
 it('untouched BOM/EOL/definition bytes remain exact around a styled changed root',()=>{
  const prefix='\uFEFFBefore __raw__\r\n\r\n[ref]: /u "title"\r\n\r\n',suffix='\r\n \t\r\n'+M+'\r\n\r\nTail &amp; \\*\r',b=open(prefix+'+ A\r\n+ B'+suffix)
- accept(b,state(b,'A').tr.insertText('Z',text(b.doc,'A'),text(b.doc,'A')+1),prefix+'+ Z\n+ B'+suffix)
+ accept(b,state(b,'A').tr.insertText('Z',text(b.doc,'A'),text(b.doc,'A')+1),prefix+'+ Z\r\n+ B'+suffix)
 })
 it('a failed style call does not poison a later independent source transaction',()=>{
  const b=open('0) A'+tail);reject(b,state(b,'A').tr.step(new AttrStep(0,'order',1000000000)))
@@ -222,7 +226,7 @@ it('nested splitListItem preserves independent outer tight and inner loose style
 })
 it('ordered marker width keeps nested continuation at a digit transition',()=>{
  const b=open('9) A\n10) B\n    + C'+tail),tr=state(b,'A').tr.insertText('Z',text(b.doc,'A'),text(b.doc,'A')+1)
- accept(b,tr,' 9) Z\n10) B\n    + C'+tail)
+ accept(b,tr,'9) Z\n10) B\n    + C'+tail)
 })
 it.each([
  ['* outer\n  + A\n\n  + B\n* end','* outer\n  + A\n* B\n* end',[true,false]],

@@ -9,15 +9,21 @@ function position(doc:any,needle:string) {
 }
 
 for(const source of ['- [ref]: /url\n\n  Alpha\n\nTail','> [ref]: /url\n>\n> Alpha\n\nTail']) {
- it(`rejects rendering a reference-covered owner atomically: ${JSON.stringify(source)}`,()=>{
+ it(`marks the complete reference-covered body atomically: ${JSON.stringify(source)}`,()=>{
   const opened=createSourceSession(source);expect(opened.ok).toBe(true)
   if(!opened.ok)throw new Error(opened.reason)
   const base=opened.session,p=position(base.doc,'Alpha')
   const before=JSON.stringify(base),bytes=Buffer.from(base.source)
   const tr=EditorState.create({doc:base.doc}).tr.addMark(p,p+5,base.doc.type.schema.marks.strong!.create())
   const result=applySourceBlockTransaction(base,tr)
-  expect(result).toEqual({ok:false,reason:'unsupported-step'})
-  expect(result).not.toHaveProperty('session')
+  expect(result.ok).toBe(true)
+  if(!result.ok)throw Error(result.reason)
+  expect(result.mode).toBe('fragment-render')
+  expect(result.session.source).toBe(source.replace('Alpha','**Alpha**'))
+  expect(result.session.doc.eq(tr.doc)).toBe(true)
+  const tail=position(base.doc,'Tail')
+  const outside=EditorState.create({doc:base.doc}).tr.addMark(p,tail+4,base.doc.type.schema.marks.strong!.create())
+  expect(applySourceBlockTransaction(base,outside)).toEqual({ok:false,reason:'unsupported-step'})
   expect(Buffer.from(base.source)).toEqual(bytes)
   expect(JSON.stringify(base)).toBe(before)
  })

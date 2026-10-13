@@ -58,7 +58,15 @@ it.each(['- [x] A','+ [ ] B','* [X] C','- [x]A','- [ ]\tB','- [x]**B**','- [ ] [
  expect(b.doc.eq(parseMarkdown(raw.startsWith('\uFEFF')?raw.slice(1):raw))).toBe(true)
  const checked:boolean[]=[];b.doc.descendants(node=>{if(node.type.name==='list_item'&&node.attrs.checked!==null)checked.push(node.attrs.checked)})
  expect(checked).toHaveLength(1);expect(checked[0]).toBe(/\[[xX]\]/.test(raw))
- expect(b.source).toBe(raw);expect(b.textSpans).toEqual([])
+ expect(b.source).toBe(raw)
+ const checkbox=raw.match(/\[[ xX]\]/)!,marker=checkbox.index!
+ for(const span of b.textSpans){
+  expect(span.sourceTo<=marker||span.sourceFrom>=marker+3).toBe(true)
+  const from=b.doc.resolve(span.pmFrom),to=b.doc.resolve(span.pmTo)
+  expect(from.sameParent(to)).toBe(true);expect(from.parent.type.name).toBe('paragraph')
+  if(span.kind==='linear')expect(raw.slice(span.sourceFrom,span.sourceTo)).toBe(b.doc.textBetween(span.pmFrom,span.pmTo))
+ }
+ expect(b.textSpans.length>0).toBe(b.doc.textContent.length>0)
  expect(parseMarkdown(serializeMarkdown(b.doc)).eq(b.doc)).toBe(true)
 })
 it.each([0,1,3,8,999999999])('ordered %s actual attrs and default serializer readback',order=>{
@@ -75,11 +83,14 @@ it('default serializer independently preserves a numeric ordered0 node',()=>{
  expect(serializeMarkdown(doc)).toBe('0. A')
  expect(parseMarkdown(serializeMarkdown(doc)).eq(doc)).toBe(true)
 })
-it('nested checked lists do not grant top-level exact-text authority',()=>{
- const b=open('- [x] A\n\nTail &amp; \\*')
- expect(b.textSpans.every(s=>s.sourceFrom>=b.source.indexOf('Tail'))).toBe(true)
- const tr=EditorState.create({doc:b.doc}).tr.insertText('B',3,4)
- expect(applySourceTextTransaction(b,tr).ok).toBe(false)
+it('nested checked text has exact authority without touching checkbox or top-level text',()=>{
+ const raw='- [x] A\n\nTail &amp; \\*',b=open(raw),before=JSON.stringify(b)
+ expect(b.textSpans.some(s=>s.sourceFrom>=raw.indexOf('Tail'))).toBe(true)
+ expect(b.doc.textBetween(3,4)).toBe('A')
+ const tr=EditorState.create({doc:b.doc}).tr.insertText('B',3,4),result=applySourceTextTransaction(b,tr)
+ expect(result.ok).toBe(true);if(!result.ok)throw Error(result.reason)
+ expect(result.session.source).toBe('- [x] B\n\nTail &amp; \\*')
+ expect(result.session.doc.eq(tr.doc)).toBe(true);expect(JSON.stringify(b)).toBe(before)
 })
 it('only actual source/doc/roots/layout bindings have list authority',()=>{
  const b=open('- A'),get=(source=b.source,doc=b.doc,roots=b.roots,layout=b.layout)=>capturedSourceLists(source,doc,roots,layout)

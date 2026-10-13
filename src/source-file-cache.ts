@@ -202,7 +202,14 @@ function selectBlockWindow(cache: FileTokenCache, patches: readonly SourcePatch[
   return { leftIndex, rightIndex }
 }
 
-export function prepareCandidate(base: VerifiedFileBase, patches: readonly SourcePatch[], work: FileWorkAccumulator, expectedDoc?: PmNode): FileSourceResult {
+export function prepareCandidate(base:VerifiedFileBase,patches:readonly SourcePatch[],work:FileWorkAccumulator,expectedDoc?:PmNode):FileSourceResult {
+  return prepareCandidateInternal(base,patches,work,expectedDoc,false)
+}
+/** Rich inline commands preserve the complete parser-consumed protected set. */
+export function preparePreservingSourceCandidate(base:VerifiedFileBase,patches:readonly SourcePatch[],work:FileWorkAccumulator,expectedDoc:PmNode):FileSourceResult {
+  return prepareCandidateInternal(base,patches,work,expectedDoc,true)
+}
+function prepareCandidateInternal(base: VerifiedFileBase, patches: readonly SourcePatch[], work: FileWorkAccumulator, expectedDoc: PmNode|undefined,preserveProtected:boolean): FileSourceResult {
   if (!patches.length) {
     if (expectedDoc && !expectedDoc.eq(base.verifiedBase.doc)) return { ok: false, reason: 'semantic-mismatch', work }
     return { ...finishUnchangedFile(base, work), edits: [] }
@@ -219,6 +226,21 @@ export function prepareCandidate(base: VerifiedFileBase, patches: readonly Sourc
   }
   if (!parsed.ok) return { ...parsed, work }
   if (expectedDoc && !parsed.value.doc.eq(expectedDoc)) return { ok: false, reason: 'semantic-mismatch', work }
+  if(preserveProtected){
+    const expected=[]
+    let index=0
+    for(const old of base.verifiedBase.protectedSources){
+      while(index<pieces.length&&pieces[index]!.beforeTo<=old.sourceFrom)index++
+      const piece=pieces[index]
+      if(!piece||piece.generated||piece.beforeFrom>old.sourceFrom||piece.beforeTo<old.sourceTo)
+        return {ok:false,reason:'unsupported-step',work}
+      const delta=piece.afterFrom-piece.beforeFrom,sourceFrom=old.sourceFrom+delta,sourceTo=old.sourceTo+delta
+      if(source.slice(sourceFrom,sourceTo)!==base.verifiedBase.source.slice(old.sourceFrom,old.sourceTo))
+        return {ok:false,reason:'unsupported-step',work}
+      expected.push({...old,sourceFrom,sourceTo})
+    }
+    if(!sameMetadata(expected,parsed.value.protectedSources))return {ok:false,reason:'unsupported-step',work}
+  }
   work.environmentChanged = !sameMetadata(foldDefinitionEvents(base.cache.tokens.definitions), foldDefinitionEvents(parsed.cache.definitions))
   const environmentVersion = base.cache.environmentVersion + Number(work.environmentChanged)
   const next = makeSession(source, parsed.value, base.verifiedBase.revision + 1)

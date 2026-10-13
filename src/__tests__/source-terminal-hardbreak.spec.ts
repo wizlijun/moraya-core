@@ -44,8 +44,16 @@ it('keeps sparse text provenance and terminal semantics separate',()=>{
  const tr=EditorState.create({doc:s.doc}).tr.insertText('乙',1,2),r=applySourceBlockTransaction(s,tr)
  expect(r.ok).toBe(true);if(!r.ok)throw new Error(r.reason)
  expect(r.mode).toBe('exact-text');expect(r.session.source).toBe('乙  \r\n\r\n')
- expect(open('- 甲  \n').textSpans).toEqual([])
- expect(open('> 甲  \n').textSpans).toEqual([])
+ for(const [raw,pmFrom] of [['- 甲  \n',3],['> 甲  \n',2]] as const){
+  const nested=open(raw)
+  expect(nested.textSpans).toEqual([{sourceFrom:2,sourceTo:3,pmFrom,pmTo:pmFrom+1,kind:'linear'}])
+  expect(nested.doc.nodeAt(pmFrom+1)!.type.name).toBe('hardbreak')
+  expect(nested.source).toBe(raw)
+  const transaction=EditorState.create({doc:nested.doc}).tr.insertText('乙',pmFrom,pmFrom+1)
+  const changed=applySourceBlockTransaction(nested,transaction)
+  expect(changed.ok).toBe(true)
+  if(changed.ok){expect(changed.mode).toBe('exact-text');expect(changed.session.source).toBe(raw.replace('甲','乙'));expect(changed.session.doc.eq(transaction.doc)).toBe(true)}
+ }
 })
 it('does not change public serializer or authorize invisible definition deletion',()=>{
  const s=open('A\\\n\\\n')

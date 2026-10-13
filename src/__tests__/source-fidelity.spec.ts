@@ -71,7 +71,7 @@ describe('source fidelity ordinary text session', () => {
     expect(applySourceTextTransaction(next,stale)).toEqual({ok:false,reason:'stale-document'})
   })
   it('opens opaque source without claiming writable literal/container text', () => {
-    for (const source of ['* item\n* item2', '```js\n甲\n```', '$x$', '{>>note<<}']) {
+    for (const source of ['```js\n甲\n```', '$x$', '{>>note<<}']) {
       const opened = session(source)
       expect(opened.source).toBe(source)
       expect(opened.doc.eq(parseMarkdown(source))).toBe(true)
@@ -175,12 +175,14 @@ it('edits text after CRLF with original bytes', () => {
   expect(result.ok).toBe(true)
   if (result.ok) expect(result.session.source).toBe('甲\r\n丙')
 })
-it('rejects text replacement inside list containers', () => {
+it('preserves source for text replacement inside list containers', () => {
   for (const source of ['* 甲\n* 乙']) {
-    const {result} = replaceAt(source, '甲', '丙')
-    expect(result.ok).toBe(false)
-    expect('session' in result).toBe(false)
-    if (!result.ok) expect(['unsupported-step', 'unmapped-range']).toContain(result.reason)
+    const {base,result} = replaceAt(source, '甲', '丙')
+    expect(result.ok).toBe(true)
+    if(!result.ok)throw Error(result.reason)
+    expect(result.session.source).toBe('* 丙\n* 乙')
+    expect(result.session.doc.eq(parseMarkdown('* 丙\n* 乙'))).toBe(true)
+    expect(base.source).toBe('* 甲\n* 乙')
   }
 })
 

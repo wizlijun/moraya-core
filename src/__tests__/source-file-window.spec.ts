@@ -27,7 +27,7 @@ it.each([100, 1000])('existing rich entry parses one changed paragraph locally i
     blockUnits: block.mock.calls.reduce((sum, args) => sum + String(args[0]).length, 0),
     inline: inline.mock.calls.length }))
   expect(inline.mock.calls.length).toBe(3)
-  if(result.ok){expect(result.file!.work.blockRuleCalls).toBe(48);expect(result.file!.work.blockLinesVisited).toBe(221);expect(result.file!.work.topLevelRunnerCalls).toBe(1)}
+  if(result.ok){expect(result.file!.work.blockRuleCalls).toBe(48);expect(result.file!.work.blockLinesVisited).toBe(227);expect(result.file!.work.topLevelRunnerCalls).toBe(1)}
 })
 
 it.each([100, 1000])('raw API updates one ordinary paragraph locally in %i roots', count => {

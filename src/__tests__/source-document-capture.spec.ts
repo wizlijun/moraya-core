@@ -14,8 +14,8 @@ function captured(source: string) {
     expect(s.sourceFrom).toBeGreaterThanOrEqual(0)
     expect(s.sourceTo).toBeLessThanOrEqual(source.length)
     const from = r.value.doc.resolve(s.pmFrom)
-    expect(from.depth).toBe(1)
-    expect(from.parent.type.name).toBe('paragraph')
+    expect(from.sameParent(r.value.doc.resolve(s.pmTo))).toBe(true)
+    expect(['paragraph','heading']).toContain(from.parent.type.name)
     if (s.kind === 'linear') expect(source.slice(s.sourceFrom, s.sourceTo))
       .toBe(r.value.doc.textBetween(s.pmFrom, s.pmTo))
   }
@@ -99,8 +99,10 @@ it.each([
     expect(r.doc.textBetween(pm, pm + 1)).toBe(needle[2])
   }
 })
-it('does not claim container/literal text as editable', () => {
-  for (const source of ['> 甲。', '* 甲。', '```js\n甲\n```', '---\nx: 甲\n---']) {
+it('maps container text while keeping literal text opaque', () => {
+  for(const [source,pmFrom] of [['> 甲。',2],['* 甲。',3]] as const)
+    expect(captured(source).textRuns).toEqual([{sourceFrom:2,sourceTo:4,pmFrom,pmTo:pmFrom+2,kind:'linear'}])
+  for (const source of ['```js\n甲\n```', '---\nx: 甲\n---']) {
     expect(captured(source).textRuns).toEqual([])
   }
 })

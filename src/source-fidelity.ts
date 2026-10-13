@@ -1,8 +1,8 @@
-import { prepareRawFileSourceEdits, createFileSourceSession, emptyFileParseWork, prepareVerifiedFileBase, finishUnchangedFile, prepareCandidate, type VerifiedFileBase } from './source-file-cache'
+import { prepareRawFileSourceEdits, createFileSourceSession, emptyFileParseWork, prepareVerifiedFileBase, finishUnchangedFile, prepareCandidate, preparePreservingSourceCandidate, type VerifiedFileBase } from './source-file-cache'
 import { Fragment, type Node as PmNode, type ResolvedPos, type Schema } from 'prosemirror-model'
 import { EditorState, type Transaction } from 'prosemirror-state'
 import { AddMarkStep, RemoveMarkStep, ReplaceStep, Mapping } from 'prosemirror-transform'
-import { serializeSourceRootMarkdown, sourceRootHasClosedFences, capturedSourceLists, type SourceListStyle, type FileWorkAccumulator } from './markdown'
+import { serializeSourceRootMarkdown, serializeSourceInlineBody, capturedInlineBodies, sourceRootHasClosedFences, capturedSourceLists, type SourceListStyle, type FileWorkAccumulator } from './markdown'
 import type { SourceLayout, SourceListLexeme } from './source-layout'
 import type { SourceRoot, SourceGap, SourceEdit, ProtectedSource } from './source-ownership'
 import {classifyTransaction,applyStructuralTransaction,UnsupportedSourceStructure,type StructuralRendered} from './source-structure'
@@ -122,17 +122,23 @@ function applySourceTextTransactionWithEdit(base: SourceSession, tr: Transaction
   if (!tr.before.eq(base.doc)) return { ok: false, reason: 'stale-document' }
   if (tr.steps.length !== 1) return { ok: false, reason: 'unsupported-step' }
   if (tr.storedMarksSet) return { ok: false, reason: 'unsupported-step' }
-  const step = tr.steps[0]!.toJSON()
-  if (step.stepType !== 'replace' || step.structure) return { ok: false, reason: 'unsupported-step' }
+  const actual=tr.steps[0]!
+  if(Object.getPrototypeOf(actual)!==ReplaceStep.prototype||tr.docs.length!==1||!tr.docs[0]!.eq(base.doc))return {ok:false,reason:'unsupported-step'}
+  const applied=actual.apply(base.doc)
+  if(applied.failed||!applied.doc?.eq(tr.doc))return {ok:false,reason:'unsupported-step'}
+  const step=actual as ReplaceStep & {readonly structure:boolean}
+  if (step.structure) return { ok: false, reason: 'unsupported-step' }
   const work = context?.work ?? emptyFileParseWork()
   const verified = context?.verified ?? prepareVerifiedFileBase(base, work)
   if ('ok' in verified) return verified
   base = verified.verifiedBase
-  const { from, to } = step as { from: number; to: number }
+  const { from, to } = step
+  let textOnly=true;step.slice.content.forEach(node=>{if(!node.isText)textOnly=false})
+  const owner=base.roots.find(root=>root.pmFrom<=from&&root.pmTo>=to)
+  if(!owner||!sourceRootHasClosedFences(owner))return {ok:false,reason:'unsupported-step'}
   const $from = base.doc.resolve(from), $to = base.doc.resolve(to)
-  if ($from.depth !== 1 || !$from.sameParent($to) || $from.parent.type.name !== 'paragraph'
-    || to < from || step.slice?.openStart || step.slice?.openEnd
-    || step.slice?.content?.some((node: { type: string }) => node.type !== 'text')) {
+  if (!$from.sameParent($to) || !['paragraph','heading'].includes($from.parent.type.name)
+    || to < from || step.slice.openStart || step.slice.openEnd || !textOnly) {
     return { ok: false, reason: 'unsupported-step' }
   }
   if (splitsTextAt(base.doc, from) || splitsTextAt(base.doc, to)) {
@@ -157,9 +163,9 @@ function applySourceTextTransactionWithEdit(base: SourceSession, tr: Transaction
     return { ok: false, reason: 'unmapped-range' }
   }
   if (overlapsProtectedSource(base, sourceFrom, sourceTo)) return { ok: false, reason: 'unsupported-step' }
-  const insert = (step.slice?.content ?? []).map((node: { text: string }) => node.text).join('')
+  let insert='';step.slice.content.forEach(node=>{insert+=node.text!})
   context?.verifyEdit?.({ from: sourceFrom, to: sourceTo, text: insert })
-  const result = prepareCandidate(verified, [{ from: sourceFrom, to: sourceTo,
+  const result = preparePreservingSourceCandidate(verified, [{ from: sourceFrom, to: sourceTo,
     removed: base.source.slice(sourceFrom, sourceTo), text: insert }], work, tr.doc)
   if (!result.ok) return { ok: false, reason: result.reason }
   return { ok: true, session: result.session, file: result.file,
@@ -172,7 +178,7 @@ export function applySourceTextTransaction(base:SourceSession,tr:Transaction):Fi
 }
 
 export type SourceBlockResult =
- | {ok:true;session:SourceSession;mode:'unchanged'|'exact-text'|'root-render';
+ | {ok:true;session:SourceSession;mode:'unchanged'|'exact-text'|'fragment-render'|'root-render';
     edits:readonly SourceEdit[];changedRoots:readonly number[];file?:SourceFileUpdate}
  | FidelityFailure
 class UnsupportedBlockTransaction extends Error {}
@@ -391,6 +397,26 @@ function applySourceEdits(base:SourceSession,edits:readonly SourceEdit[],ids:rea
  chunks.push(base.source.slice(at))
  return chunks.join('')
 }
+// Only this declared single-body recipe grants inline render authority.
+function plainMarkBody(base:SourceSession,tr:Transaction):SourceEdit|undefined {
+ if(tr.steps.length!==1)return undefined
+ const step=tr.steps[0]!
+ if(!(step instanceof AddMarkStep||step instanceof RemoveMarkStep)||!['strong','em'].includes(step.mark.type.name))return undefined
+ const from=base.doc.resolve(step.from),to=base.doc.resolve(step.to)
+ if(!from.sameParent(to)||!['paragraph','heading'].includes(from.parent.type.name))return undefined
+ const plain=(node:PmNode)=>{let ok=true;node.forEach(child=>{if(!child.isText||child.marks.some(mark=>!['strong','em'].includes(mark.type.name)))ok=false});return ok}
+ if(!plain(from.parent))return undefined
+ // Plain single-body marks with incomplete/missing authority must fail closed.
+ if(from.parentOffset!==0||to.parentOffset!==from.parent.content.size)return undefined
+ const after=tr.doc.resolve(step.from),end=tr.doc.resolve(step.to)
+ if(!after.sameParent(end)||from.depth!==after.depth||!plain(after.parent))throw new UnsupportedBlockTransaction()
+ for(let depth=0;depth<=from.depth;depth++)if(!from.node(depth).sameMarkup(after.node(depth)))throw new UnsupportedBlockTransaction()
+ const body=capturedInlineBodies(base.source,base.doc,base.roots,base.layout)?.find(b=>b.pmFrom===step.from&&b.pmTo===step.to)
+ if(!body)return undefined
+ if(!body.singlePhysicalLine||overlapsProtectedSource(base,body.sourceFrom,body.sourceTo))throw new UnsupportedBlockTransaction()
+ return {from:body.sourceFrom,to:body.sourceTo,text:serializeSourceInlineBody(after.parent)}
+}
+
 export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):SourceBlockResult {
  if(!tr.before.eq(base.doc))return {ok:false,reason:'stale-document'}
  try {
@@ -400,6 +426,7 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
   const facts=capturedSourceLists(base.source,base.doc,base.roots,base.layout)
   if(!facts)throw new UnsupportedBlockTransaction()
   const authority={facts}
+  if(tr.docs.length!==tr.steps.length)throw new UnsupportedBlockTransaction()
   const classification=classifyTransaction(base,tr)
   // Validate the actual standard chain before metadata mapping or rendering.
   for(let i=0;i<tr.steps.length;i++){
@@ -428,6 +455,7 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
    if(!tr.doc.eq(base.doc))return {ok:false,reason:'unsupported-step'}
    return {...finishUnchangedFile(verified,work),mode:'unchanged',edits:[],changedRoots:[]}
   }
+  if(changedRoots.some(id=>!sourceRootHasClosedFences(ownership.rootById[id]!)))throw new UnsupportedBlockTransaction()
   // Only a single ReplaceStep can satisfy the old exact API. Replay this one
   // document step to remove stored-mark bookkeeping without touching the caller.
   if(tr.steps.length===1&&tr.steps[0] instanceof ReplaceStep) {
@@ -438,6 +466,20 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
     const edits=[exact.edit]
     return {ok:true,session:exact.session,file:exact.file,mode:'exact-text',edits,changedRoots}
    }
+   const step=tr.steps[0] as ReplaceStep,from=base.doc.resolve(step.from),to=base.doc.resolve(step.to)
+   let ordinary=true;step.slice.content.forEach(node=>{if(!node.isText||!node.hasMarkup(node.type,null,from.marks()))ordinary=false})
+   const cell=from.depth>1&&['table_cell','table_header'].includes(from.node(from.depth-1).type.name)
+   const supportedMarks=from.marks().every(mark=>['strong','em','link'].includes(mark.type.name))
+   if(from.sameParent(to)&&['paragraph','heading'].includes(from.parent.type.name)&&ordinary&&supportedMarks
+    &&(!cell||capturedInlineBodies(base.source,base.doc,base.roots,base.layout)?.some(body=>body.pmFrom===from.start()))
+    &&(exact.reason==='unmapped-range'||step.to-step.from<=1&&step.slice.size<=1))return exact
+  }
+  const fragment=plainMarkBody(base,tr)
+  if(fragment){
+   applySourceEdits(base,[fragment],changedRoots,ownership)
+   const parsed=preparePreservingSourceCandidate(verified,[{...fragment,removed:base.source.slice(fragment.from,fragment.to)}],work,tr.doc)
+   if(!parsed.ok)return {ok:false,reason:parsed.reason}
+   return {ok:true,session:parsed.session,file:parsed.file,mode:'fragment-render',edits:[fragment],changedRoots}
   }
   // Exact rejection is not authorization: changedNaturalRoots has already
   // proved step kinds, real ranges, stable root identity and ownership.
