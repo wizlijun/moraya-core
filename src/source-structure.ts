@@ -2,7 +2,7 @@ import type {Node as PMNode} from 'prosemirror-model'
 import type {Transaction} from 'prosemirror-state'
 import {AddMarkStep,RemoveMarkStep,ReplaceStep,ReplaceAroundStep,AttrStep,AddNodeMarkStep,RemoveNodeMarkStep} from 'prosemirror-transform'
 import type {SourceSession} from './source-fidelity'
-import type {SourceEdit} from './source-ownership'
+import type {SourceEdit,SourceRoot} from './source-ownership'
 
 export class UnsupportedSourceStructure extends Error {}
 type RawSpan={from:number;to:number}
@@ -33,13 +33,6 @@ function fail():never {throw new UnsupportedSourceStructure()}
 const sameOrigin=(a:Origin,b:Origin)=>a.kind===b.kind&&(a.kind==='fallback'||b.kind!=='fallback'&&a.id===b.id)
 const empty=(n:PMNode)=>n.type.name==='paragraph'&&n.content.size===0&&n.marks.length===0
 
-/** Internal shared pre-render guard: unclosed literal boundaries are a separate producer contract. */
-export function assertClosedSourceFence(raw:string):void {
- const lines=raw.split(/\r\n|\r|\n/)
- const opening=/^ {0,3}(`{3,}|~{3,})/.exec(lines[0]??'')
- const closing=/^ {0,3}(`+|~+)[ \t]*$/.exec(lines.at(-1)??'')
- if(lines.length<2||!opening||!closing||opening[1]![0]!==closing[1]![0]||closing[1]!.length<opening[1]!.length)fail()
-}
 function boundaryAt(doc:PMNode,pos:number):number|undefined {
  if(!Number.isInteger(pos)||pos<0||pos>doc.content.size)return undefined
  const p=doc.resolve(pos);return p.depth===0?p.index(0):undefined
@@ -238,7 +231,8 @@ function partitionSlots(base:SourceSession):Slot[] {
  if(at<base.source.length)result.push({kind:'envelope',id:result.length,from:at,to:base.source.length})
  return result
 }
-function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:PMNode[])=>StructuralRendered):Recipe {
+function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:PMNode[])=>StructuralRendered,
+ rootHasClosedFences:(root:SourceRoot)=>boolean):Recipe {
  const claims:Claim[]=[],removed=new Set<Slot>(),insertions=new Map<number,Atom[]>(),changedRoots:number[]=[]
  const dirty=new Map<number,Component>(),blankDirty=new Map<number,Component>()
  // Every component at a shared raw anchor participates, including an edited
@@ -288,9 +282,7 @@ function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:
   const originIds=new Set(origins.map(o=>o.id))
   // Independent pre-serializer guard. Final edit guards do not replace this.
   for(const o of origins){const r=base.roots[o.id]!;if(base.protectedSources.some(p=>p.sourceFrom<r.sourceTo&&p.sourceTo>r.sourceFrom))fail()
-   if(r.tokenType==='fence'){
-    assertClosedSourceFence(base.source.slice(r.sourceFrom,r.tailFrom))
-   }
+   if(!rootHasClosedFences(r))fail()
    if(!['paragraph_open','heading_open','bullet_list_open','ordered_list_open','blockquote_open','table_open','hr','fence'].includes(r.tokenType))fail()}
   const rootSlots=slots.filter(s=>(s.kind==='body'||s.kind==='terminator')&&originIds.has(s.id))
   const terminal=rootSlots.filter(s=>s.kind==='terminator').at(-1)
@@ -438,7 +430,8 @@ function applyRecipe(base:SourceSession,recipe:Recipe):string {
  for(const edit of recipe.edits){chunks.push(base.source.slice(at,edit.from),edit.text);at=edit.to}
  chunks.push(base.source.slice(at));return chunks.join('')
 }
-export function applyStructuralTransaction(base:SourceSession,tr:Transaction,render:(nodes:PMNode[])=>StructuralRendered):
+export function applyStructuralTransaction(base:SourceSession,tr:Transaction,render:(nodes:PMNode[])=>StructuralRendered,
+ rootHasClosedFences:(root:SourceRoot)=>boolean):
  {source:string;edits:SourceEdit[];changedRoots:number[];unchanged:boolean} {
  const ledger=createLedger(base)
  for(let i=0;i<tr.steps.length;i++){
@@ -466,7 +459,7 @@ export function applyStructuralTransaction(base:SourceSession,tr:Transaction,ren
   })
   if(stable&&cancelled)return {source:base.source,edits:[],changedRoots:[],unchanged:true}
  }
- const recipe=makeRecipe(base,ledger,partitionSlots(base),render)
+ const recipe=makeRecipe(base,ledger,partitionSlots(base),render,rootHasClosedFences)
  verifyRecipe(base,recipe)
  return {source:applyRecipe(base,recipe),edits:recipe.edits,changedRoots:recipe.changedRoots,unchanged:false}
 }

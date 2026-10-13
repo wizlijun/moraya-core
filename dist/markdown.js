@@ -1797,7 +1797,12 @@ var tokenArrays = /* @__PURE__ */ new WeakMap();
 var inlineStateOwners = /* @__PURE__ */ new WeakMap();
 var tokenSources = /* @__PURE__ */ new WeakMap();
 var pendingSources = /* @__PURE__ */ new WeakMap();
+var capturedFenceClosed = /* @__PURE__ */ new WeakMap();
+var capturedRootFencesClosed = /* @__PURE__ */ new WeakMap();
 var captureAvailable = true;
+function sourceRootHasClosedFences(root) {
+  return capturedRootFencesClosed.get(root) === true;
+}
 function wrapCaptureRule(ruler, name, wrapper) {
   const original = ruler.__rules__?.find((rule) => rule.name === name)?.fn;
   if (typeof original !== "function") {
@@ -1807,6 +1812,36 @@ function wrapCaptureRule(ruler, name, wrapper) {
   ruler.at(name, (...args) => wrapper(original, ...args));
 }
 var collectorFor = (state) => state.env?.[captureKey];
+wrapCaptureRule(md.block.ruler, "fence", (original, state, startLine, endLine, silent) => {
+  if (!collectorFor(state) || silent) return original(state, startLine, endLine, silent);
+  const originalGetLines = state.getLines, descriptor = Object.getOwnPropertyDescriptor(state, "getLines");
+  if (typeof originalGetLines !== "function" || descriptor?.configurable === false) throw new UnsupportedSourceCapture();
+  const tokenStart = state.tokens.length;
+  let contentEnd;
+  Object.defineProperty(state, "getLines", {
+    configurable: true,
+    writable: true,
+    enumerable: descriptor?.enumerable ?? false,
+    value: function(begin, end, indent, keepLastLF) {
+      if (this !== state || contentEnd !== void 0 || begin !== startLine + 1 || !Number.isInteger(end) || end < begin || end > endLine || keepLastLF !== true) throw new UnsupportedSourceCapture();
+      contentEnd = end;
+      return originalGetLines.call(this, begin, end, indent, keepLastLF);
+    }
+  });
+  let result;
+  try {
+    result = original(state, startLine, endLine, silent);
+  } finally {
+    if (descriptor) Object.defineProperty(state, "getLines", descriptor);
+    else delete state.getLines;
+  }
+  if (result) {
+    const tokens = state.tokens.slice(tokenStart), token = tokens[0];
+    if (tokens.length !== 1 || token?.type !== "fence" || contentEnd === void 0 || token.map?.[0] !== startLine || token.map?.[1] !== state.line || state.line !== contentEnd && state.line !== contentEnd + 1) throw new UnsupportedSourceCapture();
+    capturedFenceClosed.set(token, state.line === contentEnd + 1);
+  } else if (contentEnd !== void 0) throw new UnsupportedSourceCapture();
+  return result;
+});
 var inlineEngine = md.inline;
 var OriginalInlineState = inlineEngine.State;
 if (typeof OriginalInlineState !== "function") captureAvailable = false;
@@ -2151,6 +2186,12 @@ function prepareRootEvents(tokens, collector) {
       if (flowTail.has(token.type) && collector.trace.text[tailWork] === "\n" && /^[ \t\n]*$/.test(collector.trace.text.slice(tailWork + 1, to))) boundaryTo = tailWork + 1;
     }
     const id = natural.length;
+    let closedFences = true;
+    for (let at = i; at <= last; at++) if (tokens[at].type === "fence") {
+      const closed = capturedFenceClosed.get(tokens[at]);
+      if (closed === void 0) throw new UnsupportedSourceCapture();
+      if (!closed) closedFences = false;
+    }
     const draft = {
       collector,
       kind: "natural",
@@ -2159,7 +2200,8 @@ function prepareRootEvents(tokens, collector) {
       tokenType: token.type,
       sourceFrom: raw.from,
       sourceTo: raw.to,
-      tailFrom
+      tailFrom,
+      closedFences
     };
     rootStarts.set(token, draft);
     rootEnds.set(tokens[last], draft);
@@ -2259,14 +2301,19 @@ function captureRootEmission(state, token, delegate) {
         unit.emission = emission;
         if (unit.container.kind === "gap") end.collector.synthetic.push({ gapIndex: unit.container.gapIndex, emission });
       }
-    } else end.collector.roots.push({
-      id: end.id,
-      tokenType: end.tokenType,
-      sourceFrom: end.sourceFrom,
-      sourceTo: end.sourceTo,
-      tailFrom: end.tailFrom,
-      ...emission
-    });
+    } else {
+      if (end.closedFences === void 0) throw new UnsupportedSourceCapture();
+      const root = {
+        id: end.id,
+        tokenType: end.tokenType,
+        sourceFrom: end.sourceFrom,
+        sourceTo: end.sourceTo,
+        tailFrom: end.tailFrom,
+        ...emission
+      };
+      capturedRootFencesClosed.set(root, end.closedFences);
+      end.collector.roots.push(root);
+    }
   }
 }
 function buildSourceGaps(source, roots, synthetic) {
@@ -2921,7 +2968,8 @@ function sourceCodeNode(state, node) {
   const fence = character.repeat(length);
   state.write(fence + info + "\n");
   state.text(node.textContent, false);
-  state.write("\n" + fence);
+  state.write("\n");
+  state.write(fence);
   state.closeBlock(node);
 }
 function sourceEmDelimiter(mark, parent, index, opening) {
@@ -2959,6 +3007,12 @@ var sourceRootSerializer = new MarkdownSerializer({
   ...serializer.nodes,
   text: writeSourceText,
   code_block: sourceCodeNode,
+  list_item(state, node, parent, index) {
+    const first = node.firstChild;
+    if (node.attrs.checked === null && first?.type.name === "paragraph" && first.content.size === 0 && first.hasMarkup(first.type) && node.childCount > 1 && node.child(1).type.name !== "paragraph") {
+      for (let index2 = 1; index2 < node.childCount; index2++) state.render(node.child(index2), node, index2);
+    } else serializer.nodes.list_item(state, node, parent, index);
+  },
   hardbreak(state, node, parent, index) {
     if (node.attrs.isInline === true) {
       state.write("\n");
@@ -3227,6 +3281,7 @@ export {
   parseMarkdownAsync,
   parseParagraphWithSourceCapture,
   serializeMarkdown,
-  serializeSourceRootMarkdown
+  serializeSourceRootMarkdown,
+  sourceRootHasClosedFences
 };
 //# sourceMappingURL=markdown.js.map

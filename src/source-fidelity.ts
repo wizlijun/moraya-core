@@ -1,10 +1,10 @@
 import { Fragment, type Node as PmNode, type ResolvedPos, type Schema } from 'prosemirror-model'
 import { EditorState, type Transaction } from 'prosemirror-state'
 import { AddMarkStep, RemoveMarkStep, ReplaceStep } from 'prosemirror-transform'
-import { parseDocumentWithSourceCapture, serializeSourceRootMarkdown } from './markdown'
+import { parseDocumentWithSourceCapture, serializeSourceRootMarkdown, sourceRootHasClosedFences } from './markdown'
 import type { SourceLayout } from './source-layout'
 import type { SourceRoot, SourceGap, SourceEdit, ProtectedSource } from './source-ownership'
-import {classifyTransaction,applyStructuralTransaction,assertClosedSourceFence,UnsupportedSourceStructure,type StructuralRendered} from './source-structure'
+import {classifyTransaction,applyStructuralTransaction,UnsupportedSourceStructure,type StructuralRendered} from './source-structure'
 
 export type TextSourceSpan = Readonly<{
   sourceFrom: number; sourceTo: number
@@ -230,7 +230,7 @@ function endsInTerminalHardbreak(node:PmNode):boolean {
 }
 function renderChangedRoot(base:SourceSession,doc:PmNode,root:SourceRoot):string {
  if(overlapsProtectedSource(base,root.sourceFrom,root.sourceTo)||!renderableRoots.has(root.tokenType))throw new UnsupportedBlockTransaction()
- if(root.tokenType==='fence')assertClosedSourceFence(base.source.slice(root.sourceFrom,root.tailFrom))
+ if(!sourceRootHasClosedFences(root))throw new UnsupportedBlockTransaction()
  const nodes:PmNode[]=[]
  for(let i=root.childFrom;i<root.childTo;i++)nodes.push(rootRenderNode(doc.child(i)))
  let generated=serializeSourceRootMarkdown(doc.type.create(doc.attrs,Fragment.fromArray(nodes)))
@@ -273,7 +273,7 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
     return {text,terminal:last.type.name==='table'||endsInTerminalHardbreak(last)?'content-eol':'none',
      family:last.type.name==='table'?'table':['paragraph','heading','bullet_list','ordered_list','blockquote','horizontal_rule'].includes(last.type.name)?'flow':'closed-literal',eol:'\n'}
    }
-   const result=applyStructuralTransaction(base,tr,render)
+   const result=applyStructuralTransaction(base,tr,render,sourceRootHasClosedFences)
    if(result.unchanged)return {ok:true,session:base,mode:'unchanged',edits:[],changedRoots:[]}
    const parsed=createSourceSession(result.source,base.doc.type.schema)
    if(!parsed.ok||!parsed.session.doc.eq(tr.doc))return {ok:false,reason:'semantic-mismatch'}

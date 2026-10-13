@@ -1,4 +1,6 @@
-import {expect,it} from 'vitest'
+import {expect,it,vi} from 'vitest'
+import {Schema} from 'prosemirror-model'
+import StateBlock from 'markdown-it/lib/rules_block/state_block.mjs'
 import {EditorState,TextSelection,type Transaction,type Command} from 'prosemirror-state'
 import {wrapIn,lift,splitBlock} from 'prosemirror-commands'
 import {wrapInList,splitListItem,sinkListItem,liftListItem} from 'prosemirror-schema-list'
@@ -6,6 +8,8 @@ import {addRowAfter,addColumnAfter,deleteColumn,goToNextCell} from 'prosemirror-
 import {AttrStep,AddNodeMarkStep,RemoveNodeMarkStep,ReplaceAroundStep,DocAttrStep} from 'prosemirror-transform'
 import {createSourceSession,applySourceBlockTransaction} from '../source-fidelity'
 import {wrapInTaskList} from '../commands'
+import {defaultSchema} from '../schema'
+import {parseMarkdown,parseMarkdownAsync} from '../markdown'
 function open(raw:string){const r=createSourceSession(raw);if(!r.ok)throw Error(r.reason);return r.session}
 function state(b:ReturnType<typeof open>,from:number,to=from){
  return EditorState.create({doc:b.doc,selection:TextSelection.create(b.doc,from,to)})
@@ -221,4 +225,108 @@ it('newline in fence info is rejected without dropping attrs',()=>{
 it('literal content with multiple terminal LFs is retained on AttrStep',()=>{
  const b=open('```js\nA\n\n\n```'+tail),r=accept(b,state(b,1).tr.step(new AttrStep(0,'language','ts')))
  expect(r.session.doc.child(0).textContent).toBe('A\n\n')
+})
+
+it('actual wrapIn keeps a closed fence closing line inside the quote',()=>{
+ const b=open('```js\nA\n```'+tail),tr=command(state(b,1),wrapIn(b.doc.type.schema.nodes.blockquote!))
+ const r=accept(b,tr,'> ```js\n> A\n> ```'+tail)
+ expect(r.changedRoots).toEqual([0]);expect(r.edits.every(e=>e.to<=b.roots[0]!.tailFrom)).toBe(true)
+})
+it.each([
+ ['quote','> ```js\n> A\n> ```','> ```ts\n> A\n> ```'],
+ ['list','- ```js\n  A\n  ```','- ```ts\n  A\n  ```'],
+ ['quote-tail-lf','> ```js\n> A\n>\n> ```','> ```ts\n> A\n> \n> ```'],
+ ['list-tail-lf','- ```js\n  A\n\n  ```','- ```ts\n  A\n  \n  ```'],
+] as const)('closed container fence AttrStep preserves %s syntax and content',(_kind,raw,expected)=>{
+ const b=open(raw+'\r\n \t\r\nTail __raw__'),at=text(b.doc,'A')-1
+ const tr=state(b,text(b.doc,'A')).tr.step(new AttrStep(at,'language','ts'))
+ const r=accept(b,tr,expected+'\r\n \t\r\nTail __raw__')
+ expect(r.changedRoots).toEqual([0]);expect(r.edits.every(e=>e.to<=b.roots[0]!.tailFrom)).toBe(true)
+})
+it.each(['```js\nA','> ```js\n> A','- ```js\n  A'])(
+ 'unclosed literal cannot gain a closing marker on Attr or text edit: %j',raw=>{
+  const b=open(raw),at=text(b.doc,'A')
+  reject(b,state(b,at).tr.step(new AttrStep(at-1,'language','ts')))
+  reject(b,state(b,at).tr.insertText('Z',at,at+1))
+ })
+it.each(['> > ```js\n> > A\n> > ```','> - ```js\n>   A\n>   ```'])(
+ 'closed multiply nested fence keeps its container on AttrStep: %j',raw=>{
+  const b=open(raw+tail),at=text(b.doc,'A')
+  accept(b,state(b,at).tr.step(new AttrStep(at-1,'language','ts')),raw.replace('```js','```ts')+tail)
+ })
+it('quote-first list recreates its schema-filled paragraph around a closed literal',()=>{
+ const b=open('- > ```js\n  > A\n  > ```'+tail),at=text(b.doc,'A')
+ accept(b,state(b,at).tr.step(new AttrStep(at-1,'language','ts')),'- > ```ts\n  > A\n  > ```'+tail)
+})
+it('heading-first list recreates the same schema-filled paragraph without literal-specific rules',()=>{
+ const b=open('- # H'+tail),at=text(b.doc,'H')
+ expect(b.doc.child(0).child(0).firstChild!.type.name).toBe('paragraph')
+ expect(b.doc.child(0).child(0).firstChild!.content.size).toBe(0)
+ accept(b,state(b,at).tr.step(new AttrStep(at-1,'level',2)),'- ## H'+tail)
+})
+it.each(['> > ```js\n> > A','- > ```js\n  > A'])(
+ 'multiply nested unclosed fence stays atomic: %j',raw=>{
+  const b=open(raw),at=text(b.doc,'A');reject(b,state(b,at).tr.step(new AttrStep(at-1,'language','ts')))
+ })
+it('a dirty root beside an untouched unclosed container keeps that raw neighbor',()=>{
+ const b=open('AB\r\n \t\r\n> ```js\n> A'),tr=command(state(b,2),splitBlock)
+ const r=accept(b,tr,'A\n\nB\r\n \t\r\n> ```js\n> A')
+ expect(r.changedRoots).toEqual([0]);expect(r.edits.every(e=>e.to<=b.roots[0]!.tailFrom)).toBe(true)
+})
+it('missing root capture provenance cannot be treated as a closed literal',()=>{
+ const b=open('A'+tail),unknown={...b,roots:b.roots.map(root=>({...root}))}
+ reject(unknown,command(state(b,1),wrapIn(b.doc.type.schema.nodes.blockquote!)))
+ reject(unknown,state(b,1).tr.addMark(1,2,b.doc.type.schema.marks.strong!.create()))
+})
+it.each(['attrs','marks'] as const)('literal-first list does not discard an empty paragraph with nondefault %s',kind=>{
+ const paragraph=defaultSchema.spec.nodes.get('paragraph')!,item=defaultSchema.spec.nodes.get('list_item')!
+ const schema=new Schema({nodes:defaultSchema.spec.nodes
+  .update('paragraph',{...paragraph,attrs:{privateLayout:{default:null}}})
+  .update('list_item',{...item,marks:'_'}),marks:defaultSchema.spec.marks})
+ const opened=createSourceSession('- ```js\n  A\n  ```'+tail,schema)
+ expect(opened.ok).toBe(true);if(!opened.ok)throw Error(opened.reason)
+ const b=opened.session,tr=EditorState.create({doc:b.doc}).tr
+ if(kind==='attrs')tr.step(new AttrStep(2,'privateLayout',42))
+ else tr.step(new AddNodeMarkStep(2,schema.marks.strong!.create()))
+ tr.doc.check();reject(b,tr)
+})
+it('a schema without list paragraph filling rejects omission of an explicitly inserted empty paragraph',()=>{
+ const item=defaultSchema.spec.nodes.get('list_item')!
+ const schema=new Schema({nodes:defaultSchema.spec.nodes.update('list_item',{...item,content:'block+'}),marks:defaultSchema.spec.marks})
+ const opened=createSourceSession('- ```js\n  A\n  ```'+tail,schema)
+ expect(opened.ok).toBe(true);if(!opened.ok)throw Error(opened.reason)
+ const b=opened.session
+ expect(b.doc.child(0).child(0).firstChild!.type.name).toBe('code_block')
+ const tr=EditorState.create({doc:b.doc}).tr.insert(2,schema.nodes.paragraph!.create())
+ tr.doc.check();reject(b,tr)
+})
+it.each([false,true])('fence observation restores an existing getLines descriptor after throw=%s',throws=>{
+ const getLines=StateBlock.prototype.getLines,skip=StateBlock.prototype.skipEmptyLines
+ let observed:any,descriptor:PropertyDescriptor|undefined,calls=0
+ const owned=function(this:any,...args:any[]){calls++;if(throws)throw Error('fence getLines failed');return getLines.apply(this,args)}
+ const spy=vi.spyOn(StateBlock.prototype,'skipEmptyLines').mockImplementation(function(this:any,...args:any[]){
+  if(!observed){observed=this;Object.defineProperty(this,'getLines',{configurable:true,writable:true,enumerable:true,value:owned});descriptor=Object.getOwnPropertyDescriptor(this,'getLines')}
+  return skip.apply(this,args)
+ })
+ try {
+  const r=createSourceSession('```js\nA\n```');expect(r.ok).toBe(!throws)
+  expect(calls).toBe(1);expect(Object.getOwnPropertyDescriptor(observed,'getLines')).toEqual(descriptor)
+ }finally{spy.mockRestore()}
+})
+it('fence observation deletes only its temporary own method after an inherited getLines throws',()=>{
+ let observed:any
+ const spy=vi.spyOn(StateBlock.prototype,'getLines').mockImplementation(function(this:any){observed=this;throw Error('fence failed')})
+ try {expect(createSourceSession('```js\nA\n```').ok).toBe(false);expect(Object.hasOwn(observed,'getLines')).toBe(false)}
+ finally{spy.mockRestore()}
+ expect(createSourceSession('```js\nA\n```').ok).toBe(true)
+})
+it('legacy sync and async fence parses do not install the capture getLines wrapper',async()=>{
+ const original=StateBlock.prototype.getLines;let calls=0
+ const spy=vi.spyOn(StateBlock.prototype,'getLines').mockImplementation(function(this:any,...args:any[]){
+  calls++;expect(Object.hasOwn(this,'getLines')).toBe(false);return original.apply(this,args)
+ })
+ try {
+  const raw='> ```js\n> A\n> ```',doc=parseMarkdown(raw)
+  expect((await parseMarkdownAsync(raw)).eq(doc)).toBe(true);expect(calls).toBe(2)
+ }finally{spy.mockRestore()}
 })
