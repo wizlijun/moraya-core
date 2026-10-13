@@ -126,6 +126,7 @@ function advanceLedger(ledger:Ledger,before:PMNode,after:PMNode,step:Step,index:
  if(isMark){
   for(let i=w.before.from;i<w.before.to;i++){
    const lane=ledger.children[i]!
+   if(lane.node.eq(after.child(i)))continue
    const c=touch([lane.ref],ledger.boundaries[i]!,false)
    lane.ref={kind:'component',id:c.id};lane.node=after.child(i)
   }
@@ -211,7 +212,10 @@ function partitionSlots(base:SourceSession):Slot[] {
 function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:PMNode[])=>StructuralRendered):Recipe {
  const claims:Claim[]=[],removed=new Set<Slot>(),insertions=new Map<number,Atom[]>(),changedRoots:number[]=[]
  const dirty=new Map<number,Component>(),blankDirty=new Map<number,Component>()
+ // Every component at a shared raw anchor participates, including an edited
+ // original owner. Emit its final run once, in the actual document order.
  const components=ledger.components.filter(c=>c.parent===c.id)
+  .sort((a,b)=>(a.finalRuns[0]?.from??Infinity)-(b.finalRuns[0]?.from??Infinity))
  const neighbors=new Map<Slot,{left:number|undefined;right:number|undefined}>()
  let leftRoot=-1,rightRoot=0
  for(const slot of slots)if(slot.kind==='separator'){
@@ -291,22 +295,6 @@ function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:
   insertions.set(anchor,[...previous,...atoms])
   const birth=c.births[0]
   claims.push({from:anchor,to:anchor,kind:'anchor',step:stepOf(c),...(birth?{birth}:{})})
- }
- // Components born at the same raw boundary are emitted in final PM order.
- for(const [anchor]of insertions){
-  const at=components.filter(c=>c.births.some(b=>b.anchor.kind==='base'&&b.anchor.anchor===anchor)&&!c.origins.length)
-  if(at.length>1){
-   at.sort((a,b)=>(a.finalRuns[0]?.from??Infinity)-(b.finalRuns[0]?.from??Infinity))
-   const atoms:Atom[]=[]
-   for(const c of at)for(const run of c.finalRuns)for(let i=run.from;i<run.to;i++){
-    const node=ledger.children[i]!.node
-    if(empty(node)){if(i!==baseline)atoms.push(generated('blank','\n',anchor,stepOf(c)));continue}
-    const output=render([node]);let text=output.text
-    if(output.terminal==='content-eol')text=text.slice(0,-output.eol.length)
-    atoms.push(generated('body',text,anchor,stepOf(c)),generated('terminator',output.terminal==='content-eol'?'\n':'',anchor,stepOf(c)))
-   }
-   insertions.set(anchor,atoms)
-  }
  }
  const atoms:Atom[]=[]
  for(const slot of slots){const added=insertions.get(slot.from);if(added){atoms.push(...added);insertions.delete(slot.from)}

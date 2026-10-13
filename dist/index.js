@@ -6616,6 +6616,7 @@ function advanceLedger(ledger, before, after, step, index) {
   if (isMark) {
     for (let i = w.before.from; i < w.before.to; i++) {
       const lane = ledger.children[i];
+      if (lane.node.eq(after.child(i))) continue;
       const c3 = touch([lane.ref], ledger.boundaries[i], false);
       lane.ref = { kind: "component", id: c3.id };
       lane.node = after.child(i);
@@ -6722,7 +6723,7 @@ function partitionSlots(base) {
 function makeRecipe(base, ledger, slots, render) {
   const claims = [], removed = /* @__PURE__ */ new Set(), insertions = /* @__PURE__ */ new Map(), changedRoots = [];
   const dirty = /* @__PURE__ */ new Map(), blankDirty = /* @__PURE__ */ new Map();
-  const components = ledger.components.filter((c2) => c2.parent === c2.id);
+  const components = ledger.components.filter((c2) => c2.parent === c2.id).sort((a, b) => (a.finalRuns[0]?.from ?? Infinity) - (b.finalRuns[0]?.from ?? Infinity));
   const neighbors = /* @__PURE__ */ new Map();
   let leftRoot = -1, rightRoot = 0;
   for (const slot of slots) if (slot.kind === "separator") {
@@ -6821,25 +6822,6 @@ function makeRecipe(base, ledger, slots, render) {
     insertions.set(anchor, [...previous, ...atoms2]);
     const birth = c2.births[0];
     claims.push({ from: anchor, to: anchor, kind: "anchor", step: stepOf(c2), ...birth ? { birth } : {} });
-  }
-  for (const [anchor] of insertions) {
-    const at = components.filter((c2) => c2.births.some((b) => b.anchor.kind === "base" && b.anchor.anchor === anchor) && !c2.origins.length);
-    if (at.length > 1) {
-      at.sort((a, b) => (a.finalRuns[0]?.from ?? Infinity) - (b.finalRuns[0]?.from ?? Infinity));
-      const atoms2 = [];
-      for (const c2 of at) for (const run of c2.finalRuns) for (let i = run.from; i < run.to; i++) {
-        const node = ledger.children[i].node;
-        if (empty(node)) {
-          if (i !== baseline) atoms2.push(generated("blank", "\n", anchor, stepOf(c2)));
-          continue;
-        }
-        const output = render([node]);
-        let text2 = output.text;
-        if (output.terminal === "content-eol") text2 = text2.slice(0, -output.eol.length);
-        atoms2.push(generated("body", text2, anchor, stepOf(c2)), generated("terminator", output.terminal === "content-eol" ? "\n" : "", anchor, stepOf(c2)));
-      }
-      insertions.set(anchor, atoms2);
-    }
   }
   const atoms = [];
   for (const slot of slots) {

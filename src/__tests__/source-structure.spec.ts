@@ -1,6 +1,6 @@
 import {expect,it,vi} from 'vitest'
 import {Slice,type Node as PMNode} from 'prosemirror-model'
-import {Step,StepResult,ReplaceStep} from 'prosemirror-transform'
+import {Step,StepResult,ReplaceStep,AddMarkStep,RemoveMarkStep} from 'prosemirror-transform'
 import * as markdown from '../markdown'
 vi.mock('../markdown',async importOriginal=>{
  const real=await importOriginal<typeof import('../markdown')>()
@@ -219,4 +219,28 @@ it('EOF birth after a surviving suffix empty generates a separator without conve
  const b=open('A\r\n \t\r\n'),tr=EditorState.create({doc:b.doc}).tr.insert(b.doc.content.size,b.doc.type.schema.nodes.paragraph!.create(null,b.doc.type.schema.text('B')))
  const r=accept(b,tr,'A\r\n\n \t\r\nB')
  expect(r.edits).toEqual([{from:3,to:3,text:'\n'},{from:7,to:7,text:'B'}])
+})
+it.each([false,true])('same-anchor births and edited origin follow final PM order (%s)',twoBirths=>{
+ const b=open('A\n\nC'),tr=EditorState.create({doc:b.doc}).tr
+ const paragraph=(word:string)=>b.doc.type.schema.nodes.paragraph!.create(null,b.doc.type.schema.text(word))
+ if(twoBirths){tr.insert(3,paragraph('B'));tr.insert(3,paragraph('X'));tr.insertText('ee',11)}
+ else {tr.insertText('ee',5);tr.insert(3,paragraph('B'))}
+ const expected=twoBirths?'A\n\nX\n\nB\n\nCee':'A\n\nB\n\nCee'
+ expect(open(expected).doc.eq(tr.doc)).toBe(true)
+ vi.mocked(markdown.serializeSourceRootMarkdown).mockClear()
+ const r=accept(b,tr,expected)
+ expect(r.changedRoots).toEqual([1])
+ expect(r.edits).toEqual([{from:3,to:4,text:twoBirths?'X\n\nB\n\nCee':'B\n\nCee'}])
+ expect(vi.mocked(markdown.serializeSourceRootMarkdown).mock.calls.map(([doc])=>doc.textContent))
+  .toEqual(twoBirths?['X','B','Cee']:['B','Cee'])
+})
+it.each([false,true])('ineffective mark over a raw empty preserves its unit through split (%s)',remove=>{
+ const b=open(remove?'**AB**\r\n\r\n \t\r\n**C**':'AB\r\n\r\n \t\r\nC')
+ const tr=EditorState.create({doc:b.doc}).tr,strong=b.doc.type.schema.marks.strong!.create()
+ tr.step(remove?new RemoveMarkStep(1,b.doc.content.size-1,strong):new AddMarkStep(1,b.doc.content.size-1,strong))
+ tr.split(2)
+ const expected=remove?'A\n\nB\r\n\r\n \t\r\nC':'**A**\n\n**B**\r\n\r\n \t\r\n**C**'
+ expect(open(expected).doc.eq(tr.doc)).toBe(true)
+ const r=accept(b,tr,expected),unit=b.layout.blankLines.find(u=>u.role==='empty-paragraph')!
+ expect(r.edits.every(e=>e.to<=unit.sourceFrom||e.from>=unit.sourceTo)).toBe(true)
 })
