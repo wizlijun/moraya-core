@@ -4,6 +4,7 @@ import { AddMarkStep, RemoveMarkStep, ReplaceStep } from 'prosemirror-transform'
 import { parseDocumentWithSourceCapture, serializeSourceRootMarkdown } from './markdown'
 import type { SourceLayout } from './source-layout'
 import type { SourceRoot, SourceGap, SourceEdit, ProtectedSource } from './source-ownership'
+import {classifyTransaction,applyStructuralTransaction,UnsupportedSourceStructure,type StructuralRendered} from './source-structure'
 
 export type TextSourceSpan = Readonly<{
   sourceFrom: number; sourceTo: number
@@ -264,6 +265,20 @@ function applySourceEdits(base:SourceSession,edits:readonly SourceEdit[],ids:rea
 export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):SourceBlockResult {
  if(!tr.before.eq(base.doc))return {ok:false,reason:'stale-document'}
  try {
+  if(classifyTransaction(base,tr)==='structural'){
+   const render=(nodes:PmNode[]):StructuralRendered=>{
+    const rendered=nodes.map(rootRenderNode),doc=tr.doc.type.create(tr.doc.attrs,Fragment.fromArray(rendered))
+    const text=serializeSourceRootMarkdown(doc),last=rendered[rendered.length-1]!
+    return {text,terminal:last.type.name==='table'||endsInTerminalHardbreak(last)?'content-eol':'none',
+     family:last.type.name==='table'?'table':['paragraph','heading','bullet_list','ordered_list','blockquote','horizontal_rule'].includes(last.type.name)?'flow':'closed-literal',eol:'\n'}
+   }
+   const result=applyStructuralTransaction(base,tr,render)
+   if(result.unchanged)return {ok:true,session:base,mode:'unchanged',edits:[],changedRoots:[]}
+   const parsed=createSourceSession(result.source,base.doc.type.schema)
+   if(!parsed.ok||!parsed.session.doc.eq(tr.doc))return {ok:false,reason:'semantic-mismatch'}
+   return {ok:true,session:{...parsed.session,revision:base.revision+1},mode:'root-render',
+    edits:result.edits,changedRoots:result.changedRoots}
+  }
   const ownership=indexSourceRoots(base)
   const changedRoots=changedNaturalRoots(base,tr,ownership)
   if(!changedRoots.length) {
@@ -295,7 +310,7 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
   return {ok:true,session:{...parsed.session,revision:base.revision+1},
    mode:'root-render',edits,changedRoots}
  }catch(error) {
-  if(error instanceof UnsupportedBlockTransaction)return {ok:false,reason:'unsupported-step'}
+  if(error instanceof UnsupportedBlockTransaction||error instanceof UnsupportedSourceStructure)return {ok:false,reason:'unsupported-step'}
   return {ok:false,reason:'parse-error'}
  }
 }

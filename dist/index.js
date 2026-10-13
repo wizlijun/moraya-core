@@ -600,10 +600,10 @@ function createLanguagePicker(container, anchor, currentLang, codeContent, langL
         listEl.appendChild(createOption(lang));
       }
       if (matches.length === 0) {
-        const empty = document.createElement("div");
-        empty.className = "code-lang-empty";
-        empty.textContent = "No matches";
-        listEl.appendChild(empty);
+        const empty2 = document.createElement("div");
+        empty2.className = "code-lang-empty";
+        empty2.textContent = "No matches";
+        listEl.appendChild(empty2);
       }
     }
   }
@@ -6476,7 +6476,543 @@ async function createEditor(opts) {
 // src/source-fidelity.ts
 import { Fragment as Fragment3 } from "prosemirror-model";
 import { EditorState as EditorState2 } from "prosemirror-state";
+import { AddMarkStep as AddMarkStep2, RemoveMarkStep as RemoveMarkStep2, ReplaceStep as ReplaceStep2 } from "prosemirror-transform";
+
+// src/source-structure.ts
 import { AddMarkStep, RemoveMarkStep, ReplaceStep } from "prosemirror-transform";
+var UnsupportedSourceStructure = class extends Error {
+};
+function fail() {
+  throw new UnsupportedSourceStructure();
+}
+var sameOrigin = (a, b) => a.kind === b.kind && (a.kind === "fallback" || b.kind !== "fallback" && a.id === b.id);
+var empty = (n) => n.type.name === "paragraph" && n.content.size === 0 && n.marks.length === 0;
+function boundaryAt(doc2, pos) {
+  if (!Number.isInteger(pos) || pos < 0 || pos > doc2.content.size) return void 0;
+  const p = doc2.resolve(pos);
+  return p.depth === 0 ? p.index(0) : void 0;
+}
+function childWindow(doc2, from, to) {
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to < from || to > doc2.content.size) fail();
+  const a = doc2.resolve(from), b = doc2.resolve(to);
+  if (from === to && a.depth === 0) return { from: a.index(0), to: a.index(0) };
+  return { from: a.index(0), to: b.index(0) + (b.depth === 0 ? 0 : 1) };
+}
+function splitsText(doc2, pos) {
+  const p = doc2.resolve(pos), n = p.parent.maybeChild(p.index());
+  return !!p.textOffset && !!n?.isText && /[\uD800-\uDBFF]/.test(n.text[p.textOffset - 1]) && /[\uDC00-\uDFFF]/.test(n.text[p.textOffset]);
+}
+function classifyTransaction(base, tr) {
+  if (tr.docs.length !== tr.steps.length || tr.doc.type.schema !== base.doc.type.schema) fail();
+  let structural = false;
+  for (let i = 0; i < tr.steps.length; i++) {
+    const step = tr.steps[i], proto = Object.getPrototypeOf(step), before = tr.docs[i];
+    if (!before || before.type.schema !== base.doc.type.schema) fail();
+    if (proto !== ReplaceStep.prototype && proto !== AddMarkStep.prototype && proto !== RemoveMarkStep.prototype) fail();
+    const { from, to } = step;
+    childWindow(before, from, to);
+    if (splitsText(before, from) || splitsText(before, to)) fail();
+    if (proto === ReplaceStep.prototype) {
+      const s = step, a = before.resolve(from), b = before.resolve(to);
+      let inline = true;
+      s.slice.content.forEach((n) => {
+        if (!n.isInline) inline = false;
+      });
+      if (s.structure || !a.sameParent(b) || !a.parent.inlineContent || s.slice.openStart || s.slice.openEnd || !inline) structural = true;
+    }
+  }
+  return structural ? "structural" : "stable";
+}
+function originSpan(base, origin) {
+  if (origin.kind === "root") {
+    const r2 = base.roots[origin.id];
+    if (!r2) fail();
+    return { from: r2.sourceFrom, to: r2.sourceTo };
+  }
+  if (origin.kind === "blank") {
+    const u = base.layout.blankLines[origin.id];
+    if (!u) fail();
+    return { from: u.sourceFrom, to: u.sourceTo };
+  }
+  const f = base.layout.fallback;
+  if (!f) fail();
+  return { from: f.sourceAnchor, to: f.sourceAnchor };
+}
+function createLedger(base) {
+  const children = new Array(base.doc.childCount);
+  const assign = (origin, from, to, pmFrom, pmTo) => {
+    if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to <= from || to > children.length) fail();
+    let pos2 = pmFrom;
+    for (let i = from; i < to; i++) {
+      if (children[i]) fail();
+      const node = base.doc.child(i);
+      children[i] = { ref: { kind: "base", origin }, node, from: pos2, to: pos2 + node.nodeSize };
+      pos2 += node.nodeSize;
+    }
+    if (pos2 !== pmTo) fail();
+  };
+  base.roots.forEach((r2, id) => {
+    if (r2.id !== id) fail();
+    assign({ kind: "root", id }, r2.childFrom, r2.childTo, r2.pmFrom, r2.pmTo);
+  });
+  base.layout.blankLines.forEach((u, id) => {
+    if (u.id !== id) fail();
+    if (u.role === "empty-paragraph") assign({ kind: "blank", id }, u.emission.childFrom, u.emission.childTo, u.emission.pmFrom, u.emission.pmTo);
+  });
+  if (base.layout.fallback) {
+    const e = base.layout.fallback.emission;
+    assign({ kind: "fallback" }, e.childFrom, e.childTo, e.pmFrom, e.pmTo);
+  }
+  let pos = 0;
+  for (const lane of children) {
+    if (!lane || lane.from !== pos) fail();
+    pos = lane.to;
+  }
+  if (pos !== base.doc.content.size) fail();
+  const boundaries = [];
+  let blankCursor = 0;
+  for (let i = 0; i <= children.length; i++) {
+    const left = children[i - 1]?.ref, right = children[i]?.ref;
+    if (left?.kind === "base" && right?.kind === "base" && sameOrigin(left.origin, right.origin) && left.origin.kind === "root") {
+      boundaries.push({ kind: "inside-root", rootId: left.origin.id });
+      continue;
+    }
+    const anchor = right?.kind === "base" ? originSpan(base, right.origin).from : base.source.length;
+    const previous = left?.kind === "base" ? originSpan(base, left.origin).to : 0;
+    const units = base.layout.blankLines, slotIds = [];
+    while (blankCursor < units.length && units[blankCursor].sourceTo <= previous) blankCursor++;
+    while (blankCursor < units.length && units[blankCursor].sourceTo <= anchor) {
+      const unit = units[blankCursor++];
+      if (unit.sourceFrom >= previous) slotIds.push(unit.id);
+    }
+    boundaries.push({ kind: "base", anchor, slotIds });
+  }
+  return { children, boundaries, components: [] };
+}
+function representative(ledger, id) {
+  let c2 = ledger.components[id];
+  if (!c2) fail();
+  while (c2.parent !== c2.id) c2 = ledger.components[c2.parent];
+  return c2;
+}
+function stepWindow(before, after, step, ledger) {
+  const window2 = childWindow(before, step.from, step.to);
+  const from = ledger.children[window2.from]?.from ?? before.content.size;
+  const to = window2.to === window2.from ? from : ledger.children[window2.to - 1].to;
+  const map = step.getMap(), a = boundaryAt(after, map.map(from, -1)), b = boundaryAt(after, map.map(to, 1));
+  if (a === void 0 || b === void 0 || b < a) fail();
+  return { before: window2, after: { from: a, to: b }, from, to };
+}
+function advanceLedger(ledger, before, after, step, index) {
+  const w = stepWindow(before, after, step, ledger), isMark = !(step instanceof ReplaceStep);
+  const witness = {
+    step: index,
+    kind: isMark ? "mark" : "replace",
+    before: { from: step.from, to: step.to },
+    after: { from: step.getMap().map(step.from, -1), to: step.getMap().map(step.to, 1) },
+    crossed: ledger.boundaries.slice(w.before.from, w.before.to + 1)
+  };
+  if (w.after.from !== w.before.from || after.childCount - before.childCount !== w.after.to - w.after.from - (w.before.to - w.before.from)) fail();
+  if (isMark) {
+    for (let i = w.before.from; i < w.before.to; i++) {
+      const lane = ledger.children[i];
+      const c3 = touch([lane.ref], ledger.boundaries[i], false);
+      lane.ref = { kind: "component", id: c3.id };
+      lane.node = after.child(i);
+    }
+    return;
+  }
+  const refs = ledger.children.slice(w.before.from, w.before.to).map((l) => l.ref);
+  const boundary2 = ledger.boundaries[w.before.from];
+  if (!refs.length) {
+    if (boundary2.kind === "inside-root") refs.push({ kind: "base", origin: { kind: "root", id: boundary2.rootId } });
+    else if (boundary2.kind === "generated" || boundary2.kind === "tombstone") refs.push({ kind: "component", id: boundary2.component });
+  }
+  const c2 = touch(refs, boundary2, refs.length === 0), added = [];
+  let pos = step.getMap().map(w.from, -1);
+  for (let i = w.after.from; i < w.after.to; i++) {
+    const node = after.child(i);
+    added.push({ ref: { kind: "component", id: c2.id }, node, from: pos, to: pos + node.nodeSize });
+    pos += node.nodeSize;
+  }
+  const left = ledger.boundaries[w.before.from], right = ledger.boundaries[w.before.to];
+  ledger.children.splice(w.before.from, w.before.to - w.before.from, ...added);
+  const seams = added.length ? [left, ...Array.from({ length: added.length - 1 }, () => ({ kind: "generated", component: c2.id })), right] : [{ kind: "tombstone", component: c2.id, prior: left }];
+  ledger.boundaries.splice(w.before.from, w.before.to - w.before.from + 1, ...seams);
+  pos = 0;
+  for (const lane of ledger.children) {
+    lane.from = pos;
+    pos += lane.node.nodeSize;
+    lane.to = pos;
+  }
+  function touch(refs2, anchor, birth) {
+    const ids = [], origins = [];
+    for (const ref of refs2) {
+      if (ref.kind === "component") {
+        const id = representative(ledger, ref.id).id;
+        if (!ids.includes(id)) ids.push(id);
+      } else if (!origins.some((o) => sameOrigin(o, ref.origin))) origins.push(ref.origin);
+    }
+    for (const candidate of ledger.components) if (candidate.parent === candidate.id && candidate.origins.some((o) => origins.some((p) => sameOrigin(o, p)))) ids.push(candidate.id);
+    let c3 = ids.length ? representative(ledger, ids[0]) : void 0;
+    if (!c3) {
+      const id = ledger.components.length;
+      c3 = { id, parent: id, origins: [], births: [], witnesses: [], finalRuns: [] };
+      ledger.components.push(c3);
+    }
+    for (const id of ids) {
+      const other = representative(ledger, id);
+      if (other === c3) continue;
+      other.parent = c3.id;
+      c3.origins.push(...other.origins);
+      c3.births.push(...other.births);
+      c3.witnesses.push(...other.witnesses);
+    }
+    for (const origin of origins) if (!c3.origins.some((o) => sameOrigin(o, origin))) c3.origins.push(origin);
+    c3.witnesses.push(witness);
+    if (birth) c3.births.push({ step: index, ordinal: c3.births.length, anchor });
+    for (const lane of ledger.children) if (lane.ref.kind === "base" && c3.origins.some((o) => sameOrigin(o, lane.ref.kind === "base" ? lane.ref.origin : { kind: "fallback" }))) lane.ref = { kind: "component", id: c3.id };
+    return c3;
+  }
+}
+function finishLedger(base, tr, ledger) {
+  let i = 0;
+  tr.doc.forEach((node) => {
+    const lane = ledger.children[i];
+    if (!lane || !node.eq(lane.node)) fail();
+    if (lane.ref.kind === "base") {
+      const o = lane.ref.origin, e = o.kind === "root" ? base.roots[o.id] : o.kind === "blank" ? base.layout.blankLines[o.id] : base.layout.fallback;
+      if (!e) fail();
+    } else {
+      const c2 = representative(ledger, lane.ref.id);
+      lane.ref = { kind: "component", id: c2.id };
+      const last = c2.finalRuns[c2.finalRuns.length - 1];
+      if (last?.to === i) last.to++;
+      else c2.finalRuns.push({ from: i, to: i + 1 });
+    }
+    i++;
+  });
+  if (i !== ledger.children.length) fail();
+}
+function partitionSlots(base) {
+  const slots = [];
+  for (const root of base.roots) {
+    if (root.tailFrom < root.sourceFrom || root.tailFrom > root.sourceTo) fail();
+    slots.push({ kind: "body", id: root.id, from: root.sourceFrom, to: root.tailFrom });
+    const tail = base.source.slice(root.tailFrom, root.sourceTo), eol = /^(?:\r\n|\r|\n)/.exec(tail)?.[0];
+    if (eol) slots.push({ kind: "terminator", id: root.id, from: root.tailFrom, to: root.tailFrom + eol.length });
+  }
+  for (const u of base.layout.blankLines) slots.push({ kind: u.role === "separator" ? "separator" : "blank", id: u.id, from: u.sourceFrom, to: u.sourceTo });
+  for (let id = 0; id < base.protectedSources.length; id++) {
+    const p = base.protectedSources[id];
+    if (p.scope === "top-level") slots.push({ kind: "protected", id, from: p.sourceFrom, to: p.sourceTo });
+  }
+  slots.sort((a, b) => a.from - b.from || a.to - b.to);
+  const result = [];
+  let at = 0;
+  for (const slot of slots) {
+    if (slot.from < at || slot.to < slot.from || slot.to > base.source.length) fail();
+    if (slot.from > at) result.push({ kind: "envelope", id: result.length, from: at, to: slot.from });
+    if (slot.to > slot.from) result.push(slot);
+    at = slot.to;
+  }
+  if (at < base.source.length) result.push({ kind: "envelope", id: result.length, from: at, to: base.source.length });
+  return result;
+}
+function makeRecipe(base, ledger, slots, render) {
+  const claims = [], removed = /* @__PURE__ */ new Set(), insertions = /* @__PURE__ */ new Map(), changedRoots = [];
+  const dirty = /* @__PURE__ */ new Map(), blankDirty = /* @__PURE__ */ new Map();
+  const components = ledger.components.filter((c2) => c2.parent === c2.id);
+  const neighbors = /* @__PURE__ */ new Map();
+  let leftRoot = -1, rightRoot = 0;
+  for (const slot of slots) if (slot.kind === "separator") {
+    while (leftRoot + 1 < base.roots.length && base.roots[leftRoot + 1].tailFrom <= slot.from) leftRoot++;
+    while (rightRoot < base.roots.length && base.roots[rightRoot].sourceFrom < slot.to) rightRoot++;
+    neighbors.set(slot, { left: base.roots[leftRoot]?.id, right: base.roots[rightRoot]?.id });
+  }
+  for (const c2 of components) for (const o of c2.origins) {
+    if (o.kind === "root") {
+      dirty.set(o.id, c2);
+      changedRoots.push(o.id);
+    } else if (o.kind === "blank") blankDirty.set(o.id, c2);
+  }
+  const stepOf = (c2) => c2.witnesses[0].step;
+  const structuralStep = (c2) => c2.witnesses.find((w) => w.kind === "replace")?.step;
+  const deletion = components.flatMap((c2) => c2.witnesses).find((w) => w.kind === "replace" && w.before.to > w.before.from && w.after.to - w.after.from < w.before.to - w.before.from);
+  const noVisible = ledger.children.every((l) => empty(l.node));
+  let baseline = noVisible ? ledger.children.findIndex((l) => l.ref.kind === "base" && l.ref.origin.kind === "fallback") : -1;
+  if (noVisible && baseline < 0) baseline = 0;
+  const conversion = baseline >= 0 ? ledger.children[baseline] : void 0;
+  if (conversion?.ref.kind === "base" && conversion.ref.origin.kind === "blank") {
+    if (!deletion) fail();
+    const unit = slots.find((s) => s.kind === "blank" && s.id === (conversion.ref.kind === "base" && conversion.ref.origin.kind === "blank" ? conversion.ref.origin.id : -1));
+    if (!unit) fail();
+    removed.add(unit);
+    claims.push({ ...unit, kind: "baseline-conversion", step: deletion.step, unitId: unit.id, survivorChild: baseline });
+  }
+  const claim = (slot, c2) => {
+    removed.add(slot);
+    claims.push({
+      from: slot.from,
+      to: slot.to,
+      kind: slot.kind === "body" ? "body" : slot.kind === "terminator" ? "terminator" : "blank",
+      step: slot.kind === "terminator" ? structuralStep(c2) ?? fail() : stepOf(c2),
+      ...slot.kind === "blank" ? { unitId: slot.id } : { rootId: slot.id }
+    });
+  };
+  const raw = (slot) => {
+    const identity = { from: slot.from, to: slot.to, kind: slot.kind === "body" || slot.kind === "terminator" ? "root" : slot.kind === "separator" || slot.kind === "blank" ? "blank" : slot.kind, id: slot.id };
+    return { kind: slot.kind, piece: { kind: "raw", span: slot, identity }, anchor: slot.from, slot };
+  };
+  const generated = (kind, text2, anchor, step) => ({ kind, piece: { kind: "generated", text: text2 }, anchor, step });
+  for (const c2 of components) {
+    if (c2.finalRuns.length > 1) fail();
+    const spans = c2.origins.map((o) => originSpan(base, o)), birthAnchors = c2.births.map((b) => {
+      if (b.anchor.kind !== "base") return fail();
+      return b.anchor.anchor;
+    });
+    const anchor = Math.min(...spans.map((s) => s.from), ...birthAnchors);
+    if (!Number.isFinite(anchor)) fail();
+    const nodes = c2.finalRuns.flatMap((r2) => ledger.children.slice(r2.from, r2.to).map((l) => l.node));
+    const origins = c2.origins.filter((o) => o.kind === "root");
+    const originIds = new Set(origins.map((o) => o.id));
+    for (const o of origins) {
+      const r2 = base.roots[o.id];
+      if (base.protectedSources.some((p) => p.sourceFrom < r2.sourceTo && p.sourceTo > r2.sourceFrom)) fail();
+      if (!["paragraph_open", "heading_open", "bullet_list_open", "ordered_list_open", "blockquote_open", "table_open", "hr"].includes(r2.tokenType)) fail();
+    }
+    const rootSlots = slots.filter((s) => (s.kind === "body" || s.kind === "terminator") && originIds.has(s.id));
+    const terminal = rootSlots.filter((s) => s.kind === "terminator").at(-1);
+    let lastVisible = nodes.length - 1;
+    while (lastVisible >= 0 && empty(nodes[lastVisible])) lastVisible--;
+    const keepTerminal = lastVisible >= 0 ? terminal : void 0;
+    for (const s of rootSlots) if (s !== keepTerminal) claim(s, c2);
+    for (const s of slots) if (s.kind === "blank" && blankDirty.get(s.id) === c2) claim(s, c2);
+    for (const s of slots) if (s.kind === "separator") {
+      const { left, right } = neighbors.get(s);
+      if (left !== void 0 && right !== void 0 && dirty.get(left) === c2 && dirty.get(right) === c2) {
+        removed.add(s);
+        claims.push({ from: s.from, to: s.to, kind: "separator", unitId: s.id, step: structuralStep(c2) ?? fail() });
+      }
+    }
+    const atoms2 = [];
+    for (let n = 0; n < nodes.length; n++) {
+      const node = nodes[n], finalIndex = c2.finalRuns[0].from + n;
+      if (empty(node)) {
+        if (finalIndex !== baseline) atoms2.push(generated("blank", "\n", anchor, stepOf(c2)));
+        continue;
+      }
+      const output = render([node]);
+      if (output.family === "closed-literal") fail();
+      let text2 = output.text;
+      if (output.terminal === "content-eol") {
+        if (!text2.endsWith(output.eol)) fail();
+        text2 = text2.slice(0, -output.eol.length);
+      }
+      atoms2.push(generated("body", text2, anchor, stepOf(c2)));
+      if (n === lastVisible && keepTerminal) {
+        atoms2.push(raw(keepTerminal));
+        removed.add(keepTerminal);
+        if (n < nodes.length - 1) claims.push({ from: keepTerminal.to, to: keepTerminal.to, kind: "anchor", step: stepOf(c2) });
+      } else atoms2.push(generated("terminator", output.terminal === "content-eol" ? "\n" : "", anchor, stepOf(c2)));
+    }
+    if (!nodes.length && !c2.origins.length) continue;
+    const previous = insertions.get(anchor) ?? [];
+    insertions.set(anchor, [...previous, ...atoms2]);
+    const birth = c2.births[0];
+    claims.push({ from: anchor, to: anchor, kind: "anchor", step: stepOf(c2), ...birth ? { birth } : {} });
+  }
+  for (const [anchor] of insertions) {
+    const at = components.filter((c2) => c2.births.some((b) => b.anchor.kind === "base" && b.anchor.anchor === anchor) && !c2.origins.length);
+    if (at.length > 1) {
+      at.sort((a, b) => (a.finalRuns[0]?.from ?? Infinity) - (b.finalRuns[0]?.from ?? Infinity));
+      const atoms2 = [];
+      for (const c2 of at) for (const run of c2.finalRuns) for (let i = run.from; i < run.to; i++) {
+        const node = ledger.children[i].node;
+        if (empty(node)) {
+          if (i !== baseline) atoms2.push(generated("blank", "\n", anchor, stepOf(c2)));
+          continue;
+        }
+        const output = render([node]);
+        let text2 = output.text;
+        if (output.terminal === "content-eol") text2 = text2.slice(0, -output.eol.length);
+        atoms2.push(generated("body", text2, anchor, stepOf(c2)), generated("terminator", output.terminal === "content-eol" ? "\n" : "", anchor, stepOf(c2)));
+      }
+      insertions.set(anchor, atoms2);
+    }
+  }
+  const atoms = [];
+  for (const slot of slots) {
+    const added = insertions.get(slot.from);
+    if (added) {
+      atoms.push(...added);
+      insertions.delete(slot.from);
+    }
+    if (!removed.has(slot)) atoms.push(raw(slot));
+  }
+  const rest = [...insertions].sort((a, b) => a[0] - b[0]);
+  for (const [anchor, added] of rest) {
+    const i = atoms.findIndex((a) => a.anchor > anchor);
+    if (i < 0) atoms.push(...added);
+    else atoms.splice(i, 0, ...added);
+  }
+  const authorizedSeparator = (slot) => {
+    const { left, right } = neighbors.get(slot);
+    const c2 = (left === void 0 ? void 0 : dirty.get(left)) ?? (right === void 0 ? void 0 : dirty.get(right));
+    if (c2) return structuralStep(c2);
+    for (const component of components) for (const birth of component.births)
+      if (birth.anchor.kind === "base" && birth.anchor.slotIds.includes(slot.id)) return birth.step;
+    return void 0;
+  };
+  const entity = (a) => a.kind === "body" || a.kind === "protected";
+  const entities = atoms.map((a, i) => entity(a) ? i : -1).filter((i) => i >= 0);
+  const drop = /* @__PURE__ */ new Set(), before = /* @__PURE__ */ new Map();
+  for (let n = 0; n <= entities.length; n++) {
+    const l = n ? entities[n - 1] : -1, r2 = n < entities.length ? entities[n] : atoms.length;
+    const left = atoms[l], right = atoms[r2], run = atoms.slice(l + 1, r2);
+    const separators = run.filter((a) => a.kind === "separator");
+    const needed = !!left && !!right || left?.kind === "protected" || right?.kind === "protected";
+    const keep = needed ? separators[0] : void 0;
+    for (const a of separators) if (a !== keep) {
+      const step = a.slot && authorizedSeparator(a.slot);
+      if (step === void 0) fail();
+      drop.add(a);
+      claims.push({ from: a.slot.from, to: a.slot.to, kind: "separator", unitId: a.slot.id, step });
+    }
+    if (needed && !keep) {
+      const step = left?.step ?? right?.step;
+      if (step === void 0) fail();
+      const target = run.find((a) => a.kind === "blank") ?? right;
+      if (!target) fail();
+      before.set(target, [generated("separator", "\n", target.anchor, step)]);
+      claims.push({ from: target.anchor, to: target.anchor, kind: "anchor", step });
+    }
+    if (left?.kind === "body") {
+      const term = run.find((a) => a.kind === "terminator");
+      const needTerm = !!right || run.some((a) => a.kind === "blank");
+      if (term?.piece.kind === "generated") {
+        term.piece.text = needTerm || term.piece.text ? "\n" : "";
+      } else if (!term && needTerm) {
+        const target = atoms[l + 1];
+        const anchor = left.slot?.to ?? left.anchor, step = left.step ?? right?.step ?? run.find((a) => a.step !== void 0)?.step;
+        if (step === void 0) fail();
+        const termAtom = generated("terminator", "\n", anchor, step);
+        if (target) before.set(target, [termAtom, ...before.get(target) ?? []]);
+        else atoms.push(termAtom);
+        claims.push({ from: anchor, to: anchor, kind: "anchor", step });
+      }
+    }
+  }
+  const pieces = [];
+  for (const atom of atoms) {
+    for (const extra of before.get(atom) ?? []) pieces.push(extra.piece);
+    if (!drop.has(atom)) pieces.push(atom.piece);
+  }
+  const kept = pieces.flatMap((p) => p.kind === "raw" ? [p.identity] : []);
+  return {
+    claims,
+    kept,
+    pieces,
+    edits: [],
+    changedRoots: [...new Set(changedRoots)].sort((a, b) => a - b),
+    witnesses: components.flatMap((c2) => c2.witnesses)
+  };
+}
+function verifyRecipe(base, recipe) {
+  let at = 0, text2 = "", lastRaw = 0;
+  const edits = [];
+  const boundary2 = (p) => {
+    if (p < 0 || p > base.source.length || !Number.isInteger(p)) fail();
+    if (p > 0 && p < base.source.length && (base.source[p - 1] === "\r" && base.source[p] === "\n" || /[\uD800-\uDBFF]/.test(base.source[p - 1]) && /[\uDC00-\uDFFF]/.test(base.source[p]))) fail();
+  };
+  const flush = (to) => {
+    if (to !== at || text2) {
+      boundary2(at);
+      boundary2(to);
+      if (base.protectedSources.some((p) => at === to ? p.sourceFrom < at && at < p.sourceTo : p.sourceFrom < to && p.sourceTo > at)) fail();
+      let covered = at;
+      for (const c2 of recipe.claims.filter((c3) => c3.to > c3.from).sort((a, b) => a.from - b.from)) {
+        if (c2.from > covered) break;
+        if (c2.to > covered) covered = c2.to;
+      }
+      if (covered < to) fail();
+      if (to === at && !recipe.claims.some((c2) => c2.from <= at && c2.to >= at)) fail();
+      edits.push({ from: at, to, text: text2 });
+    }
+    at = to;
+    text2 = "";
+  };
+  for (const p of recipe.pieces) {
+    if (p.kind === "generated") {
+      text2 += p.text;
+      continue;
+    }
+    if (p.span.from < lastRaw || p.span.from !== p.identity.from || p.span.to !== p.identity.to) fail();
+    flush(p.span.from);
+    at = p.span.to;
+    lastRaw = at;
+  }
+  flush(base.source.length);
+  for (const c2 of recipe.claims) {
+    const witness = recipe.witnesses.find((w) => w.step === c2.step);
+    if (!Number.isInteger(c2.step) || !witness) fail();
+    if (c2.kind === "separator" || c2.kind === "baseline-conversion" || c2.kind === "terminator") {
+      if (witness.kind !== "replace") fail();
+    }
+    if (c2.kind === "blank" || c2.kind === "separator" || c2.kind === "baseline-conversion") {
+      const unit = c2.unitId === void 0 ? void 0 : base.layout.blankLines[c2.unitId];
+      if (!unit || unit.sourceFrom !== c2.from || unit.sourceTo !== c2.to) fail();
+      if (c2.kind === "separator" !== (unit.role === "separator")) fail();
+      if (c2.kind === "baseline-conversion" && (c2.survivorChild === void 0 || witness.before.to - witness.before.from <= witness.after.to - witness.after.from)) fail();
+    }
+  }
+  recipe.edits = edits;
+}
+function applyRecipe(base, recipe) {
+  const chunks = [];
+  let at = 0;
+  for (const edit of recipe.edits) {
+    chunks.push(base.source.slice(at, edit.from), edit.text);
+    at = edit.to;
+  }
+  chunks.push(base.source.slice(at));
+  return chunks.join("");
+}
+function applyStructuralTransaction(base, tr, render) {
+  const ledger = createLedger(base);
+  for (let i = 0; i < tr.steps.length; i++) {
+    const before = tr.docs[i], after = tr.docs[i + 1] ?? tr.doc, step = tr.steps[i];
+    const result = step.apply(before);
+    if (result.failed || !result.doc || after.type.schema !== base.doc.type.schema || !after.eq(result.doc)) fail();
+    advanceLedger(ledger, before, after, step, i);
+  }
+  tr.doc.check();
+  finishLedger(base, tr, ledger);
+  if (tr.doc.eq(base.doc)) {
+    const emission = (o) => {
+      const e = o.kind === "root" ? base.roots[o.id] : o.kind === "fallback" ? base.layout.fallback.emission : base.layout.blankLines[o.id].role === "empty-paragraph" ? base.layout.blankLines[o.id].emission : fail();
+      return { from: e.childFrom, to: e.childTo };
+    };
+    const stable = ledger.children.every((lane, i) => {
+      if (lane.ref.kind === "base") {
+        const e = emission(lane.ref.origin);
+        return e.from <= i && i < e.to;
+      }
+      return true;
+    });
+    const cancelled = ledger.components.filter((c2) => c2.parent === c2.id).every((c2) => {
+      if (!c2.origins.length) return !c2.finalRuns.length;
+      const ranges = c2.origins.map(emission).sort((a, b) => a.from - b.from);
+      return c2.finalRuns.length === 1 && c2.finalRuns[0].from === ranges[0].from && c2.finalRuns[0].to === ranges.at(-1).to && ranges.every((r2, i) => i === 0 || ranges[i - 1].to === r2.from);
+    });
+    if (stable && cancelled) return { source: base.source, edits: [], changedRoots: [], unchanged: true };
+  }
+  const recipe = makeRecipe(base, ledger, partitionSlots(base), render);
+  verifyRecipe(base, recipe);
+  return { source: applyRecipe(base, recipe), edits: recipe.edits, changedRoots: recipe.changedRoots, unchanged: false };
+}
+
+// src/source-fidelity.ts
 function createSourceSession(source, schema2) {
   const parsed = parseDocumentWithSourceCapture(source, schema2);
   if (!parsed.ok) return parsed;
@@ -6589,7 +7125,7 @@ function authorizeStepRoots(before, step, ownership, authorized) {
     throw new UnsupportedBlockTransaction();
   const a = before.resolve(from), b = before.resolve(to);
   if (splitsInlineText(a) || splitsInlineText(b)) throw new UnsupportedBlockTransaction();
-  if (step instanceof ReplaceStep) {
+  if (step instanceof ReplaceStep2) {
     if (step.structure || !a.sameParent(b) || !a.parent.inlineContent || step.slice.openStart || step.slice.openEnd)
       throw new UnsupportedBlockTransaction();
     let inline = true;
@@ -6611,7 +7147,7 @@ function changedNaturalRoots(base, tr, ownership) {
   const authorized = /* @__PURE__ */ new Set();
   for (let i = 0; i < tr.steps.length; i++) {
     const step = tr.steps[i], prototype = Object.getPrototypeOf(step);
-    if (prototype !== ReplaceStep.prototype && prototype !== AddMarkStep.prototype && prototype !== RemoveMarkStep.prototype)
+    if (prototype !== ReplaceStep2.prototype && prototype !== AddMarkStep2.prototype && prototype !== RemoveMarkStep2.prototype)
       throw new UnsupportedBlockTransaction();
     const before = tr.docs[i];
     if (before.childCount !== base.doc.childCount) throw new UnsupportedBlockTransaction();
@@ -6702,13 +7238,36 @@ function applySourceEdits(base, edits, ids, ownership) {
 function applySourceBlockTransaction(base, tr) {
   if (!tr.before.eq(base.doc)) return { ok: false, reason: "stale-document" };
   try {
+    if (classifyTransaction(base, tr) === "structural") {
+      const render = (nodes) => {
+        const rendered = nodes.map(rootRenderNode), doc2 = tr.doc.type.create(tr.doc.attrs, Fragment3.fromArray(rendered));
+        const text2 = serializeSourceRootMarkdown(doc2), last = rendered[rendered.length - 1];
+        return {
+          text: text2,
+          terminal: last.type.name === "table" || endsInTerminalHardbreak(last) ? "content-eol" : "none",
+          family: last.type.name === "table" ? "table" : ["paragraph", "heading", "bullet_list", "ordered_list", "blockquote", "horizontal_rule"].includes(last.type.name) ? "flow" : "closed-literal",
+          eol: "\n"
+        };
+      };
+      const result = applyStructuralTransaction(base, tr, render);
+      if (result.unchanged) return { ok: true, session: base, mode: "unchanged", edits: [], changedRoots: [] };
+      const parsed2 = createSourceSession(result.source, base.doc.type.schema);
+      if (!parsed2.ok || !parsed2.session.doc.eq(tr.doc)) return { ok: false, reason: "semantic-mismatch" };
+      return {
+        ok: true,
+        session: { ...parsed2.session, revision: base.revision + 1 },
+        mode: "root-render",
+        edits: result.edits,
+        changedRoots: result.changedRoots
+      };
+    }
     const ownership = indexSourceRoots(base);
     const changedRoots = changedNaturalRoots(base, tr, ownership);
     if (!changedRoots.length) {
       if (!tr.doc.eq(base.doc)) return { ok: false, reason: "unsupported-step" };
       return { ok: true, session: base, mode: "unchanged", edits: [], changedRoots: [] };
     }
-    if (tr.steps.length === 1 && tr.steps[0] instanceof ReplaceStep) {
+    if (tr.steps.length === 1 && tr.steps[0] instanceof ReplaceStep2) {
       const replay = EditorState2.create({ doc: base.doc }).tr.step(tr.steps[0]);
       if (!replay.doc.eq(tr.doc)) return { ok: false, reason: "unsupported-step" };
       const exact = applySourceTextTransactionWithEdit(base, replay);
@@ -6734,7 +7293,7 @@ function applySourceBlockTransaction(base, tr) {
       changedRoots
     };
   } catch (error) {
-    if (error instanceof UnsupportedBlockTransaction) return { ok: false, reason: "unsupported-step" };
+    if (error instanceof UnsupportedBlockTransaction || error instanceof UnsupportedSourceStructure) return { ok: false, reason: "unsupported-step" };
     return { ok: false, reason: "parse-error" };
   }
 }

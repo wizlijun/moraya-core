@@ -73,7 +73,7 @@ it.each([
  expect(r.edits).toHaveLength(1)
  expect(r.session.source.endsWith(raw.slice(b.roots[0]!.sourceTo))).toBe(true)
 })
-it.each([12,24,48])('production addMark across %i roots produces per-root steps without per-step document scans',count=>{
+it.each([12,24,48,80,160])('production addMark across %i roots produces per-root steps without per-step document scans',count=>{
  const source=Array.from({length:count},(_,i)=>'P'+i).join('\n\n')
  const base=open(source)
  const tr=transaction(base).addMark(1,base.doc.content.size-1,base.doc.type.schema.marks.strong!.create())
@@ -81,7 +81,12 @@ it.each([12,24,48])('production addMark across %i roots produces per-root steps 
  expect(tr.steps.every(step=>Object.getPrototypeOf(step)===AddMarkStep.prototype)).toBe(true)
  expect(tr.steps.every(step=>step.getMap().ranges.length===0)).toBe(true)
  const priorDocs=new Set(tr.docs)
- const originalForEach=PmNode.prototype.forEach,originalChild=PmNode.prototype.child
+ const originalForEach=PmNode.prototype.forEach,originalChild=PmNode.prototype.child,originalEq=Fragment.prototype.eq
+ const priorContents=new Set(tr.docs.map(doc=>doc.content));let wholeDocumentComparisons=0
+ const eqSpy=vi.spyOn(Fragment.prototype,'eq').mockImplementation(function(this:Fragment,other){
+  if(priorContents.has(this))wholeDocumentComparisons++
+  return originalEq.call(this,other)
+ })
  let inspectedTopChildren=0
  const eachSpy=vi.spyOn(PmNode.prototype,'forEach').mockImplementation(function(this:PmNode,callback){
   if(priorDocs.has(this))inspectedTopChildren+=this.childCount
@@ -92,13 +97,14 @@ it.each([12,24,48])('production addMark across %i roots produces per-root steps 
   return originalChild.call(this,index)
  })
  let result:SourceBlockResult
- try{result=applySourceBlockTransaction(base,tr)}finally{eachSpy.mockRestore();childSpy.mockRestore()}
+ try{result=applySourceBlockTransaction(base,tr)}finally{eachSpy.mockRestore();childSpy.mockRestore();eqSpy.mockRestore()}
  expect(result.ok).toBe(true);if(!result.ok)throw new Error(result.reason)
  expect(result.changedRoots).toEqual(Array.from({length:count},(_,i)=>i))
  expect(result.edits).toHaveLength(count)
  expect(result.session.source).toBe(Array.from({length:count},(_,i)=>'**P'+i+'**').join('\n\n'))
  // Count this adapter's old-doc child accesses, not wall time or PM's native findIndex loop.
  expect(inspectedTopChildren).toBeLessThanOrEqual(count*12+32)
+ expect(wholeDocumentComparisons).toBeLessThanOrEqual(1)
 })
 it('allows production multi-step marks around a synthetic gap but rejects a step that claims it',()=>{
  const base=open('A\n\n\nB'),strong=base.doc.type.schema.marks.strong!.create()
@@ -191,12 +197,9 @@ it('net-zero supported steps keep raw source and revision',()=>{
  tr.addMark(1,2,b.doc.type.schema.marks.strong!.create())
  const r=accept(b,tr);expect(r.mode).toBe('unchanged');expect(r.session).toBe(b)
 })
-it('rejects stale docs, root structure and attrs without source output',()=>{
+it('rejects stale docs and unsupported node attrs without source output',()=>{
  const b=open('A\n\nB')
  reject(b,EditorState.create({doc:open('X\n\nB').doc}).tr.insertText('Y',1,2))
- reject(b,transaction(b).split(2))
- reject(b,transaction(b).join(3))
- reject(b,transaction(b).delete(0,3))
  reject(b,transaction(b).setNodeMarkup(0,b.doc.type.schema.nodes.heading,{level:2}))
  const table=open('| A |\n| --- |\n| B |')
  reject(table,transaction(table).setNodeMarkup(2,undefined,

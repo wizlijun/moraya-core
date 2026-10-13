@@ -94,7 +94,9 @@ it('keeps complete list map, actual handler coordinates and independent tail ori
  const rejected=applySourceBlockTransaction(s,state.tr.insertText('X',8))
  expect(rejected.ok).toBe(false);expect('session'in rejected).toBe(false)
  const deletion=applySourceBlockTransaction(s,state.tr.delete(0,7))
- expect(deletion.ok).toBe(false);expect(s.source).toBe(source)
+ expect(deletion.ok).toBe(true);if(!deletion.ok)throw new Error(deletion.reason)
+ expect(deletion.session.source).toBe('\nB');expect(s.source).toBe(source)
+ expect(deletion.edits).toEqual([{from:0,to:5,text:''}])
 })
 it('distinguishes suffix and marker-only quote lines',()=>{
  expect(childNames('- A\n\n\n')).toEqual(['bullet_list','empty','empty'])
