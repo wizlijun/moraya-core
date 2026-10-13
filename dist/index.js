@@ -3258,13 +3258,13 @@ for (const name of ["list", "blockquote", "footnote_def"]) wrapCaptureRule(md.bl
         if (state.src.slice(start, start + marker.length) !== marker) throw new UnsupportedSourceCapture();
         from = start + marker.length;
         const padding = state.src.slice(from, read.e);
-        if (!/^[ \t]*$/.test(padding)) continue;
-        if (padding[0] === " ") from++;
-        place = emptyInline(collector, from, read.e, from === start + marker.length ? " " : "");
+        if (/^[ \t]*$/.test(padding)) {
+          if (padding[0] === " ") from++;
+          place = emptyInline(collector, from, read.e, from === start + marker.length ? " " : "");
+        }
       } else {
         from = name === "blockquote" ? read.b : read.body ?? read.b;
-        if (!/^[ \t]*$/.test(state.src.slice(from, read.e))) continue;
-        place = emptyInline(collector, from, read.e);
+        if (/^[ \t]*$/.test(state.src.slice(from, read.e))) place = emptyInline(collector, from, read.e);
       }
     } else if (name === "list" && read.first && read.first === state.tokens[index + 1] && read.first.type !== "paragraph_open" && read.body !== void 0 && read.prefix) {
       const at = rawPoint(collector.trace, read.body);
@@ -3282,14 +3282,18 @@ for (const name of ["list", "blockquote", "footnote_def"]) wrapCaptureRule(md.bl
       nestedBlanks.set(last, [{ level: token.level + 1, place, line: read.line }]);
       containerEnds.delete(last);
     }
-    let priorRight;
+    let priorRight, definitionLeft = false, definitionRight = false;
     for (const [blankIndex, blank] of blanks.entries()) {
       const previous = blanks[blankIndex - 1];
       const firstInRun = !previous || previous.line + 1 !== blank.line;
       let lastInRun = blank;
       for (let next = blankIndex + 1; firstInRun && blanks[next]?.line === lastInRun.line + 1; next++) lastInRun = blanks[next];
       const begin = blank.prefix[0], end = lastInRun.eol?.to ?? lastInRun.range.to;
-      const touchesDefinition = firstInRun && begin && "from" in begin && collector.protectedSources.some((p) => p.sourceTo === begin.from || p.sourceFrom === end);
+      if (firstInRun) {
+        definitionLeft = !!begin && "from" in begin && collector.protectedSources.some((p) => p.sourceTo === begin.from);
+        definitionRight = collector.protectedSources.some((p) => p.sourceFrom === end);
+      }
+      const touchesDefinition = firstInRun && (definitionLeft || definitionRight);
       const left = children2.filter((child) => child.to <= blank.line).at(-1), right = children2.find((child) => child.from > blank.line);
       if (touchesDefinition) {
         priorRight = right?.index;
@@ -3308,8 +3312,9 @@ for (const name of ["list", "blockquote", "footnote_def"]) wrapCaptureRule(md.bl
         range: blank.range,
         prefix: blank.line === read.line && name !== "blockquote" && read.prefix ? read.prefix : blank.prefix,
         ...blank.eol ? { eol: blank.eol } : {},
-        leftBody: !!left,
-        rightBody: !!right
+        leftBody: !!left || definitionLeft,
+        rightBody: !!right || definitionRight,
+        leftSeparator: definitionLeft || definitionRight
       } });
       nestedBlanks.set(target, items);
     }
@@ -8808,7 +8813,7 @@ function prepareEmptyBodyTransaction(base, tr, facts) {
       case "nested-blank": {
         const eol = place.eol ? base.source.slice(place.eol.from, place.eol.to) : base.source.slice(root.sourceFrom, place.range.from).match(/\r\n|\r|\n/g)?.at(-1) ?? "\n";
         const prefix = renderPrefix(base.source, place.prefix);
-        const before = place.leftBody && !place.rightBody ? eol + prefix : "";
+        const before = place.leftBody && !place.rightBody && !place.leftSeparator ? eol + prefix : "";
         const after2 = place.rightBody ? eol + prefix : "";
         edits = [{ ...place.range, text: before + body + after2 }];
         break;

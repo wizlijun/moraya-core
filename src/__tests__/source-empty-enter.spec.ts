@@ -112,3 +112,11 @@ it.each([
  ['[^e]:\n    B',[0,0],'[^e]:X\n    \n    B'],
  ['> - \n>   B',[0,0,0,0],'> - X\n>   \n>   B'],
 ] as const)('first marker blank uses continuation prefix for its new separator %j',(raw,path,expected)=>{typeEmpty(raw,path,'X',expected)});
+
+it.each([
+ ['> A\n>\n> [ref]: /u\n>\n>\n',[0,1],'> A\n>\n> [ref]: /u\n>\n>X\n','> A\n>\n> [ref]: /u\n>\n>XY\n'],
+ ['> A\n>\n>\n> [ref]: /u\n',[0,1],'> A\n>\n>X\n>\n> [ref]: /u\n','> A\n>\n>XY\n>\n> [ref]: /u\n'],
+ ['> [ref]: /u\n>\n>\n',[0,0],'> [ref]: /u\n>\n>X\n','> [ref]: /u\n>\n>XY\n'],
+] as const)('definition-adjacent first text continues in the saved session %j',(raw,path,first,second)=>{
+ sequence(raw,path,0,[()=>text('X'),()=>((state,dispatch)=>{dispatch?.(state.tr.insertText('Y'));return true})],[first,second]);
+});

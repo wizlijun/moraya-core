@@ -12,7 +12,7 @@ export type EmptyPlace=
  | Readonly<{kind:'prepend';at:number;eol:RawRange|undefined;continuation:SourcePrefix}>
  | Readonly<{kind:'layout';origin:{kind:'blank';id:number}|{kind:'fallback'}}>
  | Readonly<{kind:'nested-blank';range:RawRange;eol?:RawRange;prefix:SourcePrefix;
-     leftBody:boolean;rightBody:boolean}>;
+     leftBody:boolean;rightBody:boolean;leftSeparator:boolean}>;
 export type EmptyBody=Readonly<{
  pmAt:number; parent:PmNode; rootId?:number; place:EmptyPlace;
 }>;
@@ -93,9 +93,9 @@ export function prepareEmptyBodyTransaction(base:SourceSession,tr:Transaction,fa
    case 'nested-blank':{
     const eol=place.eol?base.source.slice(place.eol.from,place.eol.to):base.source.slice(root!.sourceFrom,place.range.from).match(/\r\n|\r|\n/g)?.at(-1)??'\n';
     const prefix=renderPrefix(base.source,place.prefix);
-    // Between two visible bodies the first existing blank is already a
-    // separator. Trailing blanks need a new separator before materialization.
-    const before=place.leftBody&&!place.rightBody?eol+prefix:'';
+    // Actual definition boundaries also reserve the first owned blank as
+    // a separator, including definition-only containers without visible children.
+    const before=place.leftBody&&!place.rightBody&&!place.leftSeparator?eol+prefix:'';
     const after=place.rightBody?eol+prefix:'';
     edits=[{...place.range,text:before+body+after}];break;
    }

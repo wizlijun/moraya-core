@@ -229,6 +229,7 @@ type EmptyPlace = Readonly<{
     prefix: SourcePrefix;
     leftBody: boolean;
     rightBody: boolean;
+    leftSeparator: boolean;
 }>;
 type EmptyBody = Readonly<{
     pmAt: number;

@@ -120,6 +120,9 @@ it.each([
  ['> A\r\n>\r\n',[2,1],'> A\r\n>\r\n>X\r\n'],
  ['- # H\r\n',[2,0,0],'- X\r\n  # H\r\n'],
  ['[^e]:\r\n',[2,0],'[^e]:X\r\n'],
+ ['> A\n>\n> [ref]: /u\n>\n>\n',[2,1],'> A\n>\n> [ref]: /u\n>\n>X\n'],
+ ['> A\n>\n>\n> [ref]: /u\n',[2,1],'> A\n>\n>X\n>\n> [ref]: /u\n'],
+ ['> [ref]: /u\n>\n>\n',[2,0],'> [ref]: /u\n>\n>X\n'],
 ] as const)('replays empty facts after prefix byte and line changes %j',(tail,path,expected)=>{
  const b=open('A\r\n\r\n'+tail),r=prepareFileSourceEdits(b,{expectedRevision:b.revision,edits:[{from:0,to:1,removed:'A',text:'Longer\r\n\r\nNew'}]});
  expect(r.ok).toBe(true);if(!r.ok)throw Error(r.reason);
@@ -176,4 +179,21 @@ it('only a complete raw TAB indent boundary can certify a nested blank',()=>{
  expect(r.ok,r.ok?undefined:r.reason).toBe(true);if(!r.ok)throw Error(r.reason);
  expect(r.session.doc.eq(tr.doc)).toBe(true);expect(r.session.source).toBe('- A\n  - B\n \t\n \tX\n');
  expect(markdown.parseMarkdown(complete.source).firstChild!.firstChild!.lastChild!.firstChild!.childCount).toBe(1);
+});
+
+
+it.each([
+ ['> A\n>\n> [ref]: /u\n>\n>\n',5,'> A\n>\n> [ref]: /u\n>\n>X\n',21,'X'],
+ ['> A\n>\n>\n> [ref]: /u\n',5,'> A\n>\n>X\n>\n> [ref]: /u\n',7,'X\n>'],
+ ['> [ref]: /u\n>\n>\n',2,'> [ref]: /u\n>\n>X\n',15,'X'],
+] as const)('definition-adjacent empty body preserves exact protected bytes %j',(raw,pos,expected,rawAt,text)=>{
+ const b=open(raw),tr=EditorState.create({doc:b.doc}).tr.insertText('X',pos),r=applySourceBlockTransaction(b,tr);
+ expect(r.ok,r.ok?undefined:r.reason).toBe(true);if(!r.ok)throw Error(r.reason);
+ expect(r.session.doc.eq(tr.doc)).toBe(true);expect(r.session.source).toBe(expected);
+ expect(r.edits).toEqual([{from:rawAt,to:rawAt,text}]);expect(b.protectedSources).toHaveLength(1);
+ expect(r.session.protectedSources).toEqual(b.protectedSources.map(p=>{
+  const shift=rawAt<=p.sourceFrom?text.length:0;
+  expect(expected.slice(p.sourceFrom+shift,p.sourceTo+shift)).toBe(raw.slice(p.sourceFrom,p.sourceTo));
+  return {...p,sourceFrom:p.sourceFrom+shift,sourceTo:p.sourceTo+shift};
+ }));
 });
