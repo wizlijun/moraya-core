@@ -23,7 +23,7 @@ export type EmptyAttempt =
  | Readonly<{kind:'unsupported';reason:string}>
  | Readonly<{kind:'ready';recipe:EmptyRecipe}>;
 
-import {ReplaceStep} from 'prosemirror-transform';
+import {ReplaceStep,AddMarkStep,RemoveMarkStep} from 'prosemirror-transform';
 import {capturedEmptyBodies,serializeSourceInlineBody,sourceRootHasClosedFences} from './markdown';
 import {prepareEmptyParagraphEdits} from './source-structure';
 
@@ -31,6 +31,31 @@ function renderPrefix(source:string,prefix:SourcePrefix):string {
  return prefix.map(p=>'spaces' in p?' '.repeat(p.spaces):source.slice(p.from,p.to)).join('');
 }
 function escapeEmptyText(node:PmNode):string {return serializeSourceInlineBody(node)}
+
+/** A natural body can become temporarily empty inside one real inline chain.
+ * This only declines the baseline-empty producer; the complete chain must still
+ * pass the ordinary inline source guard and recipe. */
+function previouslyNonemptyBody(base:SourceSession,tr:Transaction):boolean {
+ const first=tr.steps[0];
+ if(!first||![ReplaceStep.prototype,AddMarkStep.prototype,RemoveMarkStep.prototype].includes(Object.getPrototypeOf(first)))return false;
+ const range=first as ReplaceStep,a=base.doc.resolve(range.from),parent=a.parent;
+ if(!['paragraph','heading'].includes(parent.type.name)||!parent.content.size||!a.depth)return false;
+ let from=a.start(),to=a.end();
+ if(!base.roots.some(root=>root.pmFrom<=a.before()&&root.pmTo>=to+1))return false;
+ for(let i=0;i<tr.steps.length;i++){
+  const step=tr.steps[i] as ReplaceStep|AddMarkStep|RemoveMarkStep;
+  if(![ReplaceStep.prototype,AddMarkStep.prototype,RemoveMarkStep.prototype].includes(Object.getPrototypeOf(step)))return false;
+  const before=tr.docs[i];if(!before)return false;
+  const left=before.resolve(step.from),right=before.resolve(step.to);
+  if(step.from<from||step.to>to||!left.sameParent(right)||left.start()!==from||left.end()!==to||!parent.sameMarkup(left.parent))return false;
+  if(step instanceof ReplaceStep){
+   if(step.slice.openStart||step.slice.openEnd||(step as ReplaceStep & {structure:boolean}).structure)return false;
+   let inline=true;step.slice.content.forEach(node=>{if(!node.isInline)inline=false});if(!inline)return false;
+  }
+  const map=step.getMap();from=map.map(from,-1);to=map.map(to,1);
+ }
+ return true;
+}
 
 export function prepareEmptyBodyTransaction(base:SourceSession,tr:Transaction,facts:readonly EmptyBody[]):EmptyAttempt {
  const reject=(reason:string):EmptyAttempt=>({kind:'unsupported',reason});
@@ -48,7 +73,7 @@ export function prepareEmptyBodyTransaction(base:SourceSession,tr:Transaction,fa
    if(parent.isTextblock&&parent.content.size===0)emptyInput=true;
   }catch{return reject('invalid-range')}
  }
- if(!emptyInput)return {kind:'not-empty'};
+ if(!emptyInput||previouslyNonemptyBody(base,tr))return {kind:'not-empty'};
  const first=tr.steps[0] as ReplaceStep;
  try{
   if(tr.docs.length!==tr.steps.length||Object.getPrototypeOf(first)!==ReplaceStep.prototype

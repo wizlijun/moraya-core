@@ -8905,7 +8905,7 @@ function prepareInlineRecipe(base, tr, facts) {
 }
 
 // src/source-empty-body.ts
-import { ReplaceStep as ReplaceStep3 } from "prosemirror-transform";
+import { ReplaceStep as ReplaceStep3, AddMarkStep as AddMarkStep3, RemoveMarkStep as RemoveMarkStep3 } from "prosemirror-transform";
 
 // src/source-structure.ts
 import { AddMarkStep as AddMarkStep2, RemoveMarkStep as RemoveMarkStep2, ReplaceStep as ReplaceStep2, ReplaceAroundStep, AttrStep, AddNodeMarkStep, RemoveNodeMarkStep } from "prosemirror-transform";
@@ -9587,6 +9587,34 @@ function renderPrefix(source, prefix) {
 function escapeEmptyText(node) {
   return serializeSourceInlineBody(node);
 }
+function previouslyNonemptyBody(base, tr) {
+  const first = tr.steps[0];
+  if (!first || ![ReplaceStep3.prototype, AddMarkStep3.prototype, RemoveMarkStep3.prototype].includes(Object.getPrototypeOf(first))) return false;
+  const range = first, a = base.doc.resolve(range.from), parent = a.parent;
+  if (!["paragraph", "heading"].includes(parent.type.name) || !parent.content.size || !a.depth) return false;
+  let from = a.start(), to = a.end();
+  if (!base.roots.some((root) => root.pmFrom <= a.before() && root.pmTo >= to + 1)) return false;
+  for (let i = 0; i < tr.steps.length; i++) {
+    const step = tr.steps[i];
+    if (![ReplaceStep3.prototype, AddMarkStep3.prototype, RemoveMarkStep3.prototype].includes(Object.getPrototypeOf(step))) return false;
+    const before = tr.docs[i];
+    if (!before) return false;
+    const left = before.resolve(step.from), right = before.resolve(step.to);
+    if (step.from < from || step.to > to || !left.sameParent(right) || left.start() !== from || left.end() !== to || !parent.sameMarkup(left.parent)) return false;
+    if (step instanceof ReplaceStep3) {
+      if (step.slice.openStart || step.slice.openEnd || step.structure) return false;
+      let inline = true;
+      step.slice.content.forEach((node) => {
+        if (!node.isInline) inline = false;
+      });
+      if (!inline) return false;
+    }
+    const map = step.getMap();
+    from = map.map(from, -1);
+    to = map.map(to, 1);
+  }
+  return true;
+}
 function prepareEmptyBodyTransaction(base, tr, facts) {
   const reject = (reason) => ({ kind: "unsupported", reason });
   let emptyInput = false;
@@ -9607,7 +9635,7 @@ function prepareEmptyBodyTransaction(base, tr, facts) {
       return reject("invalid-range");
     }
   }
-  if (!emptyInput) return { kind: "not-empty" };
+  if (!emptyInput || previouslyNonemptyBody(base, tr)) return { kind: "not-empty" };
   const first = tr.steps[0];
   try {
     if (tr.docs.length !== tr.steps.length || Object.getPrototypeOf(first) !== ReplaceStep3.prototype || !tr.before.eq(base.doc) || !tr.docs[0].eq(base.doc) || first.structure || first.from !== first.to || first.slice.openStart || first.slice.openEnd || !first.slice.size) return reject("empty-step");
@@ -9983,7 +10011,7 @@ function prepareRawFileSourceEdits(base, input) {
 // src/source-fidelity.ts
 import { Fragment as Fragment4, Slice as Slice2 } from "prosemirror-model";
 import { EditorState as EditorState2 } from "prosemirror-state";
-import { AddMarkStep as AddMarkStep3, RemoveMarkStep as RemoveMarkStep3, ReplaceStep as ReplaceStep4, Mapping } from "prosemirror-transform";
+import { AddMarkStep as AddMarkStep4, RemoveMarkStep as RemoveMarkStep4, ReplaceStep as ReplaceStep4, Mapping } from "prosemirror-transform";
 function prepareFileSourceEdits(base, input) {
   return prepareRawFileSourceEdits(base, input);
 }
@@ -10225,7 +10253,7 @@ function changedNaturalRoots(base, tr, ownership) {
   const authorized = /* @__PURE__ */ new Set();
   for (let i = 0; i < tr.steps.length; i++) {
     const step = tr.steps[i], prototype = Object.getPrototypeOf(step);
-    if (prototype !== ReplaceStep4.prototype && prototype !== AddMarkStep3.prototype && prototype !== RemoveMarkStep3.prototype)
+    if (prototype !== ReplaceStep4.prototype && prototype !== AddMarkStep4.prototype && prototype !== RemoveMarkStep4.prototype)
       throw new UnsupportedBlockTransaction();
     const before = tr.docs[i];
     if (before.childCount !== base.doc.childCount) throw new UnsupportedBlockTransaction();
@@ -10324,7 +10352,7 @@ function applySourceEdits(base, edits, ids, ownership) {
 function plainMarkBody(base, tr) {
   if (tr.steps.length !== 1) return void 0;
   const step = tr.steps[0];
-  if (!(step instanceof AddMarkStep3 || step instanceof RemoveMarkStep3) || !["strong", "em"].includes(step.mark.type.name)) return void 0;
+  if (!(step instanceof AddMarkStep4 || step instanceof RemoveMarkStep4) || !["strong", "em"].includes(step.mark.type.name)) return void 0;
   const from = base.doc.resolve(step.from), to = base.doc.resolve(step.to);
   if (!from.sameParent(to) || !["paragraph", "heading"].includes(from.parent.type.name)) return void 0;
   const plain = (node) => {

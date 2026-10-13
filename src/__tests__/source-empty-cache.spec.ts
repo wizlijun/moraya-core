@@ -101,8 +101,13 @@ it.each(['later-empty','emptied-earlier','created-earlier'] as const)('audits ev
  expect(tr.docs[1]!.resolve((tr.steps[1] as ReplaceStep).from).parent.content.size).toBe(0);
  const spy=vi.spyOn(markdown,'serializeSourceRootMarkdown');
  try{
-  const result=applySourceBlockTransaction(b,tr);
-  expect(result).toEqual({ok:false,reason:'unsupported-step'});
+  const steps=[...tr.steps],docs=[...tr.docs],result=applySourceBlockTransaction(b,tr);
+  if(kind==='emptied-earlier'){
+   expect(result.ok).toBe(true);if(!result.ok)throw Error(result.reason);
+   expect(result.session.source).toBe('| H | J |\n| --- | --- |\n| X |   |\n');
+   expect(result.edits).toEqual([{from:26,to:27,text:'X'}]);
+   expect(result.session.doc.eq(tr.doc)).toBe(true);expect(tr.steps).toEqual(steps);expect(tr.docs).toEqual(docs);
+  }else expect(result).toEqual({ok:false,reason:'unsupported-step'});
   expect(spy).not.toHaveBeenCalled();expect(JSON.stringify(b)).toBe(snapshot);
  }finally{spy.mockRestore()}
 });
