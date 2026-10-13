@@ -6036,6 +6036,16 @@ function createSourceSession(source, schema2) {
 function splitsSurrogate(text2, offset) {
   return offset > 0 && offset < text2.length && /[\uD800-\uDBFF]/.test(text2[offset - 1]) && /[\uDC00-\uDFFF]/.test(text2[offset]);
 }
+function splitsTextAt(doc2, pos) {
+  const resolved = doc2.resolve(pos);
+  let split = false;
+  resolved.parent.forEach((node, offset) => {
+    if (node.isText && resolved.parentOffset > offset && resolved.parentOffset < offset + node.nodeSize) {
+      split = split || splitsSurrogate(node.text, resolved.parentOffset - offset);
+    }
+  });
+  return split;
+}
 function boundary(span, pos) {
   if (pos === span.pmFrom) return span.sourceFrom;
   if (pos === span.pmTo) return span.sourceTo;
@@ -6045,18 +6055,22 @@ function boundary(span, pos) {
 function applySourceTextTransaction(base, tr) {
   if (!tr.before.eq(base.doc)) return { ok: false, reason: "stale-document" };
   if (tr.steps.length !== 1) return { ok: false, reason: "unsupported-step" };
+  if (tr.storedMarksSet) return { ok: false, reason: "unsupported-step" };
   const step = tr.steps[0].toJSON();
   if (step.stepType !== "replace" || step.structure) return { ok: false, reason: "unsupported-step" };
   const { from, to } = step;
-  const paragraph2 = base.doc.firstChild;
-  if (from < 1 || to > paragraph2.nodeSize - 1 || to < from || tr.doc.childCount !== 1 || tr.doc.firstChild?.type.name !== "paragraph" || step.slice?.openStart || step.slice?.openEnd || step.slice?.content?.some((node) => node.type !== "text")) {
+  const $from = base.doc.resolve(from), $to = base.doc.resolve(to);
+  if ($from.depth !== 1 || !$from.sameParent($to) || $from.parent.type.name !== "paragraph" || to < from || step.slice?.openStart || step.slice?.openEnd || step.slice?.content?.some((node) => node.type !== "text")) {
     return { ok: false, reason: "unsupported-step" };
   }
-  if (splitsSurrogate(paragraph2.textContent, from - 1) || splitsSurrogate(paragraph2.textContent, to - 1)) {
+  if (splitsTextAt(base.doc, from) || splitsTextAt(base.doc, to)) {
     return { ok: false, reason: "unmapped-range" };
   }
   const spans = base.textSpans.filter((span) => from === to ? span.pmFrom <= from && span.pmTo >= to : span.pmTo > from && span.pmFrom < to);
   if (!spans.length) return { ok: false, reason: "unmapped-range" };
+  if (from < to && (spans[0].pmFrom > from || spans[spans.length - 1].pmTo < to || spans.some((span, i) => i > 0 && spans[i - 1].pmTo !== span.pmFrom))) {
+    return { ok: false, reason: "unmapped-range" };
+  }
   if (from === to && spans.some((span) => boundary(span, from) !== boundary(spans[0], from))) {
     return { ok: false, reason: "unmapped-range" };
   }

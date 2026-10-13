@@ -118,3 +118,68 @@ it('actual Moraya hook has the same semantics for all five capture fixtures', ()
     }
   }
 })
+
+it('rejects stored-mark intent even with an otherwise mapped text step',()=>{
+ const base=session('甲乙'),tr=EditorState.create({doc:base.doc}).tr.insertText('丙',1,2)
+ tr.setStoredMarks([base.doc.type.schema.marks.strong!.create()])
+ const r=applySourceTextTransaction(base,tr)
+ expect(r).toEqual({ok:false,reason:'unsupported-step'})
+ expect(base.source).toBe('甲乙')
+})
+function replaceAt(source:string,needle:string,text:string,occurrence=0) {
+ const base=session(source);const positions:number[]=[]
+ base.doc.descendants((n,p)=>{if(n.isText){let at=-1;while((at=n.text!.indexOf(needle,at+1))>=0)positions.push(p+at)}})
+ const from=positions[occurrence]!;expect(from).toBeDefined()
+ const tr=EditorState.create({doc:base.doc}).tr.insertText(text,from,from+needle.length)
+ return {base,result:applySourceTextTransaction(base,tr)}
+}
+it('second repeated paragraph maps by PM provenance',()=>{
+ const s='甲 &amp; \\* 😀。\r\n\r\n甲 &amp; \\* 😀。'
+ const {result}=replaceAt(s,'甲','乙',1)
+ expect(result.ok).toBe(true);if(result.ok)expect(result.session.source)
+  .toBe('甲 &amp; \\* 😀。\r\n\r\n乙 &amp; \\* 😀。')
+})
+it.each(['首甲。$x$ 后乙。','首甲。[^n]后乙。\n\n[^n]: 注。',
+ '首甲。{>>注<<}后乙。','首甲。<img src="x">后乙。'])('edits before/after inline atom: %s',s=>{
+ for(const [needle,text] of [['甲','丙'],['乙','丁']]) {
+  const {result}=replaceAt(s,needle!,text!);expect(result.ok).toBe(true)
+  if(result.ok)expect(result.session.source).toBe(s.replace(needle!,text!))
+ }
+})
+it('keeps unknown and zero-width bytes around mapped text',()=>{
+ const s='保留\u200B。\n\n目标甲。\n\n[ref]: <https://example.com> "原题"\n'
+ const {result}=replaceAt(s,'甲','乙');expect(result.ok).toBe(true)
+ if(result.ok)expect(result.session.source).toBe(s.replace('甲','乙'))
+})
+it('opaque literal edit fails without a writable result',()=>{
+ const {base,result}=replaceAt('```mermaid\n甲\n```\n\n保持。','甲','乙')
+ expect(result.ok).toBe(false);expect('session' in result).toBe(false)
+ expect(base.source).toBe('```mermaid\n甲\n```\n\n保持。')
+})
+
+it.each(['首甲。$x$ 后乙。', '首甲。[^n]后乙。\n\n[^n]: 注。',
+  '首甲。{>>注<<}后乙。', '首甲。<img src="x">后乙。'])('rejects replacement across an inline atom: %s', source => {
+  const base = session(source)
+  const atoms: number[] = []
+  base.doc.descendants((node, pos) => { if (node.isAtom && node.isInline && !node.isText) atoms.push(pos) })
+  expect(atoms.length).toBeGreaterThan(0)
+  const pos = atoms[0]!
+  const tr = EditorState.create({doc: base.doc}).tr.replaceWith(pos - 1, pos + 2, base.doc.type.schema.text('丁'))
+  const result = applySourceTextTransaction(base, tr)
+  expect(result).toEqual({ok:false,reason:'unmapped-range'})
+  expect('session' in result).toBe(false)
+  expect(base.source).toBe(source)
+})
+it('edits text after CRLF with original bytes', () => {
+  const {result} = replaceAt('甲\r\n乙', '乙', '丙')
+  expect(result.ok).toBe(true)
+  if (result.ok) expect(result.session.source).toBe('甲\r\n丙')
+})
+it('rejects text replacement inside list containers', () => {
+  for (const source of ['* 甲\n* 乙']) {
+    const {result} = replaceAt(source, '甲', '丙')
+    expect(result.ok).toBe(false)
+    expect('session' in result).toBe(false)
+    if (!result.ok) expect(['unsupported-step', 'unmapped-range']).toContain(result.reason)
+  }
+})
