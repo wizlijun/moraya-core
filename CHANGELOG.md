@@ -4,6 +4,8 @@ All notable changes to `@moraya/core` are documented here. SemVer.
 
 ## Unreleased
 
+- A single point-note replacement can consume a certified, unmarked text range in one source edit, preserving its surrounding bytes. Atom, annotation and unmapped ranges remain rejected. / 点批注可用单个替换步骤消耗已证明、无格式标记的文本范围，保留周围原文；原子节点、批注及无映射范围仍拒绝。
+
 - Editor factories can configure the final schema, provide the first captured state, and own transaction admission without an intermediate legacy parse. Default consumers retain the existing initialization and dispatch behavior. / 编辑器工厂可在首次挂载前配置最终 schema、直接提供捕获状态并接管事务准入，无需先安装旧解析结果；默认调用路径保持原行为。
 
 - Add the isolated `source-history` entry with reversible raw/binding and table-layout Steps, strict JSON payloads, and synchronous failure scopes. Rich list commands can prepare exact boundary comments before source validation, including nested list seams. / 新增独立历史载荷入口与严格可逆校验；富文本列表操作可在保真校验前补充必要边界注释（含嵌套列表）。文件控制器与界面接线后续实现。 Single wide mark Steps may cross certified unchanged synthetic blank paragraphs without shrinking their original range. / 单个宽范围格式步骤可跨越已证明未变的空段，仍完整审计原范围。

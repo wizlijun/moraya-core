@@ -157,7 +157,12 @@ function preparePointRecipe(base:SourceSession,tr:Transaction,facts:InlineRecipe
   if(step.slice.content.childCount!==1||!next||!canonicalNote(next)||next.type!==old.type||!sameMarks(next.marks,old.marks))return no
   return {ok:true,edits:[noteEdit(base,fact,next.attrs.note)],changedBodies:[fact.body]}
  }
- if(step.from!==step.to||step.slice.content.childCount!==1||!next||!canonicalNote(next)||next.marks.length)return no
+ if(step.slice.content.childCount!==1||!next||!canonicalNote(next)||next.marks.length)return no
+ if(step.from!==step.to){
+  let plain=true
+  a.parent.nodesBetween(a.parentOffset,b.parentOffset,node=>{if(!node.isText||node.marks.length)plain=false})
+  if(!plain||facts.critic.some(c=>step.from<c.pmTo&&step.to>c.pmFrom)||facts.atoms.some(c=>step.from<c.pmTo&&step.to>c.pmFrom))return no
+ }
  const body=facts.bodies.find(f=>f.pmFrom<=step.from&&f.pmTo>=step.to),range=rawRange(base,step.from,step.to)
  if(!body||!range||range.from<body.sourceFrom||range.to>body.sourceTo)return no
  return {ok:true,edits:[{...range,text:'{>>'+next.attrs.note+'<<}'}],changedBodies:[body.body]}

@@ -7,6 +7,28 @@ function apply(base:SourceSession,tr:ReturnType<typeof EditorState.create>['tr']
  const r=applySourceBlockTransaction(base,tr);expect(r.ok,r.ok?undefined:r.reason+" expected="+JSON.stringify(expected)).toBe(true);if(!r.ok)throw Error(r.reason);
  expect(r.session.source).toBe(expected);expect(r.session.doc.eq(tr.doc)).toBe(true);return r;
 }
+it.each([
+ ['/note\n',[0],'/note','{>><<}\n'],
+ ['\uFEFF> /note\r\n>\r\n> [r]: /u\r\n',[0,0],'/note','\uFEFF> {>><<}\r\n>\r\n> [r]: /u\r\n'],
+ ['Before plain after\n',[0],'plain','Before {>><<} after\n'],
+] as const)('point replacement consumes only a mapped plain text range: %s',(raw,path,text,expected)=>{
+ const base=open(raw),parent=base.doc.resolve(pos(base.doc,path)).parent;
+ const from=pos(base.doc,path)+parent.textContent.indexOf(text),to=from+text.length;
+ const tr=EditorState.create({doc:base.doc}).tr.replaceWith(from,to,base.doc.type.schema.nodes.note_anchor!.create({note:''}));
+ const spy=vi.spyOn(markdown,'serializeSourceRootMarkdown');try{
+  const result=apply(base,tr,expected);expect(result.edits).toHaveLength(1);expect(spy).not.toHaveBeenCalled();expect(base.source).toBe(raw);
+ }finally{spy.mockRestore()}
+});
+it.each(['A{>>old<<}B\n','A$x$B\n','{==plain==}{>>old<<}\n','**plain**\n'])('point replacement rejects atoms, Critic and marks: %s',raw=>{
+ const base=open(raw),state=EditorState.create({doc:base.doc});
+ const tr=state.tr.replaceWith(1,base.doc.content.size-1,state.schema.nodes.note_anchor!.create({note:''}));
+ expect(applySourceBlockTransaction(base,tr).ok).toBe(false);expect(base.source).toBe(raw);
+});
+it('the point recipe grants no cross-body replacement',()=>{
+ const base=open('A\n\nB\n'),state=EditorState.create({doc:base.doc});
+ const tr=state.tr.replaceWith(1,base.doc.content.size-1,state.schema.nodes.note_anchor!.create({note:''}));
+ expect(prepareInlineRecipe(base,tr,markdown.capturedInlineRecipeFacts(base)!).ok).toBe(false);
+});
 it('annotation note chain changes only actual payload',()=>{
  const raw='> {==Alpha _Beta_==}{>>原注<<}\n',b=open(raw),from=pos(b.doc,[0,0]),to=from+10;
  const type=b.doc.type.schema.marks.annotation!;
