@@ -2719,13 +2719,14 @@ function traceConsumedLines(trace, read, actual) {
   const text2 = chunks.join("");
   return text2 === actual ? { text: text2, pieces } : void 0;
 }
-function traceTableRow(trace, from, to, actual) {
+function traceTableRow(trace, from, to, actual, onEmpty) {
   const row = sliceTrace(trace, from, to), left = row.text.length - row.text.trimStart().length;
   const trimmed = sliceTrace(row, left, left + row.text.trim().length);
-  const cells = [];
+  const cells = [], bounds = [];
   let start = 0, escaped = false;
   let edits = [];
   const append = (end) => {
+    bounds.push({ from: from + left + start, to: from + left + end });
     cells.push(editTrace(sliceTrace(trimmed, start, end), edits));
     edits = [];
   };
@@ -2741,8 +2742,15 @@ function traceTableRow(trace, from, to, actual) {
     escaped = ch === "\\";
   }
   append(trimmed.text.length);
-  if (cells[0]?.text === "") cells.shift();
-  if (cells[cells.length - 1]?.text === "") cells.pop();
+  if (cells[0]?.text === "") {
+    cells.shift();
+    bounds.shift();
+  }
+  const closingPipe = cells[cells.length - 1]?.text === "";
+  if (closingPipe) {
+    cells.pop();
+    bounds.pop();
+  }
   const projected = actual.map((value, i) => {
     const cell = cells[i];
     if (!cell) return void 0;
@@ -2750,6 +2758,10 @@ function traceTableRow(trace, from, to, actual) {
     return sliceTrace(cell, leading, leading + cell.text.trim().length);
   });
   if (projected.some((cell, i) => (cell?.text ?? "") !== actual[i])) return void 0;
+  for (let slot = 0; slot < actual.length; slot++) if (actual[slot] === "") {
+    const bound = bounds[slot], rowEnd = from + left + trimmed.text.length;
+    onEmpty?.({ slot, from: bound?.from ?? rowEnd, to: bound?.to ?? rowEnd, missing: !bound, present: cells.length, closingPipe, rowEnd });
+  }
   return projected;
 }
 
@@ -2926,7 +2938,7 @@ function fixFootnoteDefMaps(tokens) {
       end = Math.max(end, t.map[1]);
     }
     if (start === Infinity || end === -Infinity) continue;
-    open.map = [start, end];
+    open.map = open.map ? [Math.min(open.map[0], start), Math.max(open.map[1], end)] : [start, end];
     const meta = { ...open.meta ?? {} };
     meta.tight = start === prevDefEnd;
     open.meta = meta;
@@ -3009,7 +3021,8 @@ md.block.ruler.before(
     const collector = collectorFor(state);
     if (collector) {
       if (contentStart === void 0 || contentEnd === void 0) throw new UnsupportedSourceCapture();
-      literalFacts.set(token, { collector, trace: sliceTrace(collector.trace, contentStart, contentEnd), kind: "front_matter" });
+      const empty2 = emptyLiteral(state, startLine, nextLine, 0, token.content);
+      literalFacts.set(token, { collector, trace: sliceTrace(collector.trace, contentStart, contentEnd), kind: "front_matter", ...empty2 ? { empty: empty2 } : {} });
     }
     state.line = nextLine + 1;
     return true;
@@ -3040,6 +3053,31 @@ function capturedInlineBodies(source, doc2, roots, layout) {
   const bound = capturedListLayouts.get(layout);
   return bound && bound.source === source && bound.doc === doc2 && bound.roots === roots && bound.lists === layout.lists ? bound.bodies : void 0;
 }
+function capturedEmptyBodies(source, doc2, roots, layout) {
+  const bound = capturedListLayouts.get(layout);
+  return bound && bound.source === source && bound.doc === doc2 && bound.roots === roots && bound.lists === layout.lists ? bound.emptyBodies : void 0;
+}
+function rawPoint(trace, at) {
+  const points = /* @__PURE__ */ new Set();
+  const index = firstPiece(trace, at);
+  for (const p of [trace.pieces[index - 1], trace.pieces[index]]) {
+    if (!p) continue;
+    if (p.kind === "generated") continue;
+    if (p.kind === "copy" && p.from <= at && at <= p.to) points.add(p.sourceFrom + at - p.from);
+    else {
+      if (p.from === at) points.add(p.sourceFrom);
+      if (p.to === at) points.add(p.sourceTo);
+    }
+  }
+  return points.size === 1 ? [...points][0] : void 0;
+}
+function emptyInline(collector, from, to = from, before = "", after = "") {
+  const a = rawPoint(collector.trace, from), b = rawPoint(collector.trace, to);
+  return a === void 0 || b === void 0 ? void 0 : { kind: "inline", range: { from: a, to: b }, before, after };
+}
+function actualEol(collector, end) {
+  return collector.trace.text[end] === "\n" ? rawRange(collector.trace, end, end + 1) : void 0;
+}
 function sourceRootHasClosedFences(root) {
   return capturedRootFencesClosed.get(root) === true;
 }
@@ -3050,15 +3088,254 @@ function wrapCaptureRule(ruler, name, wrapper, preserveAlternates = false) {
     return;
   }
   const alt = preserveAlternates ? ruler.__rules__.find((rule) => rule.name === name).alt.slice() : [];
-  ruler.at(name, (...args) => wrapper(original, ...args), { alt });
+  ruler.at(name, (...args) => {
+    const [state, line, , silent] = args, frame = containerFrames.get(state)?.at(-1);
+    const read = ruler === md.block.ruler && !silent && frame?.kind === "list" ? frame.current : void 0;
+    const index = state.tokens?.length;
+    const entry = read && index === read.index + 1 ? { from: state.bMarks[line] + state.tShift[line], end: state.eMarks[line] } : void 0;
+    const result = wrapper(original, ...args);
+    if (result && entry && state.tokens[index] && state.tokens[index].map?.[0] === line) {
+      read.body = entry.from;
+      read.e = entry.end;
+    }
+    return result;
+  }, { alt });
 }
 var collectorFor = (state) => state.env?.[captureKey];
+var nestedBlanks = /* @__PURE__ */ new WeakMap();
+var containerFrames = /* @__PURE__ */ new WeakMap();
+var containerEnds = /* @__PURE__ */ new WeakMap();
+function activePrefix(state) {
+  const frames = containerFrames.get(state), frame = frames?.[frames.length - 1];
+  return frame?.current?.prefix ?? frame?.prefix ?? [];
+}
+function observeOwnedBlank(actual, frame, collector, line) {
+  if (line >= actual.lineMax) return;
+  const b = actual.bMarks[line], e = actual.eMarks[line], t = actual.tShift[line], s = actual.sCount[line], bs = actual.bsCount[line];
+  const physical = collector.lineStarts[line];
+  if (physical === void 0 || b + t < e) return;
+  if (frame.kind === "blockquote" ? b <= physical || !actual.src.slice(physical, b).includes(">") : s < actual.blkIndent) return;
+  let body = b, width = 0;
+  while (body < e && width < actual.blkIndent) {
+    const ch = actual.src[body];
+    if (ch === " ") width++;
+    else if (ch === "	") width += 4 - (width + bs) % 4;
+    else if (body - b < t) width++;
+    else break;
+    body++;
+  }
+  if (width > actual.blkIndent) return;
+  const prefix = rawRange(collector.trace, physical, body), range = emptyInline(collector, body, e);
+  if (!prefix || range?.kind !== "inline") return;
+  const eol = actualEol(collector, e);
+  if (!eol && e !== collector.trace.text.length) return;
+  return {
+    line,
+    b,
+    e,
+    t,
+    s,
+    bs,
+    lineMax: actual.lineMax,
+    insertBefore: actual.tokens.length,
+    prefix: [prefix],
+    range: range.range,
+    ...eol ? { eol } : {}
+  };
+}
+function observeContainerTokenize(state) {
+  const engine = state.md, block = engine.block, facade = Object.create(engine), localBlock = Object.create(block);
+  localBlock.tokenize = function(actual, start, end, ...rest) {
+    const frames = containerFrames.get(actual), frame = frames?.[frames.length - 1], collector = collectorFor(actual);
+    if (frame && collector) {
+      let read = frame.current;
+      if (frame.kind === "footnote_def") {
+        const token = actual.tokens[actual.tokens.length - 1];
+        if (token?.type !== "footnote_reference_open") throw new UnsupportedSourceCapture();
+        read = { token, index: actual.tokens.length - 1, line: start, b: actual.bMarks[start], t: actual.tShift[start], e: actual.eMarks[start] };
+        frame.reads.push(read);
+        frame.current = read;
+      }
+      if (read) {
+        if (start !== read.line) throw new UnsupportedSourceCapture();
+        read.body = actual.bMarks[start] + actual.tShift[start];
+        if (frame.kind === "blockquote") {
+          const raw = rawRange(collector.trace, frame.marker, actual.bMarks[start]);
+          if (raw) read.prefix = [...frame.prefix, raw];
+        } else read.prefix = [...frame.prefix, { spaces: actual.blkIndent - frame.entryIndent }];
+        const first = actual.tokens.length;
+        const skip = actual.skipEmptyLines, isEmpty = actual.isEmpty, blanks = /* @__PURE__ */ new Map();
+        const observe = (line) => {
+          if (frames?.at(-1)?.current !== read) return;
+          const blank = observeOwnedBlank(actual, frame, collector, line);
+          if (blank) blanks.set(line, blank);
+        };
+        actual.skipEmptyLines = function(line) {
+          const result2 = skip.call(this, line);
+          for (let n = line; n < result2; n++) observe(n);
+          return result2;
+        };
+        actual.isEmpty = function(line) {
+          const result2 = isEmpty.call(this, line);
+          if (result2) observe(line);
+          return result2;
+        };
+        let result;
+        read.tokenizing = true;
+        try {
+          result = block.tokenize.call(block, actual, start, end, ...rest);
+        } finally {
+          actual.skipEmptyLines = skip;
+          actual.isEmpty = isEmpty;
+          read.tokenizing = false;
+        }
+        read.blanks = [...blanks.values()].filter((blank) => blank.line < actual.line);
+        read.first = actual.tokens[first];
+        return result;
+      }
+    }
+    return block.tokenize.call(block, actual, start, end, ...rest);
+  };
+  facade.block = localBlock;
+  state.md = facade;
+}
+for (const name of ["list", "blockquote", "footnote_def"]) wrapCaptureRule(md.block.ruler, name, (original, state, startLine, endLine, silent) => {
+  const collector = collectorFor(state);
+  if (!collector || silent) return original(state, startLine, endLine, silent);
+  let frames = containerFrames.get(state);
+  if (!frames) {
+    frames = [];
+    containerFrames.set(state, frames);
+  }
+  const frame = { kind: name, entryIndent: state.blkIndent, marker: name === "blockquote" ? state.bMarks[startLine] + state.tShift[startLine] : 0, prefix: activePrefix(state), reads: [] };
+  const push = state.push, engine = state.md, isEmpty = state.isEmpty, outer = frames.length === 0;
+  if (outer) observeContainerTokenize(state);
+  frames.push(frame);
+  state.push = function(type, ...args) {
+    const token = push.call(this, type, ...args);
+    if (frames[frames.length - 1] === frame && (name === "list" && type === "list_item_open" || name === "blockquote" && type === "blockquote_open")) {
+      const line = name === "blockquote" ? startLine : this.line;
+      const read = { token, index: this.tokens.length - 1, line, b: this.bMarks[line], t: this.tShift[line], e: this.eMarks[line] };
+      frame.reads.push(read);
+      frame.current = read;
+    }
+    return token;
+  };
+  state.isEmpty = function(line) {
+    const result2 = isEmpty.call(this, line), read = frame.current;
+    if (result2 && name === "list" && frames.at(-1) === frame && read && !read.tokenizing) {
+      const blank = observeOwnedBlank(this, frame, collector, line);
+      if (blank) read.blanks = [...(read.blanks ?? []).filter((item) => item.line !== line), blank];
+    }
+    return result2;
+  };
+  let result;
+  try {
+    result = original(state, startLine, endLine, silent);
+  } finally {
+    state.isEmpty = isEmpty;
+    state.push = push;
+    frames.pop();
+    if (outer) state.md = engine;
+  }
+  if (!result) return result;
+  for (const read of frame.reads) {
+    const token = read.token, index = read.index;
+    if (name === "footnote_def") token.map = [startLine, state.line];
+    if (token.map?.[0] !== read.line || state.tokens[index] !== token) throw new UnsupportedSourceCapture();
+    let close = index + 1, depth = 1;
+    for (; close < state.tokens.length; close++) {
+      depth += state.tokens[close].nesting;
+      if (depth === 0) break;
+    }
+    const last = state.tokens[close];
+    if (last?.type !== token.type.replace("_open", "_close")) throw new UnsupportedSourceCapture();
+    let place;
+    if (close === index + 1) {
+      let from = read.b;
+      if (name === "list") {
+        const marker = String(token.info ?? "") + token.markup, start = read.b + read.t;
+        if (state.src.slice(start, start + marker.length) !== marker) throw new UnsupportedSourceCapture();
+        from = start + marker.length;
+        const padding = state.src.slice(from, read.e);
+        if (!/^[ \t]*$/.test(padding)) continue;
+        if (padding[0] === " ") from++;
+        place = emptyInline(collector, from, read.e, from === start + marker.length ? " " : "");
+      } else {
+        from = name === "blockquote" ? read.b : read.body ?? read.b;
+        if (!/^[ \t]*$/.test(state.src.slice(from, read.e))) continue;
+        place = emptyInline(collector, from, read.e);
+      }
+    } else if (name === "list" && read.first && read.first === state.tokens[index + 1] && read.first.type !== "paragraph_open" && read.body !== void 0 && read.prefix) {
+      const at = rawPoint(collector.trace, read.body);
+      if (at !== void 0) place = { kind: "prepend", at, eol: actualEol(collector, read.e), continuation: read.prefix };
+    }
+    if (place) containerEnds.set(last, { collector, place, kind: name === "list" ? "list_item" : name === "blockquote" ? "blockquote" : "footnote_definition" });
+    const children2 = [];
+    for (let i = index + 1; i < close; i++) {
+      const child = state.tokens[i];
+      if (child.level !== token.level + 1 || child.nesting === -1 || !child.map) continue;
+      children2.push({ from: child.map[0], to: child.map[1], index: i });
+    }
+    const blanks = (read.blanks ?? []).filter((blank) => blank.line >= token.map[0] && blank.line < token.map[1] && !children2.some((child) => child.from <= blank.line && blank.line < child.to) && !collector.protectedSources.some((p) => p.sourceFrom < (blank.eol?.to ?? blank.range.to) && p.sourceTo > blank.range.from));
+    if (!children2.length && blanks.some((blank) => blank.line !== read.line) && place) {
+      nestedBlanks.set(last, [{ level: token.level + 1, place, line: read.line }]);
+      containerEnds.delete(last);
+    }
+    let priorRight;
+    for (const [blankIndex, blank] of blanks.entries()) {
+      const previous = blanks[blankIndex - 1];
+      const firstInRun = !previous || previous.line + 1 !== blank.line;
+      let lastInRun = blank;
+      for (let next = blankIndex + 1; firstInRun && blanks[next]?.line === lastInRun.line + 1; next++) lastInRun = blanks[next];
+      const begin = blank.prefix[0], end = lastInRun.eol?.to ?? lastInRun.range.to;
+      const touchesDefinition = firstInRun && begin && "from" in begin && collector.protectedSources.some((p) => p.sourceTo === begin.from || p.sourceFrom === end);
+      const left = children2.filter((child) => child.to <= blank.line).at(-1), right = children2.find((child) => child.from > blank.line);
+      if (touchesDefinition) {
+        priorRight = right?.index;
+        continue;
+      }
+      if (name === "list" && place?.kind === "prepend" && !left && blank === blanks[0]) continue;
+      if (left && right && priorRight !== right.index) {
+        priorRight = right.index;
+        continue;
+      }
+      if (!children2.length && blank.line === read.line) continue;
+      const before = right?.index ?? close, target = state.tokens[before];
+      const items = [...nestedBlanks.get(target) ?? []];
+      items.push({ level: token.level + 1, line: blank.line, place: {
+        kind: "nested-blank",
+        range: blank.range,
+        prefix: blank.prefix,
+        ...blank.eol ? { eol: blank.eol } : {},
+        leftBody: !!left,
+        rightBody: !!right
+      } });
+      nestedBlanks.set(target, items);
+    }
+  }
+  return result;
+}, true);
+function captureContainerEmission(state, token, delegate) {
+  const fact = containerEnds.get(token);
+  if (!fact) {
+    delegate();
+    return;
+  }
+  const outer = state.stack[state.stack.length - 2], slot = outer?.content.length;
+  delegate();
+  const node = outer?.content[slot];
+  if (!node || node.type.name !== fact.kind) return;
+  const parent = node.firstChild;
+  if (!parent || parent.type.name !== "paragraph" || parent.content.size || !parent.hasMarkup(parent.type)) return;
+  fact.collector.emissions.push({ from: 0, to: 0, kind: "paragraph", runFrom: fact.collector.runs.length, runTo: fact.collector.runs.length, node: parent, empty: fact.place });
+}
 wrapCaptureRule(md.block.ruler, "fence", (original, state, startLine, endLine, silent) => {
   if (!collectorFor(state) || silent) return original(state, startLine, endLine, silent);
   const originalGetLines = state.getLines, descriptor = Object.getOwnPropertyDescriptor(state, "getLines");
   if (typeof originalGetLines !== "function" || descriptor?.configurable === false) throw new UnsupportedSourceCapture();
   const tokenStart = state.tokens.length;
-  let contentEnd, bodyTrace;
+  let contentEnd, bodyTrace, empty2;
   Object.defineProperty(state, "getLines", {
     configurable: true,
     writable: true,
@@ -3072,6 +3349,7 @@ wrapCaptureRule(md.block.ruler, "fence", (original, state, startLine, endLine, s
       }) };
       const value = originalGetLines.call(this, begin, end, indent, keepLastLF);
       bodyTrace = traceConsumedLines(collectorFor(state).trace, read, value);
+      empty2 = emptyLiteral(state, startLine, end, indent, value);
       return value;
     }
   });
@@ -3086,10 +3364,10 @@ wrapCaptureRule(md.block.ruler, "fence", (original, state, startLine, endLine, s
     const tokens = state.tokens.slice(tokenStart), token = tokens[0];
     if (tokens.length !== 1 || token?.type !== "fence" || contentEnd === void 0 || token.map?.[0] !== startLine || token.map?.[1] !== state.line || state.line !== contentEnd && state.line !== contentEnd + 1) throw new UnsupportedSourceCapture();
     capturedFenceClosed.set(token, state.line === contentEnd + 1);
-    if (bodyTrace) literalFacts.set(token, { collector: collectorFor(state), trace: bodyTrace, kind: token.type });
+    if (bodyTrace) literalFacts.set(token, { collector: collectorFor(state), trace: bodyTrace, kind: token.type, ...state.line === contentEnd + 1 && empty2 ? { empty: empty2 } : {} });
   } else if (contentEnd !== void 0) throw new UnsupportedSourceCapture();
   return result;
-});
+}, true);
 for (const name of ["code", "html_block"]) wrapCaptureRule(md.block.ruler, name, (original, state, ...args) => {
   const collector = collectorFor(state);
   if (!collector) return original(state, ...args);
@@ -3137,7 +3415,12 @@ wrapCaptureRule(md.block.ruler, "table", (original, state, ...args) => {
     }
     if (tokens[j]?.type !== "tr_close") throw new UnsupportedSourceCapture();
     const line = row.map[0];
-    const projected = traceTableRow(collector.trace, state.bMarks[line] + state.tShift[line], state.eMarks[line], slots.map((t) => t.content));
+    const projected = traceTableRow(collector.trace, state.bMarks[line] + state.tShift[line], state.eMarks[line], slots.map((t) => t.content), (slot) => {
+      const at = rawPoint(collector.trace, slot.missing ? slot.rowEnd : slot.from);
+      if (at === void 0) return;
+      const empty2 = slot.missing ? { kind: "missing-cell", at, row: line, slot: slot.slot, present: slot.present, closingPipe: slot.closingPipe } : { kind: "inline", range: { from: at, to: at }, before: "", after: "" };
+      inlineFacts.set(slots[slot.slot], { collector, empty: empty2 });
+    });
     if (projected) slots.forEach((token, k) => {
       const trace = projected[k];
       if (trace) bindInlineTrace(token, collector, trace, "table-cell");
@@ -3230,14 +3513,14 @@ function bindInlineTrace(token, collector, trace, kind) {
   if (trace.text !== token.content || !Array.isArray(token.children)) throw new UnsupportedSourceCapture();
   owners.set(token.children, trace);
   tokenArrays.set(token, token.children);
-  inlineFacts.set(token, { collector, trace, kind });
+  inlineFacts.set(token, { ...inlineFacts.get(token), collector, trace, kind });
 }
 for (const name of ["paragraph", "lheading"]) wrapCaptureRule(md.block.ruler, name, (original, state, ...args) => {
   const collector = collectorFor(state);
   if (!collector) return original(state, ...args);
   const level = state.level, originalGetLines = state.getLines, start = state.tokens.length;
   if (typeof originalGetLines !== "function" || !Array.isArray(state.bMarks) || !Array.isArray(state.eMarks)) throw new UnsupportedSourceCapture();
-  let capturedLines, terminal;
+  let capturedLines, terminal, trimEnd;
   state.getLines = function(begin, end, indent, keepLastLF) {
     const read = { begin, end, indent, keepLastLF, rows: Array.from({ length: end - begin }, (_, i) => {
       const line = begin + i;
@@ -3247,6 +3530,7 @@ for (const name of ["paragraph", "lheading"]) wrapCaptureRule(md.block.ruler, na
     let part = traceConsumedLines(collector.trace, read, value);
     if (!part) throw new UnsupportedSourceCapture();
     const endOfLine = read.rows[read.rows.length - 1]?.e;
+    if (endOfLine !== void 0) trimEnd = rawPoint(collector.trace, endOfLine);
     let slashes = 0;
     for (let i = value.length - 1; i >= 0 && value[i] === "\\"; i--) slashes++;
     const restore = name === "paragraph" && !keepLastLF && endOfLine !== void 0 && this.src[endOfLine] === "\n" && (value.endsWith("  ") || slashes % 2 === 1);
@@ -3270,6 +3554,7 @@ for (const name of ["paragraph", "lheading"]) wrapCaptureRule(md.block.ruler, na
     if (terminal !== void 0) token.content = terminal;
     if (!capturedLines) throw new UnsupportedSourceCapture();
     bindInlineTrace(token, collector, capturedLines, name === "paragraph" ? "paragraph" : "heading");
+    if (trimEnd !== void 0) inlineFacts.set(token, { ...inlineFacts.get(token), trimEnd });
   }
   return result;
 }, true);
@@ -3299,6 +3584,11 @@ wrapCaptureRule(md.block.ruler, "heading", (original, state, startLine, endLine,
     const end = charsEnd > from && /[ \t]/.test(state.src[charsEnd - 1]) ? charsEnd : spacesEnd;
     const part = sliceTrace(collector.trace, from, end), left = part.text.length - part.text.trimStart().length;
     bindInlineTrace(token, collector, sliceTrace(part, left, left + part.text.trim().length), "heading");
+    if (token.content === "") {
+      const closing = charsEnd < spacesEnd, at = closing ? Math.min(from + 1, charsEnd) : state.eMarks[startLine];
+      const empty2 = emptyInline(collector, at, at, at === from ? " " : "", closing && at === charsEnd ? " " : "");
+      if (empty2) inlineFacts.set(token, { ...inlineFacts.get(token), empty: empty2 });
+    }
   }
   return result;
 }, true);
@@ -3491,6 +3781,20 @@ function captureText(state, token, delegate) {
   delegate();
   if (captureCursor(state) !== pos) throw new UnsupportedSourceCapture();
 }
+function emptyLiteral(state, start, end, indent, content) {
+  const collector = collectorFor(state);
+  if (content !== "" && content !== "\n") return void 0;
+  const eol = actualEol(collector, state.eMarks[start]);
+  if (!eol) return void 0;
+  const prefix = [...activePrefix(state), ...indent > state.blkIndent ? [{ spaces: indent - state.blkIndent }] : []];
+  if (content === "\n") {
+    const terminal = actualEol(collector, state.eMarks[start + 1]), at2 = rawPoint(collector.trace, state.eMarks[start + 1]);
+    if (!terminal || at2 === void 0) return void 0;
+    return { kind: "literal", at: at2, terminal, eol, prefix, closed: true };
+  }
+  const at = rawPoint(collector.trace, collector.lineStarts[end]);
+  return at === void 0 ? void 0 : { kind: "literal", at, eol, prefix, closed: true };
+}
 function captureLiteralEmission(state, token, delegate) {
   const fact = literalFacts.get(token);
   if (!fact) {
@@ -3517,7 +3821,7 @@ function captureLiteralEmission(state, token, delegate) {
     pmTo: from + p.to,
     kind: p.kind === "copy" ? "linear" : "atomic"
   });
-  fact.collector.emissions.push({ from, to: from + text2.length, kind, runFrom, runTo: fact.collector.runs.length, node });
+  fact.collector.emissions.push({ from, to: from + text2.length, kind, runFrom, runTo: fact.collector.runs.length, node, ...fact.empty ? { empty: fact.empty } : {} });
 }
 function captureInlineEmission(state, token, delegate) {
   const fact = inlineFacts.get(token);
@@ -3542,7 +3846,7 @@ function captureInlineEmission(state, token, delegate) {
   const to = captureCursor(state);
   if (state.stack[state.stack.length - 1] !== frame) throw new UnsupportedSourceCapture();
   if (!["paragraph", "heading"].includes(frame.type.name)) return;
-  const emission = { from, to, kind: frame.type.name, runFrom, runTo: fact.collector.runs.length };
+  const emission = { from, to, kind: frame.type.name, runFrom, runTo: fact.collector.runs.length, ...fact.empty ? { empty: fact.empty } : {} };
   fact.collector.emissions.push(emission);
   inlineFrames.set(frame, emission);
   if (fact.trace && fact.kind) {
@@ -3727,6 +4031,13 @@ function prepareRootEvents(tokens, collector) {
         tailFrom = tail.from;
       }
       if (flowTail.has(token.type) && collector.trace.text[tailWork] === "\n" && /^[ \t\n]*$/.test(collector.trace.text.slice(tailWork + 1, to))) boundaryTo = tailWork + 1;
+    }
+    for (let at = i; at <= last; at++) for (const pending of nestedBlanks.get(tokens[at]) ?? []) {
+      const place = pending.place;
+      if (place.kind === "nested-blank") {
+        tailFrom = Math.max(tailFrom, place.range.to);
+        boundaryTo = Math.max(boundaryTo, starts[pending.line + 1]);
+      }
     }
     const id = natural.length;
     let closedFences = true;
@@ -3930,7 +4241,9 @@ var parserTokens = {
             const fact = inlineFacts.get(t);
             if (fact?.trace) {
               if (fact.trace.text !== t.content) throw new UnsupportedSourceCapture();
-              inlineFacts.set(t, { ...fact, trace: sliceTrace(fact.trace, match[0].length, fact.trace.text.length) });
+              const at = rawPoint(fact.trace, match[0].length);
+              const empty2 = match[0].length === fact.trace.text.length && at !== void 0 ? { kind: "inline", range: { from: fact.trimEnd ?? at, to: fact.trimEnd ?? at }, before: (fact.trimEnd ?? at) > at || /\s$/.test(match[0]) ? "" : " ", after: "" } : void 0;
+              inlineFacts.set(t, { ...fact, trace: sliceTrace(fact.trace, match[0].length, fact.trace.text.length), ...empty2 ? { empty: empty2 } : {} });
             }
             t.content = t.content.slice(match[0].length);
             const children2 = t.children;
@@ -4248,7 +4561,7 @@ var MorayaMarkdownParser = class extends MarkdownParser {
       h[key] = (state, tok, tokens, i) => captureRootEmission(
         state,
         tok,
-        () => captureListEmission(state, tok, () => delegate(state, tok, tokens, i))
+        () => captureListEmission(state, tok, () => captureContainerEmission(state, tok, () => delegate(state, tok, tokens, i)))
       );
     }
   }
@@ -4562,15 +4875,69 @@ sourceMarks.code = {
   close: (_state, _mark, parent, index) => sourceCodeDelimiter(parent.child(index - 1), false)
 };
 var terminalStarts = /* @__PURE__ */ new WeakMap();
+var sourceContinuationIndents = /* @__PURE__ */ new WeakMap();
+var sourceBlankTails = /* @__PURE__ */ new WeakMap();
+function renderSourceContainerChildren(state, parent, skipSchemaPrefix) {
+  const first = skipSchemaPrefix ? 1 : 0;
+  const empty2 = (n) => n.type.name === "paragraph" && n.content.size === 0 && n.hasMarkup(n.type);
+  let hasEmpty = false;
+  for (let i = first; i < parent.childCount; i++) if (empty2(parent.child(i))) hasEmpty = true;
+  const current = state;
+  const end = () => {
+    if (!sourceContinuationIndents.has(state) && current.delim && /^[ ]+$/.test(current.delim)) sourceContinuationIndents.set(state, current.delim.length);
+  };
+  if (!hasEmpty) {
+    for (let i = first; i < parent.childCount; i++) state.render(parent.child(i), parent, i);
+    end();
+    return;
+  }
+  const prefix = () => current.delim.includes(">") ? current.delim.trimEnd() : current.delim;
+  let leftBody = false, afterEmpty = false;
+  for (let i = first; i < parent.childCount; i++) {
+    const child = parent.child(i);
+    if (empty2(child)) {
+      if (i === first) {
+        state.write("");
+        current.closed = null;
+      } else {
+        current.flushClose(1);
+        state.ensureNewLine();
+        current.out += prefix();
+        current.closed = null;
+      }
+      if (i === parent.childCount - 1 && !current.delim.includes(">") && i > first) state.ensureNewLine();
+      sourceBlankTails.set(state, { terminal: current.out.endsWith("\n") });
+      afterEmpty = true;
+    } else {
+      if (afterEmpty) {
+        state.ensureNewLine();
+        if (leftBody) current.out += prefix() + "\n";
+        current.closed = null;
+      }
+      state.render(child, parent, i);
+      leftBody = true;
+      afterEmpty = false;
+    }
+  }
+  end();
+}
 var sourceRootSerializer = new MarkdownSerializer({
   ...serializer.nodes,
   text: writeSourceText,
   code_block: sourceCodeNode,
-  list_item(state, node, parent, index) {
+  blockquote(state, node) {
+    state.wrapBlock("> ", null, node, () => renderSourceContainerChildren(state, node, false));
+  },
+  footnote_definition(state, node) {
+    if (node.attrs.tight) state.flushClose(1);
+    state.write(`[^${node.attrs.label}]: `);
+    state.wrapBlock("    ", "", node, () => renderSourceContainerChildren(state, node, false));
+  },
+  list_item(state, node) {
+    if (node.attrs.checked != null) state.write(node.attrs.checked ? "[x] " : "[ ] ");
     const first = node.firstChild;
-    if (node.attrs.checked === null && first?.type.name === "paragraph" && first.content.size === 0 && first.hasMarkup(first.type) && node.childCount > 1 && node.child(1).type.name !== "paragraph") {
-      for (let index2 = 1; index2 < node.childCount; index2++) state.render(node.child(index2), node, index2);
-    } else serializer.nodes.list_item(state, node, parent, index);
+    const skip = node.attrs.checked === null && first?.type.name === "paragraph" && first.content.size === 0 && first.hasMarkup(first.type) && node.childCount > 1 && node.child(1).type.name !== "paragraph";
+    renderSourceContainerChildren(state, node, !!skip);
   },
   hardbreak(state, node, parent, index) {
     if (node.attrs.isInline === true) {
@@ -4634,7 +5001,18 @@ function serializeSourceRootMarkdown(doc2, options = {}) {
       renderSourceList(state, node, style, " ".repeat(width), (i) => String(number(i)).padStart(width - 2, " ") + style.marker + " ");
     }
   }, sourceRootSerializer.marks, sourceRootSerializer.options);
+  let lastState;
+  for (const [name, render] of Object.entries(current.nodes)) current.nodes[name] = (state, node, parent, index) => {
+    lastState = state;
+    sourceBlankTails.delete(state);
+    sourceContinuationIndents.delete(state);
+    render(state, node, parent, index);
+  };
   const result = current.serialize(doc2, { tightLists: true });
+  const blank = lastState && sourceBlankTails.get(lastState);
+  if (blank) options.onOwnedBlank?.(blank.terminal);
+  const indent = lastState && sourceContinuationIndents.get(lastState);
+  if (indent !== void 0) options.onContinuationIndent?.(indent);
   return result.replace(/\u200B/g, "");
 }
 function renderTableRow(state, row) {
@@ -4814,9 +5192,14 @@ function finalizeCapturedDocument(collector, doc2) {
     if (!emission.node || emitted.has(emission.node)) throw new UnsupportedSourceCapture();
     emitted.set(emission.node, emission);
   }
+  const emptyParents = /* @__PURE__ */ new Map();
+  let rootIndex = 0;
   doc2.descendants((parent, offset) => {
     if (!capturedTextParents.includes(parent.type.name)) return;
     const from = offset + 1, emission = emitted.get(parent);
+    if (parent.content.size === 0) emptyParents.set(from, parent);
+    while (collector.roots[rootIndex] && collector.roots[rootIndex].pmTo <= from) rootIndex++;
+    const root = collector.roots[rootIndex];
     if (emission) {
       emitted.delete(parent);
       occurrences.add(from);
@@ -4828,6 +5211,7 @@ function finalizeCapturedDocument(collector, doc2) {
         run.pmFrom += delta;
         run.pmTo += delta;
       }
+      if (emission.empty && parent.content.size === 0) collector.emptyBodies.push({ pmAt: from, parent, place: emission.empty, ...root && root.pmFrom < from && from < root.pmTo ? { rootId: root.id } : {} });
       if (emission.body) collector.bodies.push({ ...emission.body, pmFrom: from, pmTo: from + parent.content.size });
     }
     parent.forEach((node, inner) => {
@@ -4860,7 +5244,14 @@ function finalizeCapturedDocument(collector, doc2) {
   }
   const lists = finishSourceLists(doc2, collector);
   const layout = finishSourceLayout(collector.blankLines, collector.fallback, lists);
-  capturedListLayouts.set(layout, { source, doc: doc2, roots: collector.roots, lists, bodies: Object.freeze(collector.bodies.map((body) => Object.freeze(body))) });
+  const layoutBody = (pmFrom, place) => {
+    const parent = emptyParents.get(pmFrom + 1);
+    if (parent && parent.type.name === "paragraph" && parent.hasMarkup(parent.type) && !parent.content.size)
+      collector.emptyBodies.push({ pmAt: pmFrom + 1, parent, place });
+  };
+  for (const u of layout.blankLines) if (u.role === "empty-paragraph") layoutBody(u.emission.pmFrom, { kind: "layout", origin: { kind: "blank", id: u.id } });
+  if (layout.fallback) layoutBody(layout.fallback.emission.pmFrom, { kind: "layout", origin: { kind: "fallback" } });
+  capturedListLayouts.set(layout, { emptyBodies: Object.freeze(collector.emptyBodies.map((f) => Object.freeze(f))), source, doc: doc2, roots: collector.roots, lists, bodies: Object.freeze(collector.bodies.map((body) => Object.freeze(body))) });
   return {
     doc: doc2,
     textRuns: collector.runs,
@@ -4911,6 +5302,7 @@ function newFileCollector(source, trace, work) {
   return {
     source,
     trace,
+    emptyBodies: [],
     bodies: [],
     emissions: [],
     lineStarts: [],
@@ -4942,6 +5334,24 @@ function shiftTrace(trace, delta) {
     sourceTo: p.sourceTo + delta
   })) };
 }
+function shiftEmpty(place, delta, lines) {
+  const range = (r2) => ({ from: r2.from + delta, to: r2.to + delta });
+  const prefix = (p) => p.map((r2) => "spaces" in r2 ? r2 : range(r2));
+  switch (place.kind) {
+    case "inline":
+      return { ...place, range: range(place.range) };
+    case "missing-cell":
+      return { ...place, at: place.at + delta, row: place.row + lines };
+    case "literal":
+      return { ...place, at: place.at + delta, eol: range(place.eol), prefix: prefix(place.prefix), ...place.terminal ? { terminal: range(place.terminal) } : {} };
+    case "prepend":
+      return { ...place, at: place.at + delta, continuation: prefix(place.continuation), eol: place.eol ? range(place.eol) : void 0 };
+    case "nested-blank":
+      return { ...place, range: range(place.range), prefix: prefix(place.prefix), ...place.eol ? { eol: range(place.eol) } : {} };
+    case "layout":
+      return place;
+  }
+}
 function cloneTokenBatch(tokens, collector, rawDelta = 0, lineDelta = 0) {
   const clone = (token) => {
     const copy = Object.create(Object.getPrototypeOf(token));
@@ -4959,10 +5369,14 @@ function cloneTokenBatch(tokens, collector, rawDelta = 0, lineDelta = 0) {
     if (provenance) tokenSources.set(copy, { collector, runs: provenance.runs.map((run) => run.trace ? { text: run.text, kind: run.kind, trace: shiftTrace(run.trace, rawDelta) } : { text: run.text }) });
     if (token.type === "inline") {
       const fact = inlineFacts.get(token);
-      inlineFacts.set(copy, { collector, ...fact?.kind ? { kind: fact.kind } : {}, ...fact?.trace ? { trace: shiftTrace(fact.trace, rawDelta) } : {} });
+      inlineFacts.set(copy, { collector, ...fact?.empty ? { empty: shiftEmpty(fact.empty, rawDelta, lineDelta) } : {}, ...fact?.trimEnd !== void 0 ? { trimEnd: fact.trimEnd + rawDelta } : {}, ...fact?.kind ? { kind: fact.kind } : {}, ...fact?.trace ? { trace: shiftTrace(fact.trace, rawDelta) } : {} });
     }
     const literal = literalFacts.get(token);
-    if (literal) literalFacts.set(copy, { collector, trace: shiftTrace(literal.trace, rawDelta), kind: literal.kind });
+    if (literal) literalFacts.set(copy, { collector, trace: shiftTrace(literal.trace, rawDelta), kind: literal.kind, ...literal.empty ? { empty: shiftEmpty(literal.empty, rawDelta, lineDelta) } : {} });
+    const container = containerEnds.get(token);
+    if (container) containerEnds.set(copy, { collector, kind: container.kind, place: shiftEmpty(container.place, rawDelta, lineDelta) });
+    const pending = nestedBlanks.get(token);
+    if (pending) nestedBlanks.set(copy, pending.map((p) => ({ ...p, line: p.line + lineDelta, place: shiftEmpty(p.place, rawDelta, lineDelta) })));
     const closed = capturedFenceClosed.get(token);
     if (closed !== void 0) capturedFenceClosed.set(copy, closed);
     return copy;
@@ -4978,11 +5392,41 @@ function countTokens(tokens) {
   }
   return count;
 }
+function injectNestedBlanks(tokens, collector) {
+  const result = [];
+  for (const token of tokens) {
+    for (const pending of nestedBlanks.get(token) ?? []) {
+      const make = (type, tag, nesting, level) => ({
+        type,
+        tag,
+        nesting,
+        level,
+        content: "",
+        children: null,
+        attrs: null,
+        info: "",
+        meta: null,
+        map: null,
+        block: true,
+        hidden: false,
+        markup: ""
+      });
+      const open = make("paragraph_open", "p", 1, pending.level), inline = make("inline", "", 0, pending.level + 1), close = make("paragraph_close", "p", -1, pending.level);
+      inline.children = [];
+      inline.block = false;
+      inlineFacts.set(inline, { collector, empty: pending.place });
+      result.push(open, inline, close);
+    }
+    result.push(token);
+  }
+  return result;
+}
 function emitCapturedTokens(tokens, collector, schema2) {
   let batch = cloneTokenBatch(tokens, collector);
   tagPairedHtmlInline(batch);
   fixFootnoteDefMaps(batch);
   prepareListEvents(batch, collector);
+  batch = injectNestedBlanks(batch, collector);
   batch = prepareRootEvents(batch, collector);
   collector.file.work.pmEmissionTokenCount += countTokens(batch);
   const tokenizer = Object.create(md);
@@ -7671,307 +8115,8 @@ async function createEditor(opts) {
   };
 }
 
-// src/source-file-cache.ts
-function emptyFileParseWork() {
-  return {
-    mode: "unchanged",
-    blockWindows: [],
-    blockParseCalls: 0,
-    topLevelRunnerCalls: 0,
-    blockRuleCalls: 0,
-    nestedTokenizeCalls: 0,
-    blockLinesVisited: 0,
-    inlineParseCalls: 0,
-    inlineInputUnits: 0,
-    inlineRoots: [],
-    rawTouchedBeforeRoots: [],
-    environmentChanged: false,
-    legacyParseCalls: 0,
-    fullCaptureCalls: 0,
-    pmEmissionTokenCount: 0,
-    preprocessedCodeUnits: 0,
-    lineTableCodeUnits: 0,
-    rawSplicedCodeUnits: 0,
-    inlineEffectReplayCount: 0
-  };
-}
-var fileCaches = /* @__PURE__ */ new WeakMap();
-function makeSession(source, value, revision) {
-  return Object.freeze({
-    revision,
-    source,
-    doc: value.doc,
-    textSpans: value.textRuns,
-    roots: value.roots,
-    gaps: value.gaps,
-    protectedSources: value.protectedSources,
-    layout: value.layout
-  });
-}
-function registerSession(source, value, revision, tokens, environmentVersion) {
-  const session = makeSession(source, value, revision);
-  fileCaches.set(session, { canonical: session, tokens, environmentVersion });
-  return session;
-}
-function createFileSourceSession(source, schema2) {
-  const parsed = captureFilePipeline(source, schema2);
-  if (!parsed.ok) return parsed;
-  return { ok: true, session: registerSession(source, parsed.value, 0, parsed.cache, 0) };
-}
-function sameMetadata(a, b) {
-  if (a === b) return true;
-  if (!a || !b || typeof a !== "object" || typeof b !== "object" || Array.isArray(a) !== Array.isArray(b)) return false;
-  const left = a, right = b, keys = Object.keys(left);
-  return keys.length === Object.keys(right).length && keys.every((k) => Object.hasOwn(right, k) && sameMetadata(left[k], right[k]));
-}
-function prepareVerifiedFileBase(callerBase, work) {
-  const hit = fileCaches.get(callerBase);
-  if (hit) return { callerBase, verifiedBase: hit.canonical, cache: hit, recovery: false };
-  work.mode = "full-fallback";
-  work.fallbackReason = "cache-miss";
-  const parsed = captureFilePipeline(callerBase.source, callerBase.doc.type.schema, work);
-  if (!parsed.ok) return parsed;
-  work.inlineRoots = parsed.value.roots.map((root) => root.id);
-  const actual = makeSession(callerBase.source, parsed.value, callerBase.revision);
-  if (actual.doc.type.schema !== callerBase.doc.type.schema || !actual.doc.eq(callerBase.doc) || !sameMetadata(actual.roots, callerBase.roots) || !sameMetadata(actual.gaps, callerBase.gaps) || !sameMetadata(actual.protectedSources, callerBase.protectedSources) || !sameMetadata(actual.textSpans, callerBase.textSpans) || !sameMetadata(actual.layout.blankLines, callerBase.layout.blankLines) || !sameMetadata(actual.layout.fallback, callerBase.layout.fallback) || callerBase.layout.lists !== void 0 && !sameMetadata(actual.layout.lists, callerBase.layout.lists))
-    return { ok: false, reason: "unsupported-source" };
-  return {
-    callerBase,
-    verifiedBase: actual,
-    cache: { canonical: actual, tokens: parsed.cache, environmentVersion: 0 },
-    recovery: true
-  };
-}
-function commitRecovery(base) {
-  if (base.recovery) fileCaches.set(base.callerBase, base.cache);
-}
-function finishUnchangedFile(base, work) {
-  commitRecovery(base);
-  return { ok: true, session: base.callerBase, file: {
-    environmentVersion: base.cache.environmentVersion,
-    correspondence: base.verifiedBase.roots.map((r2) => ({ beforeRoots: [r2.id], afterRoots: [r2.id], kind: "untouched" })),
-    work
-  } };
-}
-function splitsBoundary(source, offset) {
-  if (offset <= 0 || offset >= source.length) return false;
-  return source[offset - 1] === "\r" && source[offset] === "\n" || /[\uD800-\uDBFF]/.test(source[offset - 1]) && /[\uDC00-\uDFFF]/.test(source[offset]);
-}
-function validateSourcePatches(base, input) {
-  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision !== base.revision) return { ok: false, reason: "stale-document" };
-  let end = 0, previous;
-  const patches = [];
-  for (const patch of input.edits) {
-    if (!Number.isSafeInteger(patch.from) || !Number.isSafeInteger(patch.to) || typeof patch.removed !== "string" || typeof patch.text !== "string" || patch.from < end || patch.to < patch.from || patch.to > base.source.length || previous && previous.from === patch.from || splitsBoundary(base.source, patch.from) || splitsBoundary(base.source, patch.to) || base.source.slice(patch.from, patch.to) !== patch.removed) return { ok: false, reason: "unmapped-range" };
-    previous = patch;
-    end = patch.to;
-    if (patch.text !== patch.removed) patches.push({ ...patch });
-  }
-  return patches;
-}
-function spliceSource(base, patches, work) {
-  const chunks = [], pieces = [];
-  let before = 0, after = 0;
-  const keep = (to) => {
-    if (to > before) {
-      const text2 = base.source.slice(before, to);
-      chunks.push(text2);
-      pieces.push({ beforeFrom: before, beforeTo: to, afterFrom: after, afterTo: after + text2.length, generated: false });
-      after += text2.length;
-    }
-  };
-  for (const patch of patches) {
-    keep(patch.from);
-    chunks.push(patch.text);
-    pieces.push({
-      beforeFrom: patch.from,
-      beforeTo: patch.to,
-      afterFrom: after,
-      afterTo: after + patch.text.length,
-      generated: true
-    });
-    before = patch.to;
-    after += patch.text.length;
-  }
-  keep(base.source.length);
-  const source = chunks.join("");
-  work.rawSplicedCodeUnits += source.length;
-  return { source, pieces };
-}
-function foldDefinitionEvents(events) {
-  const references = {};
-  const footnotes = /* @__PURE__ */ new Set();
-  for (const event of [...events].sort((a, b) => a.sourceFrom - b.sourceFrom)) {
-    if (event.kind === "reference") {
-      if (typeof references[event.label] === "undefined") references[event.label] = { href: event.href, title: event.title };
-    } else footnotes.add(event.label);
-  }
-  return { references, footnotes: [...footnotes].sort() };
-}
-function rawTouchedRoots(base, patches) {
-  const ids = /* @__PURE__ */ new Set();
-  for (const patch of patches) {
-    let low = 0, high = base.roots.length;
-    while (low < high) {
-      const mid = low + high >>> 1;
-      if (base.roots[mid].sourceTo <= patch.from) low = mid + 1;
-      else high = mid;
-    }
-    for (let at = low; at < base.roots.length; at++) {
-      const root = base.roots[at];
-      if (patch.from === patch.to) {
-        if (root.sourceFrom < patch.from && patch.from < root.sourceTo) ids.add(root.id);
-        break;
-      }
-      if (root.sourceFrom >= patch.to) break;
-      ids.add(root.id);
-    }
-  }
-  return [...ids].sort((a, b) => a - b);
-}
-function deriveRootCorrespondence(base, next, pieces, touchedRoots) {
-  const total = base.roots.length + next.roots.length, parent = Array.from({ length: total }, (_, i) => i);
-  const find = (n) => {
-    while (parent[n] !== n) {
-      parent[n] = parent[parent[n]];
-      n = parent[n];
-    }
-    return n;
-  };
-  const join = (a, b) => {
-    parent[find(a)] = find(b);
-  };
-  const touchedSet = new Set(touchedRoots);
-  const firstRoot = (roots, from) => {
-    let low = 0, high = roots.length;
-    while (low < high) {
-      const mid = low + high >>> 1;
-      if (roots[mid].sourceTo <= from) low = mid + 1;
-      else high = mid;
-    }
-    return low;
-  };
-  for (const piece of pieces) {
-    let oldIndex = firstRoot(base.roots, piece.beforeFrom), nextIndex = firstRoot(next.roots, piece.afterFrom);
-    if (piece.generated) {
-      const before = [], after = [];
-      for (; oldIndex < base.roots.length; oldIndex++) {
-        const root = base.roots[oldIndex];
-        if (piece.beforeFrom === piece.beforeTo) {
-          if (root.sourceFrom < piece.beforeFrom && piece.beforeFrom < root.sourceTo) before.push(root.id);
-          break;
-        }
-        if (root.sourceFrom >= piece.beforeTo) break;
-        before.push(root.id);
-      }
-      for (; nextIndex < next.roots.length && next.roots[nextIndex].sourceFrom < piece.afterTo; nextIndex++)
-        if (piece.afterFrom < piece.afterTo) after.push(nextIndex);
-      if (before.length && after.length) {
-        const representative2 = before[0];
-        for (const id of before) join(representative2, id);
-        for (const id of after) join(representative2, base.roots.length + id);
-      }
-      continue;
-    }
-    for (; oldIndex < base.roots.length && base.roots[oldIndex].sourceFrom < piece.beforeTo; oldIndex++) {
-      const old = base.roots[oldIndex];
-      const from = Math.max(old.sourceFrom, piece.beforeFrom) - piece.beforeFrom + piece.afterFrom;
-      const to = Math.min(old.sourceTo, piece.beforeTo) - piece.beforeFrom + piece.afterFrom;
-      while (nextIndex < next.roots.length && next.roots[nextIndex].sourceTo <= from) nextIndex++;
-      for (let index = nextIndex; index < next.roots.length && next.roots[index].sourceFrom < to; index++)
-        join(old.id, base.roots.length + index);
-    }
-  }
-  const groups = /* @__PURE__ */ new Map();
-  for (let i = 0; i < total; i++) {
-    const key = find(i), group = groups.get(key) ?? { beforeRoots: [], afterRoots: [] };
-    if (i < base.roots.length) group.beforeRoots.push(i);
-    else group.afterRoots.push(i - base.roots.length);
-    groups.set(key, group);
-  }
-  return [...groups.values()].map((group) => {
-    const a = group.beforeRoots.length, b = group.afterRoots.length;
-    let kind = !a ? "birth" : !b ? "deleted" : a === 1 && b === 1 ? "retained" : a === 1 ? "split" : b === 1 ? "join" : "repartition";
-    if (kind === "retained") {
-      const old = base.roots[group.beforeRoots[0]], root = next.roots[group.afterRoots[0]];
-      const touched = touchedSet.has(old.id);
-      if (!touched && old.tokenType === root.tokenType && old.tailFrom - old.sourceFrom === root.tailFrom - root.sourceFrom && base.source.slice(old.sourceFrom, old.sourceTo) === next.source.slice(root.sourceFrom, root.sourceTo)) kind = "untouched";
-    }
-    return { ...group, kind };
-  });
-}
-function selectBlockWindow(cache, patches) {
-  const first = patches[0], last = patches[patches.length - 1];
-  let containing = 0;
-  while (containing + 1 < cache.checkpoints.length && cache.checkpoints[containing + 1].offset <= first.from) containing++;
-  const leftIndex = Math.max(0, containing - 1);
-  let rightIndex = containing + 1;
-  while (rightIndex < cache.checkpoints.length && cache.checkpoints[rightIndex].offset < last.to) rightIndex++;
-  rightIndex = Math.min(cache.checkpoints.length - 1, rightIndex + 1);
-  return { leftIndex, rightIndex };
-}
-function prepareCandidate(base, patches, work, expectedDoc) {
-  return prepareCandidateInternal(base, patches, work, expectedDoc, false);
-}
-function preparePreservingSourceCandidate(base, patches, work, expectedDoc) {
-  return prepareCandidateInternal(base, patches, work, expectedDoc, true);
-}
-function prepareCandidateInternal(base, patches, work, expectedDoc, preserveProtected) {
-  if (!patches.length) {
-    if (expectedDoc && !expectedDoc.eq(base.verifiedBase.doc)) return { ok: false, reason: "semantic-mismatch", work };
-    return { ...finishUnchangedFile(base, work), edits: [] };
-  }
-  const { source, pieces } = spliceSource(base.verifiedBase, patches, work);
-  if (source === base.verifiedBase.source) {
-    if (expectedDoc && !expectedDoc.eq(base.verifiedBase.doc)) return { ok: false, reason: "semantic-mismatch", work };
-    return { ...finishUnchangedFile(base, work), edits: [] };
-  }
-  let parsed = captureFileWindow(base.cache.tokens, source, patches, base.verifiedBase.doc.type.schema, work, selectBlockWindow(base.cache.tokens, patches));
-  if (!parsed) {
-    work.mode = "full-fallback";
-    work.fallbackReason ??= "checkpoint-unproven";
-    parsed = captureFilePipeline(source, base.verifiedBase.doc.type.schema, work);
-  }
-  if (!parsed.ok) return { ...parsed, work };
-  if (expectedDoc && !parsed.value.doc.eq(expectedDoc)) return { ok: false, reason: "semantic-mismatch", work };
-  if (preserveProtected) {
-    const expected = [];
-    let index = 0;
-    for (const old of base.verifiedBase.protectedSources) {
-      while (index < pieces.length && pieces[index].beforeTo <= old.sourceFrom) index++;
-      const piece = pieces[index];
-      if (!piece || piece.generated || piece.beforeFrom > old.sourceFrom || piece.beforeTo < old.sourceTo)
-        return { ok: false, reason: "unsupported-step", work };
-      const delta = piece.afterFrom - piece.beforeFrom, sourceFrom = old.sourceFrom + delta, sourceTo = old.sourceTo + delta;
-      if (source.slice(sourceFrom, sourceTo) !== base.verifiedBase.source.slice(old.sourceFrom, old.sourceTo))
-        return { ok: false, reason: "unsupported-step", work };
-      expected.push({ ...old, sourceFrom, sourceTo });
-    }
-    if (!sameMetadata(expected, parsed.value.protectedSources)) return { ok: false, reason: "unsupported-step", work };
-  }
-  work.environmentChanged = !sameMetadata(foldDefinitionEvents(base.cache.tokens.definitions), foldDefinitionEvents(parsed.cache.definitions));
-  const environmentVersion = base.cache.environmentVersion + Number(work.environmentChanged);
-  const next = makeSession(source, parsed.value, base.verifiedBase.revision + 1);
-  work.rawTouchedBeforeRoots = rawTouchedRoots(base.verifiedBase, patches);
-  if (work.mode === "full-fallback") work.inlineRoots = next.roots.map((r2) => r2.id);
-  const correspondence = deriveRootCorrespondence(base.verifiedBase, next, pieces, work.rawTouchedBeforeRoots);
-  const session = registerSession(source, parsed.value, next.revision, parsed.cache, environmentVersion);
-  commitRecovery(base);
-  return { ok: true, session, edits: patches, file: { environmentVersion, correspondence, work } };
-}
-function prepareRawFileSourceEdits(base, input) {
-  const work = emptyFileParseWork();
-  const patches = validateSourcePatches(base, input);
-  if ("ok" in patches) return { ...patches, work };
-  const verified = prepareVerifiedFileBase(base, work);
-  if ("ok" in verified) return { ...verified, work };
-  return prepareCandidate(verified, patches, work);
-}
-
-// src/source-fidelity.ts
-import { Fragment as Fragment3 } from "prosemirror-model";
-import { EditorState as EditorState2 } from "prosemirror-state";
-import { AddMarkStep as AddMarkStep2, RemoveMarkStep as RemoveMarkStep2, ReplaceStep as ReplaceStep2, Mapping } from "prosemirror-transform";
+// src/source-empty-body.ts
+import { ReplaceStep as ReplaceStep2 } from "prosemirror-transform";
 
 // src/source-structure.ts
 import { AddMarkStep, RemoveMarkStep, ReplaceStep, ReplaceAroundStep, AttrStep, AddNodeMarkStep, RemoveNodeMarkStep } from "prosemirror-transform";
@@ -8335,7 +8480,7 @@ function makeRecipe(base, ledger, slots, render, rootHasClosedFences) {
         if (!text2.endsWith(output.eol)) fail();
         text2 = text2.slice(0, -output.eol.length);
       }
-      atoms2.push(generated("body", text2, anchor, stepOf(c2)));
+      atoms2.push({ ...generated("body", text2, anchor, stepOf(c2)), ownedBlank: !!output.ownedBlank, ...output.continuationIndent !== void 0 ? { continuationIndent: output.continuationIndent } : {} });
       if (n === lastVisible && keepTerminal) {
         atoms2.push(raw(keepTerminal));
         removed.add(keepTerminal);
@@ -8395,7 +8540,24 @@ function makeRecipe(base, ledger, slots, render, rootHasClosedFences) {
       drop.add(a);
       claims.push({ from: a.slot.from, to: a.slot.to, kind: "separator", unitId: a.slot.id, step });
     }
-    if (needed && !keep) {
+    if (keep?.slot && left?.continuationIndent !== void 0) {
+      const text2 = base.source.slice(keep.slot.from, keep.slot.to), eol = /(\r\n|\r|\n)$/.exec(text2)?.[0];
+      const neighbor = neighbors.get(keep.slot)?.left, component = neighbor === void 0 ? void 0 : dirty.get(neighbor);
+      const step = component && structuralStep(component);
+      if (step !== void 0 && left.step !== void 0 && eol) {
+        const padding = text2.slice(0, -eol.length);
+        let width = 0, at = 0;
+        while (at < padding.length && width < left.continuationIndent) {
+          width += padding[at++] === "	" ? 4 - width % 4 : 1;
+        }
+        if (width === left.continuationIndent) {
+          drop.add(keep);
+          before.set(keep, [generated("separator", eol, keep.anchor, step)]);
+          claims.push({ from: keep.slot.from, to: keep.slot.to, kind: "separator", unitId: keep.slot.id, step });
+        }
+      }
+    }
+    if (needed && !keep && !left?.ownedBlank) {
       const step = left?.step ?? right?.step;
       if (step === void 0) fail();
       const target = run.find((a) => a.kind === "blank") ?? right;
@@ -8527,8 +8689,450 @@ function applyStructuralTransaction(base, tr, render, rootHasClosedFences) {
   verifyRecipe(base, recipe);
   return { source: applyRecipe(base, recipe), edits: recipe.edits, changedRoots: recipe.changedRoots, unchanged: false };
 }
+function prepareEmptyParagraphEdits(base, tr, origin, body) {
+  const ledger = createLedger(base), step = tr.steps[0];
+  if (tr.steps.length !== 1 || Object.getPrototypeOf(step) !== ReplaceStep.prototype) fail();
+  advanceLedger(ledger, base.doc, tr.doc, step, 0);
+  finishLedger(base, tr, ledger);
+  const components = ledger.components.filter((c3) => c3.parent === c3.id), c2 = components[0];
+  if (components.length !== 1 || !c2 || c2.origins.length !== 1 || !sameOrigin(c2.origins[0], origin) || c2.births.length || c2.finalRuns.length !== 1 || c2.finalRuns[0].to - c2.finalRuns[0].from !== 1) fail();
+  const slots = partitionSlots(base), span = originSpan(base, origin);
+  const chosen = origin.kind === "blank" ? slots.find((s) => s.kind === "blank" && s.id === origin.id) : void 0;
+  if (origin.kind === "blank" && !chosen) fail();
+  const original = base.source.slice(span.from, span.to);
+  const eol = /(\r\n|\r|\n)$/.exec(original)?.[0] ?? slots.map((s) => /(\r\n|\r|\n)$/.exec(base.source.slice(s.from, s.to))?.[0]).find(Boolean) ?? "\n";
+  const tail = base.source.slice(span.to), next = slots.find((s) => s.from >= span.to && ["body", "protected"].includes(s.kind));
+  const between = next ? base.source.slice(span.to, next.from) : tail;
+  const previous = slots.filter((s) => s.to <= span.from && ["body", "protected"].includes(s.kind)).at(-1);
+  const prefix = chosen && previous && !/[\r\n][ \t]*(?:\r\n|\r|\n)$/.test(base.source.slice(previous.from, span.from)) ? eol : "";
+  const suffix = origin.kind === "blank" ? next && !/[\r\n]/.test(between) ? eol : "" : tail ? next && next.from === span.to ? eol + eol : eol : "";
+  const claims = [{ ...span, kind: chosen ? "blank" : "anchor", step: 0, ...chosen ? { unitId: chosen.id } : {} }];
+  const pieces = [], kept = [];
+  const keep = (from, to) => {
+    if (from === to) return;
+    const identity = { from, to, kind: "envelope", id: kept.length };
+    kept.push(identity);
+    pieces.push({ kind: "raw", span: { from, to }, identity });
+  };
+  keep(0, span.from);
+  pieces.push({ kind: "generated", text: prefix + body });
+  if (chosen) {
+    const terminal = /(\r\n|\r|\n)$/.exec(original)?.[0];
+    if (!terminal) fail();
+    keep(span.to - terminal.length, span.to);
+  }
+  pieces.push({ kind: "generated", text: suffix });
+  keep(span.to, base.source.length);
+  if (suffix && chosen) claims.push({ from: span.to, to: span.to, kind: "anchor", step: 0 });
+  const recipe = { claims, kept, pieces, edits: [], changedRoots: [], witnesses: c2.witnesses };
+  verifyRecipe(base, recipe);
+  return recipe.edits;
+}
+
+// src/source-empty-body.ts
+function renderPrefix(source, prefix) {
+  return prefix.map((p) => "spaces" in p ? " ".repeat(p.spaces) : source.slice(p.from, p.to)).join("");
+}
+function escapeEmptyText(node) {
+  return serializeSourceInlineBody(node);
+}
+function prepareEmptyBodyTransaction(base, tr, facts) {
+  const reject = (reason) => ({ kind: "unsupported", reason });
+  let emptyInput = false;
+  for (let i = 0; i < tr.steps.length; i++) {
+    const step = tr.steps[i];
+    if (!(step instanceof ReplaceStep2)) continue;
+    let blocks = false;
+    step.slice.content.forEach((n) => {
+      if (n.isBlock) blocks = true;
+    });
+    if (blocks) continue;
+    const before = tr.docs[i];
+    if (!before) return reject("empty-chain");
+    try {
+      const parent = before.resolve(step.from).parent;
+      if (parent.isTextblock && parent.content.size === 0) emptyInput = true;
+    } catch {
+      return reject("invalid-range");
+    }
+  }
+  if (!emptyInput) return { kind: "not-empty" };
+  if (tr.steps.length !== 1) return reject("empty-multistep");
+  const first = tr.steps[0];
+  try {
+    if (tr.steps.length !== 1 || tr.docs.length !== 1 || Object.getPrototypeOf(first) !== ReplaceStep2.prototype || !tr.before.eq(base.doc) || !tr.docs[0].eq(base.doc) || first.structure || first.from !== first.to || first.slice.openStart || first.slice.openEnd || !first.slice.size) return reject("empty-step");
+    const applied = first.apply(tr.docs[0]);
+    if (applied.failed || !applied.doc?.eq(tr.doc)) return reject("empty-chain");
+    tr.doc.check();
+    const certified = capturedEmptyBodies(base.source, base.doc, base.roots, base.layout);
+    if (certified !== facts) return reject("empty-binding");
+    const matches = facts.filter((f) => f.pmAt === first.from && f.parent === base.doc.resolve(first.from).parent);
+    if (matches.length !== 1) return reject("empty-fact");
+    const fact = matches[0], after = tr.doc.resolve(first.from).parent;
+    if (!["paragraph", "heading", "code_block", "frontmatter"].includes(fact.parent.type.name) || !fact.parent.sameMarkup(after) || fact.parent.marks.length) return reject("empty-markup");
+    let plain = true;
+    first.slice.content.forEach((n) => {
+      if (!n.isText || n.marks.length) plain = false;
+    });
+    if (!plain) return reject("empty-content");
+    const place = fact.place, literal = place.kind === "literal", text2 = after.textContent;
+    if (!literal && /[\r\n]/.test(text2)) return reject("empty-newline");
+    const root = fact.rootId === void 0 ? void 0 : base.roots[fact.rootId];
+    if (place.kind !== "layout") {
+      if (!root || !sourceRootHasClosedFences(root)) return reject("empty-owner");
+      const range = place.kind === "inline" || place.kind === "nested-blank" ? place.range : { from: place.at, to: place.at };
+      if (range.from < root.sourceFrom || range.to > root.sourceTo) return reject("empty-owner-range");
+      if (base.protectedSources.some((p) => range.from === range.to ? p.sourceFrom < range.from && range.from < p.sourceTo : p.sourceFrom < range.to && p.sourceTo > range.from)) return reject("empty-protected");
+    }
+    const body = literal ? text2 : escapeEmptyText(after);
+    let edits;
+    switch (place.kind) {
+      case "inline":
+        edits = [{ ...place.range, text: place.before + body + place.after }];
+        break;
+      case "missing-cell": {
+        const j = place.slot - place.present;
+        if (j < 0) return reject("empty-slot");
+        edits = [{ from: place.at, to: place.at, text: place.closingPipe ? "|".repeat(j) + body + "|" : "|".repeat(j + 1) + body }];
+        break;
+      }
+      case "prepend":
+        edits = [{ from: place.at, to: place.at, text: body + (place.eol ? base.source.slice(place.eol.from, place.eol.to) : "\n") + renderPrefix(base.source, place.continuation) }];
+        break;
+      case "literal": {
+        const eol = base.source.slice(place.eol.from, place.eol.to), prefix = renderPrefix(base.source, place.prefix);
+        const payload = text2.split("\n").join(eol + prefix);
+        edits = [{ from: place.at, to: place.at, text: place.terminal ? payload : prefix + payload + eol }];
+        break;
+      }
+      case "nested-blank": {
+        const eol = place.eol ? base.source.slice(place.eol.from, place.eol.to) : base.source.slice(root.sourceFrom, place.range.from).match(/\r\n|\r|\n/g)?.at(-1) ?? "\n";
+        const prefix = renderPrefix(base.source, place.prefix);
+        const before = place.leftBody && !place.rightBody ? eol + prefix : "";
+        const after2 = place.rightBody ? eol + prefix : "";
+        edits = [{ ...place.range, text: before + body + after2 }];
+        break;
+      }
+      case "layout":
+        edits = prepareEmptyParagraphEdits(base, tr, place.origin, body);
+        break;
+      default:
+        return reject("empty-place");
+    }
+    let end = -1;
+    for (const e of edits) {
+      if (!Number.isInteger(e.from) || !Number.isInteger(e.to) || e.from < end || e.to < e.from || e.to > base.source.length) return reject("empty-range");
+      if (root && (e.from < root.sourceFrom || e.to > root.sourceTo)) return reject("empty-owner-range");
+      if (base.protectedSources.some((p) => e.from === e.to ? p.sourceFrom < e.from && e.from < p.sourceTo : p.sourceFrom < e.to && p.sourceTo > e.from)) return reject("empty-protected");
+      end = e.to;
+    }
+    return { kind: "ready", recipe: { edits, changedRoots: root ? [root.id] : [] } };
+  } catch {
+    return reject("empty-invalid");
+  }
+}
+
+// src/source-file-cache.ts
+function emptyFileParseWork() {
+  return {
+    mode: "unchanged",
+    blockWindows: [],
+    blockParseCalls: 0,
+    topLevelRunnerCalls: 0,
+    blockRuleCalls: 0,
+    nestedTokenizeCalls: 0,
+    blockLinesVisited: 0,
+    inlineParseCalls: 0,
+    inlineInputUnits: 0,
+    inlineRoots: [],
+    rawTouchedBeforeRoots: [],
+    environmentChanged: false,
+    legacyParseCalls: 0,
+    fullCaptureCalls: 0,
+    pmEmissionTokenCount: 0,
+    preprocessedCodeUnits: 0,
+    lineTableCodeUnits: 0,
+    rawSplicedCodeUnits: 0,
+    inlineEffectReplayCount: 0
+  };
+}
+var fileCaches = /* @__PURE__ */ new WeakMap();
+function makeSession(source, value, revision) {
+  return Object.freeze({
+    revision,
+    source,
+    doc: value.doc,
+    textSpans: value.textRuns,
+    roots: value.roots,
+    gaps: value.gaps,
+    protectedSources: value.protectedSources,
+    layout: value.layout
+  });
+}
+function registerSession(source, value, revision, tokens, environmentVersion) {
+  const session = makeSession(source, value, revision);
+  fileCaches.set(session, { canonical: session, tokens, environmentVersion });
+  return session;
+}
+function createFileSourceSession(source, schema2) {
+  const parsed = captureFilePipeline(source, schema2);
+  if (!parsed.ok) return parsed;
+  return { ok: true, session: registerSession(source, parsed.value, 0, parsed.cache, 0) };
+}
+function sameMetadata(a, b) {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object" || Array.isArray(a) !== Array.isArray(b)) return false;
+  const left = a, right = b, keys = Object.keys(left);
+  return keys.length === Object.keys(right).length && keys.every((k) => Object.hasOwn(right, k) && sameMetadata(left[k], right[k]));
+}
+function prepareVerifiedFileBase(callerBase, work) {
+  const hit = fileCaches.get(callerBase);
+  if (hit) return { callerBase, verifiedBase: hit.canonical, cache: hit, recovery: false };
+  work.mode = "full-fallback";
+  work.fallbackReason = "cache-miss";
+  const parsed = captureFilePipeline(callerBase.source, callerBase.doc.type.schema, work);
+  if (!parsed.ok) return parsed;
+  work.inlineRoots = parsed.value.roots.map((root) => root.id);
+  const actual = makeSession(callerBase.source, parsed.value, callerBase.revision);
+  if (actual.doc.type.schema !== callerBase.doc.type.schema || !actual.doc.eq(callerBase.doc) || !sameMetadata(actual.roots, callerBase.roots) || !sameMetadata(actual.gaps, callerBase.gaps) || !sameMetadata(actual.protectedSources, callerBase.protectedSources) || !sameMetadata(actual.textSpans, callerBase.textSpans) || !sameMetadata(actual.layout.blankLines, callerBase.layout.blankLines) || !sameMetadata(actual.layout.fallback, callerBase.layout.fallback) || callerBase.layout.lists !== void 0 && !sameMetadata(actual.layout.lists, callerBase.layout.lists))
+    return { ok: false, reason: "unsupported-source" };
+  return {
+    callerBase,
+    verifiedBase: actual,
+    cache: { canonical: actual, tokens: parsed.cache, environmentVersion: 0 },
+    recovery: true
+  };
+}
+function commitRecovery(base) {
+  if (base.recovery) fileCaches.set(base.callerBase, base.cache);
+}
+function finishUnchangedFile(base, work) {
+  commitRecovery(base);
+  return { ok: true, session: base.callerBase, file: {
+    environmentVersion: base.cache.environmentVersion,
+    correspondence: base.verifiedBase.roots.map((r2) => ({ beforeRoots: [r2.id], afterRoots: [r2.id], kind: "untouched" })),
+    work
+  } };
+}
+function splitsBoundary(source, offset) {
+  if (offset <= 0 || offset >= source.length) return false;
+  return source[offset - 1] === "\r" && source[offset] === "\n" || /[\uD800-\uDBFF]/.test(source[offset - 1]) && /[\uDC00-\uDFFF]/.test(source[offset]);
+}
+function validateSourcePatches(base, input) {
+  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision !== base.revision) return { ok: false, reason: "stale-document" };
+  let end = 0, previous;
+  const patches = [];
+  for (const patch of input.edits) {
+    if (!Number.isSafeInteger(patch.from) || !Number.isSafeInteger(patch.to) || typeof patch.removed !== "string" || typeof patch.text !== "string" || patch.from < end || patch.to < patch.from || patch.to > base.source.length || previous && previous.from === patch.from || splitsBoundary(base.source, patch.from) || splitsBoundary(base.source, patch.to) || base.source.slice(patch.from, patch.to) !== patch.removed) return { ok: false, reason: "unmapped-range" };
+    previous = patch;
+    end = patch.to;
+    if (patch.text !== patch.removed) patches.push({ ...patch });
+  }
+  return patches;
+}
+function spliceSource(base, patches, work) {
+  const chunks = [], pieces = [];
+  let before = 0, after = 0;
+  const keep = (to) => {
+    if (to > before) {
+      const text2 = base.source.slice(before, to);
+      chunks.push(text2);
+      pieces.push({ beforeFrom: before, beforeTo: to, afterFrom: after, afterTo: after + text2.length, generated: false });
+      after += text2.length;
+    }
+  };
+  for (const patch of patches) {
+    keep(patch.from);
+    chunks.push(patch.text);
+    pieces.push({
+      beforeFrom: patch.from,
+      beforeTo: patch.to,
+      afterFrom: after,
+      afterTo: after + patch.text.length,
+      generated: true
+    });
+    before = patch.to;
+    after += patch.text.length;
+  }
+  keep(base.source.length);
+  const source = chunks.join("");
+  work.rawSplicedCodeUnits += source.length;
+  return { source, pieces };
+}
+function foldDefinitionEvents(events) {
+  const references = {};
+  const footnotes = /* @__PURE__ */ new Set();
+  for (const event of [...events].sort((a, b) => a.sourceFrom - b.sourceFrom)) {
+    if (event.kind === "reference") {
+      if (typeof references[event.label] === "undefined") references[event.label] = { href: event.href, title: event.title };
+    } else footnotes.add(event.label);
+  }
+  return { references, footnotes: [...footnotes].sort() };
+}
+function rawTouchedRoots(base, patches) {
+  const ids = /* @__PURE__ */ new Set();
+  for (const patch of patches) {
+    let low = 0, high = base.roots.length;
+    while (low < high) {
+      const mid = low + high >>> 1;
+      if (base.roots[mid].sourceTo <= patch.from) low = mid + 1;
+      else high = mid;
+    }
+    for (let at = low; at < base.roots.length; at++) {
+      const root = base.roots[at];
+      if (patch.from === patch.to) {
+        if (root.sourceFrom < patch.from && patch.from < root.sourceTo) ids.add(root.id);
+        break;
+      }
+      if (root.sourceFrom >= patch.to) break;
+      ids.add(root.id);
+    }
+  }
+  return [...ids].sort((a, b) => a - b);
+}
+function deriveRootCorrespondence(base, next, pieces, touchedRoots) {
+  const total = base.roots.length + next.roots.length, parent = Array.from({ length: total }, (_, i) => i);
+  const find = (n) => {
+    while (parent[n] !== n) {
+      parent[n] = parent[parent[n]];
+      n = parent[n];
+    }
+    return n;
+  };
+  const join = (a, b) => {
+    parent[find(a)] = find(b);
+  };
+  const touchedSet = new Set(touchedRoots);
+  const firstRoot = (roots, from) => {
+    let low = 0, high = roots.length;
+    while (low < high) {
+      const mid = low + high >>> 1;
+      if (roots[mid].sourceTo <= from) low = mid + 1;
+      else high = mid;
+    }
+    return low;
+  };
+  for (const piece of pieces) {
+    let oldIndex = firstRoot(base.roots, piece.beforeFrom), nextIndex = firstRoot(next.roots, piece.afterFrom);
+    if (piece.generated) {
+      const before = [], after = [];
+      for (; oldIndex < base.roots.length; oldIndex++) {
+        const root = base.roots[oldIndex];
+        if (piece.beforeFrom === piece.beforeTo) {
+          if (root.sourceFrom < piece.beforeFrom && piece.beforeFrom < root.sourceTo) before.push(root.id);
+          break;
+        }
+        if (root.sourceFrom >= piece.beforeTo) break;
+        before.push(root.id);
+      }
+      for (; nextIndex < next.roots.length && next.roots[nextIndex].sourceFrom < piece.afterTo; nextIndex++)
+        if (piece.afterFrom < piece.afterTo) after.push(nextIndex);
+      if (before.length && after.length) {
+        const representative2 = before[0];
+        for (const id of before) join(representative2, id);
+        for (const id of after) join(representative2, base.roots.length + id);
+      }
+      continue;
+    }
+    for (; oldIndex < base.roots.length && base.roots[oldIndex].sourceFrom < piece.beforeTo; oldIndex++) {
+      const old = base.roots[oldIndex];
+      const from = Math.max(old.sourceFrom, piece.beforeFrom) - piece.beforeFrom + piece.afterFrom;
+      const to = Math.min(old.sourceTo, piece.beforeTo) - piece.beforeFrom + piece.afterFrom;
+      while (nextIndex < next.roots.length && next.roots[nextIndex].sourceTo <= from) nextIndex++;
+      for (let index = nextIndex; index < next.roots.length && next.roots[index].sourceFrom < to; index++)
+        join(old.id, base.roots.length + index);
+    }
+  }
+  const groups = /* @__PURE__ */ new Map();
+  for (let i = 0; i < total; i++) {
+    const key = find(i), group = groups.get(key) ?? { beforeRoots: [], afterRoots: [] };
+    if (i < base.roots.length) group.beforeRoots.push(i);
+    else group.afterRoots.push(i - base.roots.length);
+    groups.set(key, group);
+  }
+  return [...groups.values()].map((group) => {
+    const a = group.beforeRoots.length, b = group.afterRoots.length;
+    let kind = !a ? "birth" : !b ? "deleted" : a === 1 && b === 1 ? "retained" : a === 1 ? "split" : b === 1 ? "join" : "repartition";
+    if (kind === "retained") {
+      const old = base.roots[group.beforeRoots[0]], root = next.roots[group.afterRoots[0]];
+      const touched = touchedSet.has(old.id);
+      if (!touched && old.tokenType === root.tokenType && old.tailFrom - old.sourceFrom === root.tailFrom - root.sourceFrom && base.source.slice(old.sourceFrom, old.sourceTo) === next.source.slice(root.sourceFrom, root.sourceTo)) kind = "untouched";
+    }
+    return { ...group, kind };
+  });
+}
+function selectBlockWindow(cache, patches) {
+  const first = patches[0], last = patches[patches.length - 1];
+  let containing = 0;
+  while (containing + 1 < cache.checkpoints.length && cache.checkpoints[containing + 1].offset <= first.from) containing++;
+  const leftIndex = Math.max(0, containing - 1);
+  let rightIndex = containing + 1;
+  while (rightIndex < cache.checkpoints.length && cache.checkpoints[rightIndex].offset < last.to) rightIndex++;
+  rightIndex = Math.min(cache.checkpoints.length - 1, rightIndex + 1);
+  return { leftIndex, rightIndex };
+}
+function prepareCandidate(base, patches, work, expectedDoc) {
+  return prepareCandidateInternal(base, patches, work, expectedDoc, false);
+}
+function preparePreservingSourceCandidate(base, patches, work, expectedDoc) {
+  return prepareCandidateInternal(base, patches, work, expectedDoc, true);
+}
+function prepareCandidateInternal(base, patches, work, expectedDoc, preserveProtected) {
+  if (!patches.length) {
+    if (expectedDoc && !expectedDoc.eq(base.verifiedBase.doc)) return { ok: false, reason: "semantic-mismatch", work };
+    return { ...finishUnchangedFile(base, work), edits: [] };
+  }
+  const { source, pieces } = spliceSource(base.verifiedBase, patches, work);
+  if (source === base.verifiedBase.source) {
+    if (expectedDoc && !expectedDoc.eq(base.verifiedBase.doc)) return { ok: false, reason: "semantic-mismatch", work };
+    return { ...finishUnchangedFile(base, work), edits: [] };
+  }
+  let parsed = captureFileWindow(base.cache.tokens, source, patches, base.verifiedBase.doc.type.schema, work, selectBlockWindow(base.cache.tokens, patches));
+  if (!parsed) {
+    work.mode = "full-fallback";
+    work.fallbackReason ??= "checkpoint-unproven";
+    parsed = captureFilePipeline(source, base.verifiedBase.doc.type.schema, work);
+  }
+  if (!parsed.ok) return { ...parsed, work };
+  if (expectedDoc && !parsed.value.doc.eq(expectedDoc)) return { ok: false, reason: "semantic-mismatch", work };
+  if (preserveProtected) {
+    const expected = [];
+    let index = 0;
+    for (const old of base.verifiedBase.protectedSources) {
+      while (index < pieces.length && pieces[index].beforeTo <= old.sourceFrom) index++;
+      const piece = pieces[index];
+      if (!piece || piece.generated || piece.beforeFrom > old.sourceFrom || piece.beforeTo < old.sourceTo)
+        return { ok: false, reason: "unsupported-step", work };
+      const delta = piece.afterFrom - piece.beforeFrom, sourceFrom = old.sourceFrom + delta, sourceTo = old.sourceTo + delta;
+      if (source.slice(sourceFrom, sourceTo) !== base.verifiedBase.source.slice(old.sourceFrom, old.sourceTo))
+        return { ok: false, reason: "unsupported-step", work };
+      expected.push({ ...old, sourceFrom, sourceTo });
+    }
+    if (!sameMetadata(expected, parsed.value.protectedSources)) return { ok: false, reason: "unsupported-step", work };
+  }
+  work.environmentChanged = !sameMetadata(foldDefinitionEvents(base.cache.tokens.definitions), foldDefinitionEvents(parsed.cache.definitions));
+  const environmentVersion = base.cache.environmentVersion + Number(work.environmentChanged);
+  const next = makeSession(source, parsed.value, base.verifiedBase.revision + 1);
+  work.rawTouchedBeforeRoots = rawTouchedRoots(base.verifiedBase, patches);
+  if (work.mode === "full-fallback") work.inlineRoots = next.roots.map((r2) => r2.id);
+  const correspondence = deriveRootCorrespondence(base.verifiedBase, next, pieces, work.rawTouchedBeforeRoots);
+  const session = registerSession(source, parsed.value, next.revision, parsed.cache, environmentVersion);
+  commitRecovery(base);
+  return { ok: true, session, edits: patches, file: { environmentVersion, correspondence, work } };
+}
+function prepareRawFileSourceEdits(base, input) {
+  const work = emptyFileParseWork();
+  const patches = validateSourcePatches(base, input);
+  if ("ok" in patches) return { ...patches, work };
+  const verified = prepareVerifiedFileBase(base, work);
+  if ("ok" in verified) return { ...verified, work };
+  return prepareCandidate(verified, patches, work);
+}
 
 // src/source-fidelity.ts
+import { Fragment as Fragment3 } from "prosemirror-model";
+import { EditorState as EditorState2 } from "prosemirror-state";
+import { AddMarkStep as AddMarkStep2, RemoveMarkStep as RemoveMarkStep2, ReplaceStep as ReplaceStep3, Mapping } from "prosemirror-transform";
 function prepareFileSourceEdits(base, input) {
   return prepareRawFileSourceEdits(base, input);
 }
@@ -8570,7 +9174,7 @@ function applySourceTextTransactionWithEdit(base, tr, context) {
   if (tr.steps.length !== 1) return { ok: false, reason: "unsupported-step" };
   if (tr.storedMarksSet) return { ok: false, reason: "unsupported-step" };
   const actual = tr.steps[0];
-  if (Object.getPrototypeOf(actual) !== ReplaceStep2.prototype || tr.docs.length !== 1 || !tr.docs[0].eq(base.doc)) return { ok: false, reason: "unsupported-step" };
+  if (Object.getPrototypeOf(actual) !== ReplaceStep3.prototype || tr.docs.length !== 1 || !tr.docs[0].eq(base.doc)) return { ok: false, reason: "unsupported-step" };
   const applied = actual.apply(base.doc);
   if (applied.failed || !applied.doc?.eq(tr.doc)) return { ok: false, reason: "unsupported-step" };
   const step = actual;
@@ -8743,7 +9347,7 @@ function authorizeStepRoots(before, step, ownership, authorized) {
     throw new UnsupportedBlockTransaction();
   const a = before.resolve(from), b = before.resolve(to);
   if (splitsInlineText(a) || splitsInlineText(b)) throw new UnsupportedBlockTransaction();
-  if (step instanceof ReplaceStep2) {
+  if (step instanceof ReplaceStep3) {
     if (step.structure || !a.sameParent(b) || !a.parent.inlineContent || step.slice.openStart || step.slice.openEnd)
       throw new UnsupportedBlockTransaction();
     let inline = true;
@@ -8765,7 +9369,7 @@ function changedNaturalRoots(base, tr, ownership) {
   const authorized = /* @__PURE__ */ new Set();
   for (let i = 0; i < tr.steps.length; i++) {
     const step = tr.steps[i], prototype = Object.getPrototypeOf(step);
-    if (prototype !== ReplaceStep2.prototype && prototype !== AddMarkStep2.prototype && prototype !== RemoveMarkStep2.prototype)
+    if (prototype !== ReplaceStep3.prototype && prototype !== AddMarkStep2.prototype && prototype !== RemoveMarkStep2.prototype)
       throw new UnsupportedBlockTransaction();
     const before = tr.docs[i];
     if (before.childCount !== base.doc.childCount) throw new UnsupportedBlockTransaction();
@@ -8902,13 +9506,29 @@ function applySourceBlockTransaction(base, tr) {
       if (result.failed || !result.doc || !result.doc.eq(after)) throw new UnsupportedBlockTransaction();
     }
     tr.doc.check();
+    const empty2 = prepareEmptyBodyTransaction(base, tr, capturedEmptyBodies(base.source, base.doc, base.roots, base.layout) ?? []);
+    if (empty2.kind === "unsupported") throw new UnsupportedBlockTransaction();
+    if (empty2.kind === "ready") {
+      const edits2 = [...empty2.recipe.edits], changedRoots2 = [...empty2.recipe.changedRoots];
+      const parsed2 = preparePreservingSourceCandidate(verified, edits2.map((edit) => ({ ...edit, removed: base.source.slice(edit.from, edit.to) })), work, tr.doc);
+      if (!parsed2.ok) return { ok: false, reason: parsed2.reason };
+      return { ok: true, session: parsed2.session, file: parsed2.file, mode: "fragment-render", edits: edits2, changedRoots: changedRoots2 };
+    }
     if (classification === "structural") {
       const render = (nodes, positions) => {
         const lists = [], styles2 = transactionListStyles(tr, authority.facts, nodes.map((node, i) => ({ node, pos: positions[i] }))), rendered = nodes.map((node, i) => rootRenderNode(node, positions[i], styles2, lists)), doc2 = tr.doc.type.create(tr.doc.attrs, Fragment3.fromArray(rendered));
-        const text2 = serializeSourceRootMarkdown(doc2, { lists }), last = rendered[rendered.length - 1];
+        let ownedBlank = false, blankTerminal = false, continuationIndent;
+        const text2 = serializeSourceRootMarkdown(doc2, { lists, onContinuationIndent: (indent) => {
+          continuationIndent = indent;
+        }, onOwnedBlank: (terminal) => {
+          ownedBlank = true;
+          blankTerminal = terminal;
+        } }), last = rendered[rendered.length - 1];
         return {
           text: text2,
-          terminal: last.type.name === "table" || endsInTerminalHardbreak(last) ? "content-eol" : "none",
+          ownedBlank,
+          ...continuationIndent !== void 0 ? { continuationIndent } : {},
+          terminal: last.type.name === "table" || endsInTerminalHardbreak(last) || blankTerminal ? "content-eol" : "none",
           family: last.type.name === "table" ? "table" : ["paragraph", "heading", "bullet_list", "ordered_list", "blockquote", "horizontal_rule"].includes(last.type.name) ? "flow" : "closed-literal",
           eol: "\n"
         };
@@ -8926,7 +9546,7 @@ function applySourceBlockTransaction(base, tr) {
       return { ...finishUnchangedFile(verified, work), mode: "unchanged", edits: [], changedRoots: [] };
     }
     if (changedRoots.some((id) => !sourceRootHasClosedFences(ownership.rootById[id]))) throw new UnsupportedBlockTransaction();
-    if (tr.steps.length === 1 && tr.steps[0] instanceof ReplaceStep2) {
+    if (tr.steps.length === 1 && tr.steps[0] instanceof ReplaceStep3) {
       const replay = EditorState2.create({ doc: base.doc }).tr.step(tr.steps[0]);
       if (!replay.doc.eq(tr.doc)) return { ok: false, reason: "unsupported-step" };
       const exact = applySourceTextTransactionWithEdit(base, replay, { verified, work, verifyEdit: (edit) => {

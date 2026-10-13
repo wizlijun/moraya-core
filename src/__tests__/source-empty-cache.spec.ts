@@ -115,3 +115,65 @@ it('pure structural block-slice chains retain the existing empty paragraph behav
  const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(true);if(!r.ok)throw Error(r.reason);
  expect(r.session.source).toBe('\n\n');expect(r.session.doc.eq(tr.doc)).toBe(true);expect(b.source).toBe('');
 });
+
+it.each([
+ ['> A\r\n>\r\n',[2,1],'> A\r\n>\r\n>X\r\n'],
+ ['- # H\r\n',[2,0,0],'- X\r\n  # H\r\n'],
+ ['[^e]:\r\n',[2,0],'[^e]:X\r\n'],
+] as const)('replays empty facts after prefix byte and line changes %j',(tail,path,expected)=>{
+ const b=open('A\r\n\r\n'+tail),r=prepareFileSourceEdits(b,{expectedRevision:b.revision,edits:[{from:0,to:1,removed:'A',text:'Longer\r\n\r\nNew'}]});
+ expect(r.ok).toBe(true);if(!r.ok)throw Error(r.reason);
+ const s=r.session,tr=EditorState.create({doc:s.doc}).tr.insertText('X',at(s.doc,path)),typed=applySourceBlockTransaction(s,tr);
+ expect(typed.ok,typed.ok?undefined:typed.reason).toBe(true);if(!typed.ok)throw Error(typed.reason);
+ expect(typed.session.source).toBe('Longer\r\n\r\nNew\r\n\r\n'+expected);expect(typed.session.doc.eq(tr.doc)).toBe(true);
+});
+it('pending nested facts replay once and never transfer across equal parses',()=>{
+ const raw='> A\n>\n>',a=captureFilePipeline(raw);expect(a.ok).toBe(true);if(!a.ok)throw Error(a.reason);
+ const first=replayFilePipeline(a.cache),second=replayFilePipeline(a.cache);expect(first.ok&&second.ok).toBe(true);if(!first.ok||!second.ok)throw Error('replay');
+ expect(first.value.doc.firstChild!.childCount).toBe(3);expect(second.value.doc.eq(first.value.doc)).toBe(true);
+ const fa=capturedEmptyBodies(raw,first.value.doc,first.value.roots,first.value.layout)!;
+ const fb=capturedEmptyBodies(raw,second.value.doc,second.value.roots,second.value.layout)!;
+ expect(fa).toHaveLength(2);expect(fb).toHaveLength(2);expect(fa[0]!.parent).not.toBe(fb[0]!.parent);
+ expect(capturedEmptyBodies(raw,second.value.doc,first.value.roots,first.value.layout)).toBeUndefined();
+ const b=open(raw),tr=EditorState.create({doc:b.doc}).tr.insertText('X',at(b.doc,[0,2]));
+ expect(prepareEmptyBodyTransaction(b,tr,fa).kind).toBe('unsupported');
+ const copied={...b,layout:JSON.parse(JSON.stringify(b.layout)) as typeof b.layout};
+ expect(capturedEmptyBodies(raw,copied.doc,copied.roots,copied.layout)).toBeUndefined();
+ const recaptured=applySourceBlockTransaction(copied,tr);expect(recaptured.ok).toBe(true);
+ const marked=EditorState.create({doc:b.doc}).tr.insertText('X',at(b.doc,[0,2])).addMark(at(b.doc,[0,2]),at(b.doc,[0,2])+1,b.doc.type.schema.marks.strong!.create());
+ expect(applySourceBlockTransaction(b,marked).ok).toBe(false);
+ const valid=applySourceBlockTransaction(b,tr);expect(valid.ok).toBe(true);if(valid.ok)expect(valid.session.source).toBe('> A\n>\n>\n>X');
+});
+it('nested selected blank preserves protected scopes and exact translated raw ranges',()=>{
+ const raw='> A\n>\n>\n> [ref]: /u\n>\n> B\n\n[top]: /v\n',b=open(raw);
+ const facts=capturedEmptyBodies(raw,b.doc,b.roots,b.layout)!,f=facts.find(x=>x.place.kind==='nested-blank')!;
+ expect(f).toBeDefined();const tr=EditorState.create({doc:b.doc}).tr.insertText('X',f.pmAt),r=applySourceBlockTransaction(b,tr);
+ expect(r.ok,r.ok?undefined:r.reason).toBe(true);if(!r.ok)throw Error(r.reason);
+ expect(r.session.doc.eq(tr.doc)).toBe(true);
+ for(const [i,p] of b.protectedSources.entries()){
+  const shift=r.edits.filter(e=>e.to<=p.sourceFrom).reduce((n,e)=>n+e.text.length-(e.to-e.from),0),next=r.session.protectedSources[i]!;
+  expect(next).toEqual({...p,sourceFrom:p.sourceFrom+shift,sourceTo:p.sourceTo+shift});
+  expect(r.session.source.slice(next.sourceFrom,next.sourceTo)).toBe(raw.slice(p.sourceFrom,p.sourceTo));
+ }
+ expect(b.protectedSources.map(p=>p.scope)).toEqual(['nested','top-level']);
+});
+it('legacy sync and async never adopt source-only nested blank semantics',async()=>{
+ for(const raw of ['> A\n>\n>','[^e]:\n']){
+  const sync=markdown.parseMarkdown(raw),asyncDoc=await markdown.parseMarkdownAsync(raw);
+  expect(sync.eq(asyncDoc)).toBe(true);
+  if(raw.startsWith('>')){expect(sync.firstChild!.childCount).toBe(1);expect(open(raw).doc.firstChild!.childCount).toBe(3)}
+  else {expect(sync.firstChild!.type.name).toBe('footnote_definition');expect(sync.firstChild!.childCount).toBe(1)}
+ }
+});
+
+it('only a complete raw TAB indent boundary can certify a nested blank',()=>{
+ const partial=open('- A\n \t\n'),complete=open('- A\n  - B\n \t\n');
+ expect(capturedEmptyBodies(partial.source,partial.doc,partial.roots,partial.layout)!.some(f=>f.place.kind==='nested-blank')).toBe(false);
+ expect(markdown.parseMarkdown(partial.source).firstChild!.firstChild!.childCount).toBe(1);
+ const fact=capturedEmptyBodies(complete.source,complete.doc,complete.roots,complete.layout)!.find(f=>f.place.kind==='nested-blank');
+ expect(fact).toBeDefined();expect(fact!.place.kind).toBe('nested-blank');
+ const tr=EditorState.create({doc:complete.doc}).tr.insertText('X',fact!.pmAt),r=applySourceBlockTransaction(complete,tr);
+ expect(r.ok,r.ok?undefined:r.reason).toBe(true);if(!r.ok)throw Error(r.reason);
+ expect(r.session.doc.eq(tr.doc)).toBe(true);expect(r.session.source).toBe('- A\n  - B\n \t\n \tX\n');
+ expect(markdown.parseMarkdown(complete.source).firstChild!.firstChild!.lastChild!.firstChild!.childCount).toBe(1);
+});

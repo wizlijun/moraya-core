@@ -183,6 +183,60 @@ type SourceBlockResult = {
 } | FidelityFailure;
 declare function applySourceBlockTransaction(base: SourceSession, tr: Transaction): SourceBlockResult;
 
+type RawRange = Readonly<{
+    from: number;
+    to: number;
+}>;
+type SourcePrefix = readonly (RawRange | Readonly<{
+    spaces: number;
+}>)[];
+type EmptyPlace = Readonly<{
+    kind: 'inline';
+    range: RawRange;
+    before: string;
+    after: string;
+}> | Readonly<{
+    kind: 'missing-cell';
+    at: number;
+    row: number;
+    slot: number;
+    present: number;
+    closingPipe: boolean;
+}> | Readonly<{
+    kind: 'literal';
+    at: number;
+    terminal?: RawRange;
+    eol: RawRange;
+    prefix: SourcePrefix;
+    closed: true;
+}> | Readonly<{
+    kind: 'prepend';
+    at: number;
+    eol: RawRange | undefined;
+    continuation: SourcePrefix;
+}> | Readonly<{
+    kind: 'layout';
+    origin: {
+        kind: 'blank';
+        id: number;
+    } | {
+        kind: 'fallback';
+    };
+}> | Readonly<{
+    kind: 'nested-blank';
+    range: RawRange;
+    eol?: RawRange;
+    prefix: SourcePrefix;
+    leftBody: boolean;
+    rightBody: boolean;
+}>;
+type EmptyBody = Readonly<{
+    pmAt: number;
+    parent: Node;
+    rootId?: number;
+    place: EmptyPlace;
+}>;
+
 /**
  * Markdown ↔ ProseMirror Doc roundtrip for `@moraya/core`.
  *
@@ -233,6 +287,7 @@ type InlineBody = Readonly<{
 /** Internal actual-capture authority. Public readonly metadata grants no permission. */
 declare function capturedSourceLists(source: string, doc: Node, roots: readonly SourceRoot[], layout: SourceLayout): readonly SourceListLexeme[] | undefined;
 declare function capturedInlineBodies(source: string, doc: Node, roots: readonly SourceRoot[], layout: SourceLayout): readonly InlineBody[] | undefined;
+declare function capturedEmptyBodies(source: string, doc: Node, roots: readonly SourceRoot[], layout: SourceLayout): readonly EmptyBody[] | undefined;
 /** Internal source-render guard; a missing capture fact is not permission. */
 declare function sourceRootHasClosedFences(root: SourceRoot): boolean;
 /** Render only inline content with the same conservative callbacks as roots. */
@@ -243,6 +298,8 @@ type SourceListStyle = Readonly<{
     tight: boolean;
 }>;
 type SourceRootRenderOptions = Readonly<{
+    onContinuationIndent?: (indent: number) => void;
+    onOwnedBlank?: (terminal: boolean) => void;
     lists?: readonly Readonly<{
         node: Node;
         style: SourceListStyle;
@@ -338,4 +395,4 @@ declare function captureFileWindow(cache: FileTokenCache, source: string, patche
     rightIndex: number;
 }>): FileCaptureResult | null;
 
-export { type FileWorkAccumulator as A, type BlankLineUnit as B, type CapturedDocument as C, type SourceListStyle as D, type SourceRootRenderOptions as E, type FallbackEmpty as F, captureFilePipeline as G, captureFileWindow as H, capturedInlineBodies as I, capturedSourceLists as J, parseDocumentWithSourceCapture as K, type LayoutContainer as L, parseParagraphWithSourceCapture as M, preprocessFileSource as N, replayFilePipeline as O, type ProtectedSource as P, serializeSourceInlineBody as Q, serializeSourceRootMarkdown as R, type SourceBlockResult as S, type TextSourceSpan as T, sourceRootHasClosedFences as U, type FidelityFailure as a, type FidelityResult as b, type FileParseWork as c, type FileRootCorrespondence as d, type FileSourceResult as e, type SourceEdit as f, type SourceFileUpdate as g, type SourceGap as h, type SourceLayout as i, type SourcePatch as j, type SourceRoot as k, type SourceSession as l, type SyntheticEmission as m, applySourceBlockTransaction as n, applySourceTextTransaction as o, createSourceSession as p, parseMarkdown as q, parseMarkdownAsync as r, prepareFileSourceEdits as s, serializeMarkdown as t, type CapturedParagraph as u, type CapturedTextRun as v, type FileCaptureResult as w, type FileCheckpoint as x, type FileDefinition as y, type FileTokenCache as z };
+export { type FileWorkAccumulator as A, type BlankLineUnit as B, type CapturedDocument as C, type SourceListStyle as D, type SourceRootRenderOptions as E, type FallbackEmpty as F, captureFilePipeline as G, captureFileWindow as H, capturedEmptyBodies as I, capturedInlineBodies as J, capturedSourceLists as K, type LayoutContainer as L, parseDocumentWithSourceCapture as M, parseParagraphWithSourceCapture as N, preprocessFileSource as O, type ProtectedSource as P, replayFilePipeline as Q, serializeSourceInlineBody as R, type SourceBlockResult as S, type TextSourceSpan as T, serializeSourceRootMarkdown as U, sourceRootHasClosedFences as V, type FidelityFailure as a, type FidelityResult as b, type FileParseWork as c, type FileRootCorrespondence as d, type FileSourceResult as e, type SourceEdit as f, type SourceFileUpdate as g, type SourceGap as h, type SourceLayout as i, type SourcePatch as j, type SourceRoot as k, type SourceSession as l, type SyntheticEmission as m, applySourceBlockTransaction as n, applySourceTextTransaction as o, createSourceSession as p, parseMarkdown as q, parseMarkdownAsync as r, prepareFileSourceEdits as s, serializeMarkdown as t, type CapturedParagraph as u, type CapturedTextRun as v, type FileCaptureResult as w, type FileCheckpoint as x, type FileDefinition as y, type FileTokenCache as z };

@@ -90,6 +90,15 @@ export function prepareEmptyBodyTransaction(base:SourceSession,tr:Transaction,fa
     const payload=text.split('\n').join(eol+prefix);
     edits=[{from:place.at,to:place.at,text:place.terminal?payload:prefix+payload+eol}];break;
    }
+   case 'nested-blank':{
+    const eol=place.eol?base.source.slice(place.eol.from,place.eol.to):base.source.slice(root!.sourceFrom,place.range.from).match(/\r\n|\r|\n/g)?.at(-1)??'\n';
+    const prefix=renderPrefix(base.source,place.prefix);
+    // Between two visible bodies the first existing blank is already a
+    // separator. Trailing blanks need a new separator before materialization.
+    const before=place.leftBody&&!place.rightBody?eol+prefix:'';
+    const after=place.rightBody?eol+prefix:'';
+    edits=[{...place.range,text:before+body+after}];break;
+   }
    case 'layout':edits=prepareEmptyParagraphEdits(base,tr,place.origin,body);break;
    default:return reject('empty-place');
   }

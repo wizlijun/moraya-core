@@ -469,8 +469,9 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
   if(classification==='structural'){
    const render=(nodes:PmNode[],positions:readonly number[]):StructuralRendered=>{
     const lists:{node:PmNode;style:SourceListStyle}[]=[],styles=transactionListStyles(tr,authority.facts,nodes.map((node,i)=>({node,pos:positions[i]!}))),rendered=nodes.map((node,i)=>rootRenderNode(node,positions[i]!,styles,lists)),doc=tr.doc.type.create(tr.doc.attrs,Fragment.fromArray(rendered))
-    const text=serializeSourceRootMarkdown(doc,{lists}),last=rendered[rendered.length-1]!
-    return {text,terminal:last.type.name==='table'||endsInTerminalHardbreak(last)?'content-eol':'none',
+    let ownedBlank=false,blankTerminal=false,continuationIndent:number|undefined
+    const text=serializeSourceRootMarkdown(doc,{lists,onContinuationIndent:indent=>{continuationIndent=indent},onOwnedBlank:terminal=>{ownedBlank=true;blankTerminal=terminal}}),last=rendered[rendered.length-1]!
+    return {text,ownedBlank,...(continuationIndent!==undefined?{continuationIndent}:{}),terminal:last.type.name==='table'||endsInTerminalHardbreak(last)||blankTerminal?'content-eol':'none',
      family:last.type.name==='table'?'table':['paragraph','heading','bullet_list','ordered_list','blockquote','horizontal_rule'].includes(last.type.name)?'flow':'closed-literal',eol:'\n'}
    }
    const result=applyStructuralTransaction(base,tr,render,sourceRootHasClosedFences)

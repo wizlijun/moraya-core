@@ -70,7 +70,7 @@ it.each(['marker','tight','pmFrom','omit','root','gap','span','blank'] as const)
  const b=open('* A\n  + B'+tail),copy=JSON.parse(JSON.stringify(b.layout)),foreign={...b,layout:copy}
  if(kind==='marker')copy.lists[0].marker='-';if(kind==='tight')copy.lists[0].tight=false;if(kind==='pmFrom')copy.lists[0].pmFrom++
  if(kind==='omit')copy.lists.pop();if(kind==='root')foreign.roots=b.roots.map((r,i)=>i? r:{...r,tailFrom:r.tailFrom+1})
- if(kind==='gap')foreign.gaps=[...b.gaps,{sourceFrom:0,sourceTo:1} as never];if(kind==='span')foreign.textSpans=[{sourceFrom:0,sourceTo:1,pmFrom:0,pmTo:1,kind:'linear'}];if(kind==='blank')copy.blankLines=[]
+ if(kind==='gap')foreign.gaps=[...b.gaps,{sourceFrom:0,sourceTo:1} as never];if(kind==='span')foreign.textSpans=[{sourceFrom:0,sourceTo:1,pmFrom:0,pmTo:1,kind:'linear'}];if(kind==='blank'){copy.blankLines=open('A\n\n\nB').layout.blankLines;expect(copy.blankLines).not.toEqual(b.layout.blankLines)}
  const spy=vi.spyOn(MarkdownSerializer.prototype,'serialize');try{reject(foreign,state(b,'A').tr.insertText('Z',text(b.doc,'A'),text(b.doc,'A')+1));expect(spy).not.toHaveBeenCalled()}finally{spy.mockRestore()}
 })
 it.each([-1,1.5,1000000000])('illegal ordered start %s is rejected',order=>{const b=open('0) A'+tail);reject(b,state(b,'A').tr.step(new AttrStep(0,'order',order)))})
@@ -81,7 +81,9 @@ it.each([
  ['0) A\n1) B','B','sink','0) A\n   1) B'],
 ] as const)('actual nested %s %s %s preserves item lineage',(raw,word,kind,expected)=>{
  const b=open(raw+tail),s=state(b,word),c=kind==='sink'?sinkListItem(s.schema.nodes.list_item!):liftListItem(s.schema.nodes.list_item!)
- accept(b,command(s,c),expected+tail)
+ const ending=kind==='sink'&&raw.startsWith('*')?'\r\n\r\nTail __raw__\r\n':kind==='lift'?'\n  \r\nTail __raw__\r\n':tail
+ const r=accept(b,command(s,c),expected+ending)
+ if(kind==='lift')expect(r.edits.every(e=>e.to<=b.roots[0]!.tailFrom)).toBe(true)
 })
 it('multiple actual wrap births with scenario M steps preserve a long list chain',()=>{
  const b=open('1. A\n\nP\n\n1. B\n\nQ\n\n1. C\n\nR\n\n1. D'+tail),tr=state(b,'P').tr

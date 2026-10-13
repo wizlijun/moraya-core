@@ -313,7 +313,7 @@ function fixFootnoteDefMaps(tokens: InlineToken[]): void {
     }
 
     if (start === Infinity || end === -Infinity) continue
-    open.map = [start, end]
+    open.map = open.map ? [Math.min(open.map[0]!,start),Math.max(open.map[1]!,end)] : [start, end]
 
     // 紧贴上一条定义(中间没有空行)。序列化据此决定要不要插空行,否则连续写的
     // 定义列表每保存一次就被撑开一次。
@@ -526,13 +526,41 @@ function wrapCaptureRule(ruler: any, name: string, wrapper: (original: any, ...a
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const collectorFor = (state: any): Capture | undefined => state.env?.[captureKey]
-type ContainerRead={token:any;index:number;line:number;b:number;t:number;e:number;body?:number;prefix?:SourcePrefix;first?:any}
+type NestedBlankRead={line:number;b:number;e:number;t:number;s:number;bs:number;lineMax:number;insertBefore:number;prefix:SourcePrefix;range:RawRange;eol?:RawRange}
+const nestedBlanks=new WeakMap<object,readonly {place:EmptyPlace;level:number;line:number}[]>()
+type ContainerRead={tokenizing?:boolean;blanks?:NestedBlankRead[];token:any;index:number;line:number;b:number;t:number;e:number;body?:number;prefix?:SourcePrefix;first?:any}
 type ContainerFrame={kind:string;entryIndent:number;marker:number;prefix:SourcePrefix;reads:ContainerRead[];current?:ContainerRead}
 const containerFrames=new WeakMap<object,ContainerFrame[]>()
 const containerEnds=new WeakMap<object,{collector:Capture;place:EmptyPlace;kind:string}>()
 function activePrefix(state:any):SourcePrefix {
  const frames=containerFrames.get(state),frame=frames?.[frames.length-1]
  return frame?.current?.prefix??frame?.prefix??[]
+}
+function observeOwnedBlank(actual:any,frame:ContainerFrame,collector:Capture,line:number):NestedBlankRead|undefined {
+     if(line>=actual.lineMax)return
+     const b=actual.bMarks[line],e=actual.eMarks[line],t=actual.tShift[line],s=actual.sCount[line],bs=actual.bsCount[line]
+     const physical=collector.lineStarts[line]
+     if(physical===undefined||b+t<e)return
+     // A quote must actually have stripped a marker on this line. Other
+     // containers own only continuation lines meeting their active indent.
+     if(frame.kind==='blockquote'?(b<=physical||!actual.src.slice(physical,b).includes('>')):s<actual.blkIndent)return
+     let body=b,width=0
+     while(body<e&&width<actual.blkIndent){
+      const ch=actual.src[body]
+      if(ch===' ')width++
+      else if(ch==='\t')width+=4-(width+bs)%4
+      else if(body-b<t)width++
+      else break
+      body++
+     }
+     // A partial TAB expansion creates body padding without a raw boundary.
+     if(width>actual.blkIndent)return
+     const prefix=rawRange(collector.trace,physical,body),range=emptyInline(collector,body,e)
+     if(!prefix||range?.kind!=='inline')return
+     const eol=actualEol(collector,e)
+     if(!eol&&e!==collector.trace.text.length)return
+     return {line,b,e,t,s,bs,lineMax:actual.lineMax,insertBefore:actual.tokens.length,
+      prefix:[prefix],range:range.range,...(eol?{eol}:{})}
 }
 // An instance-local facade observes the installed tokenizer exactly once.
 function observeContainerTokenize(state:any):void {
@@ -555,7 +583,16 @@ function observeContainerTokenize(state:any):void {
      if(raw)read.prefix=[...frame.prefix,raw]
     }else read.prefix=[...frame.prefix,{spaces:actual.blkIndent-frame.entryIndent}]
     const first=actual.tokens.length
-    const result=block.tokenize.call(block,actual,start,end,...rest)
+    const skip=actual.skipEmptyLines,isEmpty=actual.isEmpty,blanks=new Map<number,NestedBlankRead>()
+    const observe=(line:number)=>{
+     if(frames?.at(-1)?.current!==read)return
+     const blank=observeOwnedBlank(actual,frame,collector,line);if(blank)blanks.set(line,blank)
+    }
+    actual.skipEmptyLines=function(line:number){const result=skip.call(this,line);for(let n=line;n<result;n++)observe(n);return result}
+    actual.isEmpty=function(line:number){const result=isEmpty.call(this,line);if(result)observe(line);return result}
+    let result;read.tokenizing=true
+    try{result=block.tokenize.call(block,actual,start,end,...rest)}finally{actual.skipEmptyLines=skip;actual.isEmpty=isEmpty;read.tokenizing=false}
+    read.blanks=[...blanks.values()].filter(blank=>blank.line<actual.line)
     read.first=actual.tokens[first]
     return result
    }
@@ -570,7 +607,7 @@ for(const name of ['list','blockquote','footnote_def'])wrapCaptureRule(md.block.
  let frames=containerFrames.get(state)
  if(!frames){frames=[];containerFrames.set(state,frames)}
  const frame:ContainerFrame={kind:name,entryIndent:state.blkIndent,marker:name==='blockquote'?state.bMarks[startLine]+state.tShift[startLine]:0,prefix:activePrefix(state),reads:[]}
- const push=state.push,engine=state.md,outer=frames.length===0
+ const push=state.push,engine=state.md,isEmpty=state.isEmpty,outer=frames.length===0
  if(outer)observeContainerTokenize(state)
  frames.push(frame)
  state.push=function(type:string,...args:any[]){
@@ -582,8 +619,16 @@ for(const name of ['list','blockquote','footnote_def'])wrapCaptureRule(md.block.
   }
   return token
  }
+ state.isEmpty=function(line:number){
+  const result=isEmpty.call(this,line),read=frame.current
+  if(result&&name==='list'&&frames!.at(-1)===frame&&read&&!read.tokenizing){
+   const blank=observeOwnedBlank(this,frame,collector,line)
+   if(blank)read.blanks=[...(read.blanks??[]).filter(item=>item.line!==line),blank]
+  }
+  return result
+ }
  let result
- try{result=original(state,startLine,endLine,silent)}finally{state.push=push;frames.pop();if(outer)state.md=engine}
+ try{result=original(state,startLine,endLine,silent)}finally{state.isEmpty=isEmpty;state.push=push;frames.pop();if(outer)state.md=engine}
  if(!result)return result
  for(const read of frame.reads){
   const token=read.token,index=read.index
@@ -614,6 +659,39 @@ for(const name of ['list','blockquote','footnote_def'])wrapCaptureRule(md.block.
    if(at!==undefined)place={kind:'prepend',at,eol:actualEol(collector,read.e),continuation:read.prefix}
   }
   if(place)containerEnds.set(last,{collector,place,kind:name==='list'?'list_item':name==='blockquote'?'blockquote':'footnote_definition'})
+  const children:{from:number;to:number;index:number}[]=[]
+  for(let i=index+1;i<close;i++){
+   const child=state.tokens[i]
+   if(child.level!==token.level+1||child.nesting===-1||!child.map)continue
+   children.push({from:child.map[0],to:child.map[1],index:i})
+  }
+  const blanks=(read.blanks??[]).filter(blank=>blank.line>=token.map[0]&&blank.line<token.map[1]
+   &&!children.some(child=>child.from<=blank.line&&blank.line<child.to)
+   &&!collector.protectedSources.some(p=>p.sourceFrom< (blank.eol?.to??blank.range.to)&&p.sourceTo>blank.range.from))
+  if(!children.length&&blanks.some(blank=>blank.line!==read.line)&&place){
+   nestedBlanks.set(last,[{level:token.level+1,place,line:read.line}]);containerEnds.delete(last)
+  }
+  let priorRight:number|undefined
+  for(const [blankIndex,blank] of blanks.entries()){
+   const previous=blanks[blankIndex-1]
+   const firstInRun=!previous||previous.line+1!==blank.line
+   let lastInRun=blank
+   for(let next=blankIndex+1;firstInRun&&blanks[next]?.line===lastInRun.line+1;next++)lastInRun=blanks[next]!
+   const begin=blank.prefix[0],end=lastInRun.eol?.to??lastInRun.range.to
+   const touchesDefinition=firstInRun&&begin&&'from' in begin&&collector.protectedSources.some(p=>p.sourceTo===begin.from||p.sourceFrom===end)
+   const left=children.filter(child=>child.to<=blank.line).at(-1),right=children.find(child=>child.from>blank.line)
+   // First between-body blank is the separator; empty-only baseline is
+   // emitted by the schema and already certified at the actual close token.
+   if(touchesDefinition){priorRight=right?.index;continue}
+   if(name==='list'&&place?.kind==='prepend'&&!left&&blank===blanks[0])continue
+   if(left&&right&&priorRight!==right.index){priorRight=right.index;continue}
+   if(!children.length&&blank.line===read.line)continue
+   const before=right?.index??close,target=state.tokens[before]
+   const items=[...(nestedBlanks.get(target)??[])]
+   items.push({level:token.level+1,line:blank.line,place:{kind:'nested-blank',range:blank.range,prefix:blank.prefix,
+    ...(blank.eol?{eol:blank.eol}:{}),leftBody:!!left,rightBody:!!right}})
+   nestedBlanks.set(target,items)
+  }
  }
  return result
 },true)
@@ -1275,6 +1353,15 @@ function prepareRootEvents(tokens: InlineToken[], collector: Capture): InlineTok
       if (tail) { if (tail.to !== raw.to) throw new UnsupportedSourceCapture(); tailFrom = tail.from }
       if (flowTail.has(token.type) && collector.trace.text[tailWork] === '\n'
         && /^[ \t\n]*$/.test(collector.trace.text.slice(tailWork + 1, to))) boundaryTo = tailWork + 1
+    }
+    // Owned nested blanks are part of this root's body, never top-level
+    // layout units. Keep only their final physical EOL as the root terminal.
+    for(let at=i;at<=last;at++)for(const pending of nestedBlanks.get(tokens[at]!)??[]){
+      const place=pending.place
+      if(place.kind==='nested-blank'){
+        tailFrom=Math.max(tailFrom,place.range.to)
+        boundaryTo=Math.max(boundaryTo,starts[pending.line+1]!)
+      }
     }
     const id = natural.length
     let closedFences = true
@@ -2199,19 +2286,53 @@ sourceMarks.code = {
   close: (_state, _mark, parent, index) => sourceCodeDelimiter(parent.child(index - 1), false),
 }
 const terminalStarts = new WeakMap<PmNode, number>()
+const sourceContinuationIndents=new WeakMap<MarkdownSerializerState,number>()
+const sourceBlankTails=new WeakMap<MarkdownSerializerState,{terminal:boolean}>()
+function renderSourceContainerChildren(state:MarkdownSerializerState,parent:PmNode,skipSchemaPrefix:boolean):void {
+ const first=skipSchemaPrefix?1:0
+ const empty=(n:PmNode)=>n.type.name==='paragraph'&&n.content.size===0&&n.hasMarkup(n.type)
+ let hasEmpty=false
+ for(let i=first;i<parent.childCount;i++)if(empty(parent.child(i)))hasEmpty=true
+ const current=state as unknown as {out:string;closed:PmNode|null;delim:string;flushClose(size?:number):void}
+ const end=()=>{
+  if(!sourceContinuationIndents.has(state)&&current.delim&&/^[ ]+$/.test(current.delim))sourceContinuationIndents.set(state,current.delim.length)
+ }
+ if(!hasEmpty){for(let i=first;i<parent.childCount;i++)state.render(parent.child(i),parent,i);end();return}
+ const prefix=()=>current.delim.includes('>')?current.delim.trimEnd():current.delim
+ let leftBody=false,afterEmpty=false
+ for(let i=first;i<parent.childCount;i++){
+  const child=parent.child(i)
+  if(empty(child)){
+   if(i===first){state.write('');current.closed=null}
+   else {current.flushClose(1);state.ensureNewLine();current.out+=prefix();current.closed=null}
+   if(i===parent.childCount-1&&!current.delim.includes('>')&&i>first)state.ensureNewLine()
+   sourceBlankTails.set(state,{terminal:current.out.endsWith('\n')})
+   afterEmpty=true
+  }else{
+   if(afterEmpty){state.ensureNewLine();if(leftBody)current.out+=prefix()+'\n';current.closed=null}
+   state.render(child,parent,i);leftBody=true;afterEmpty=false
+  }
+ }
+ end()
+}
 const sourceRootSerializer = new MarkdownSerializer({
   ...serializer.nodes,
   text: writeSourceText,
   code_block: sourceCodeNode,
-  list_item(state, node, parent, index) {
-    const first = node.firstChild
-    if (node.attrs.checked === null && first?.type.name === 'paragraph' && first.content.size === 0
-      && first.hasMarkup(first.type)
-      && node.childCount > 1 && node.child(1).type.name !== 'paragraph') {
-      // This schema fills a required leading paragraph before a non-paragraph
-      // item. The actual parser must recreate it under the final strict check.
-      for (let index = 1; index < node.childCount; index++) state.render(node.child(index), node, index)
-    } else serializer.nodes.list_item!(state, node, parent, index)
+  blockquote(state,node) {
+    state.wrapBlock('> ',null,node,()=>renderSourceContainerChildren(state,node,false))
+  },
+  footnote_definition(state,node) {
+    if(node.attrs.tight)(state as any).flushClose(1)
+    state.write(`[^${node.attrs.label as string}]: `)
+    state.wrapBlock('    ','',node,()=>renderSourceContainerChildren(state,node,false))
+  },
+  list_item(state,node) {
+    if(node.attrs.checked!=null)state.write(node.attrs.checked?'[x] ':'[ ] ')
+    const first=node.firstChild
+    const skip=node.attrs.checked===null&&first?.type.name==='paragraph'&&first.content.size===0
+      &&first.hasMarkup(first.type)&&node.childCount>1&&node.child(1).type.name!=='paragraph'
+    renderSourceContainerChildren(state,node,!!skip)
   },
   hardbreak(state, node, parent, index) {
     if (node.attrs.isInline === true) { state.write('\n'); return }
@@ -2240,7 +2361,7 @@ export function serializeSourceInlineBody(node:PmNode):string {
 
 /** Internal source-root renderer; default serializeMarkdown stays unchanged. */
 export type SourceListStyle = Readonly<{marker:'-'|'+'|'*'|'.'|')';tight:boolean}>
-export type SourceRootRenderOptions = Readonly<{lists?:readonly Readonly<{node:PmNode;style:SourceListStyle}>[]}>
+export type SourceRootRenderOptions = Readonly<{onContinuationIndent?:(indent:number)=>void;onOwnedBlank?:(terminal:boolean)=>void;lists?:readonly Readonly<{node:PmNode;style:SourceListStyle}>[]}>
 function renderSourceList(state:MarkdownSerializerState,node:PmNode,style:SourceListStyle,indent:string,firstDelim:(index:number)=>string):void {
   if(node.attrs.tight!==undefined&&node.attrs.tight!==style.tight)throw new UnsupportedSourceCapture()
   const previous=state.options.tightLists
@@ -2267,7 +2388,15 @@ export function serializeSourceRootMarkdown(doc: PmNode, options:SourceRootRende
       renderSourceList(state,node,style,' '.repeat(width),i=>String(number(i)).padStart(width-2,' ')+style.marker+' ')
     },
   },sourceRootSerializer.marks,sourceRootSerializer.options)
+  let lastState:MarkdownSerializerState|undefined
+  for(const [name,render] of Object.entries(current.nodes))current.nodes[name]=(state,node,parent,index)=>{
+    lastState=state;sourceBlankTails.delete(state);sourceContinuationIndents.delete(state);render(state,node,parent,index)
+  }
   const result = current.serialize(doc, {tightLists:true})
+  const blank=lastState&&sourceBlankTails.get(lastState)
+  if(blank)options.onOwnedBlank?.(blank.terminal)
+  const indent=lastState&&sourceContinuationIndents.get(lastState)
+  if(indent!==undefined)options.onContinuationIndent?.(indent)
   return result.replace(/\u200B/g, '')
 }
 
@@ -2757,6 +2886,8 @@ function cloneTokenBatch(tokens: readonly ActualToken[], collector: Capture, raw
     if(literal)literalFacts.set(copy,{collector,trace:shiftTrace(literal.trace,rawDelta),kind:literal.kind,...(literal.empty?{empty:shiftEmpty(literal.empty,rawDelta,lineDelta)}:{})})
     const container=containerEnds.get(token)
     if(container)containerEnds.set(copy,{collector,kind:container.kind,place:shiftEmpty(container.place,rawDelta,lineDelta)})
+    const pending=nestedBlanks.get(token)
+    if(pending)nestedBlanks.set(copy,pending.map(p=>({...p,line:p.line+lineDelta,place:shiftEmpty(p.place,rawDelta,lineDelta)})))
     const closed = capturedFenceClosed.get(token)
     if (closed !== undefined) capturedFenceClosed.set(copy, closed)
     return copy
@@ -2774,11 +2905,27 @@ function countTokens(tokens: readonly ActualToken[]): number {
   return count
 }
 
+function injectNestedBlanks(tokens:ActualToken[],collector:Capture):ActualToken[] {
+ const result:ActualToken[]=[]
+ for(const token of tokens){
+  for(const pending of nestedBlanks.get(token)??[]){
+   const make=(type:string,tag:string,nesting:number,level:number):ActualToken=>({type,tag,nesting,level,
+    content:'',children:null,attrs:null,info:'',meta:null,map:null,block:true,hidden:false,markup:''} as ActualToken)
+   const open=make('paragraph_open','p',1,pending.level),inline=make('inline','',0,pending.level+1),close=make('paragraph_close','p',-1,pending.level)
+   inline.children=[];inline.block=false
+   inlineFacts.set(inline,{collector,empty:pending.place})
+   result.push(open,inline,close)
+  }
+  result.push(token)
+ }
+ return result
+}
 function emitCapturedTokens(tokens: readonly ActualToken[], collector: Capture, schema?: Schema): PmNode {
   let batch = cloneTokenBatch(tokens, collector)
   tagPairedHtmlInline(batch)
   fixFootnoteDefMaps(batch)
   prepareListEvents(batch, collector)
+  batch = injectNestedBlanks(batch,collector)
   batch = prepareRootEvents(batch, collector) as ActualToken[]
   collector.file!.work.pmEmissionTokenCount += countTokens(batch)
   const tokenizer: MarkdownIt = Object.create(md)

@@ -24,11 +24,11 @@ type Claim=RawSpan & {kind:'body'|'terminator'|'blank'|'separator'|'baseline-con
 type Kept=RawSpan & {kind:'root'|'blank'|'protected'|'envelope';id:number}
 type Piece={kind:'raw';span:RawSpan;identity:Kept}|{kind:'generated';text:string}
 type Recipe={claims:Claim[];kept:Kept[];pieces:Piece[];edits:SourceEdit[];changedRoots:number[];witnesses:StepWitness[]}
-export type StructuralRendered={text:string;terminal:'none'|'content-eol';family:'flow'|'table'|'closed-literal';eol:'\n'|'\r\n'|'\r'}
+export type StructuralRendered={text:string;ownedBlank?:boolean;continuationIndent?:number;terminal:'none'|'content-eol';family:'flow'|'table'|'closed-literal';eol:'\n'|'\r\n'|'\r'}
 type Step=ReplaceStep|ReplaceAroundStep|AddMarkStep|RemoveMarkStep|AttrStep|AddNodeMarkStep|RemoveNodeMarkStep
 type Slot=RawSpan & {kind:'body'|'terminator'|'blank'|'separator'|'protected'|'envelope';id:number}
 type Atom={kind:'body'|'terminator'|'blank'|'separator'|'protected'|'envelope';piece:Piece;
- anchor:number;step?:number;slot?:Slot}
+ anchor:number;step?:number;slot?:Slot;ownedBlank?:boolean;continuationIndent?:number}
 // Exact ordinary HTML boundary; defaults include every schema attr and mark.
 // Business IDs, if any, must already have passed the caller's approved projection.
 export function isSourceListBoundary(node:PMNode):boolean {
@@ -325,7 +325,7 @@ function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:
    if(output.family==='closed-literal'&&node.type.name!=='code_block'&&!isSourceListBoundary(node))fail()
    let text=output.text
    if(output.terminal==='content-eol'){if(!text.endsWith(output.eol))fail();text=text.slice(0,-output.eol.length)}
-   atoms.push(generated('body',text,anchor,stepOf(c)))
+   atoms.push({...generated('body',text,anchor,stepOf(c)),ownedBlank:!!output.ownedBlank,...(output.continuationIndent!==undefined?{continuationIndent:output.continuationIndent}:{})})
    if(n===lastVisible&&keepTerminal){
     atoms.push(raw(keepTerminal));removed.add(keepTerminal)
     if(n<nodes.length-1)claims.push({from:keepTerminal.to,to:keepTerminal.to,kind:'anchor',step:stepOf(c)})
@@ -378,7 +378,20 @@ function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:
    const step=a.slot&&authorizedSeparator(a.slot);if(step===undefined)fail()
    drop.add(a);claims.push({from:a.slot!.from,to:a.slot!.to,kind:'separator',unitId:a.slot!.id,step})
   }
-  if(needed&&!keep){
+  if(keep?.slot&&left?.continuationIndent!==undefined){
+   const text=base.source.slice(keep.slot.from,keep.slot.to),eol=/(\r\n|\r|\n)$/.exec(text)?.[0]
+   const neighbor=neighbors.get(keep.slot)?.left,component=neighbor===undefined?undefined:dirty.get(neighbor)
+   const step=component&&structuralStep(component)
+   if(step!==undefined&&left.step!==undefined&&eol){
+    const padding=text.slice(0,-eol.length);let width=0,at=0
+    while(at<padding.length&&width<left.continuationIndent){width+=padding[at++]==='\t'?4-width%4:1}
+    if(width===left.continuationIndent){
+     drop.add(keep);before.set(keep,[generated('separator',eol,keep.anchor,step)])
+     claims.push({from:keep.slot.from,to:keep.slot.to,kind:'separator',unitId:keep.slot.id,step})
+    }
+   }
+  }
+  if(needed&&!keep&&!left?.ownedBlank){
    const step=left?.step??right?.step
    if(step===undefined)fail()
    const target=run.find(a=>a.kind==='blank')??right
@@ -509,6 +522,8 @@ export function prepareEmptyParagraphEdits(base:SourceSession,tr:Transaction,
   ?? slots.map(s=>/(\r\n|\r|\n)$/.exec(base.source.slice(s.from,s.to))?.[0]).find(Boolean)??'\n'
  const tail=base.source.slice(span.to),next=slots.find(s=>s.from>=span.to&&['body','protected'].includes(s.kind))
  const between=next?base.source.slice(span.to,next.from):tail
+ const previous=slots.filter(s=>s.to<=span.from&&['body','protected'].includes(s.kind)).at(-1)
+ const prefix=chosen&&previous&&!/[\r\n][ \t]*(?:\r\n|\r|\n)$/.test(base.source.slice(previous.from,span.from))?eol:''
  const suffix=origin.kind==='blank'?(next&&!/[\r\n]/.test(between)?eol:''):
   (tail?(next&&next.from===span.to?eol+eol:eol):'')
  const claims:Claim[]=[{...span,kind:chosen?'blank':'anchor',step:0,...(chosen?{unitId:chosen.id}:{})}]
@@ -518,7 +533,7 @@ export function prepareEmptyParagraphEdits(base:SourceSession,tr:Transaction,
   const identity:Kept={from,to,kind:'envelope',id:kept.length};kept.push(identity);pieces.push({kind:'raw',span:{from,to},identity})
  }
  keep(0,span.from)
- pieces.push({kind:'generated',text:body})
+ pieces.push({kind:'generated',text:prefix+body})
  if(chosen){
   const terminal=/(\r\n|\r|\n)$/.exec(original)?.[0];if(!terminal)fail()
   keep(span.to-terminal.length,span.to)
