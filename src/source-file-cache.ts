@@ -41,6 +41,7 @@ export function prepareVerifiedFileBase(callerBase: SourceSession, work: FileWor
   work.mode = 'full-fallback'; work.fallbackReason = 'cache-miss'
   const parsed = captureFilePipeline(callerBase.source, callerBase.doc.type.schema, work)
   if (!parsed.ok) return parsed
+  work.inlineRoots = parsed.value.roots.map(root => root.id)
   const actual = makeSession(callerBase.source, parsed.value, callerBase.revision)
   if (actual.doc.type.schema !== callerBase.doc.type.schema || !actual.doc.eq(callerBase.doc)
     || !sameMetadata(actual.roots, callerBase.roots) || !sameMetadata(actual.gaps, callerBase.gaps)

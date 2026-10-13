@@ -7394,6 +7394,7 @@ function prepareVerifiedFileBase(callerBase, work) {
   work.fallbackReason = "cache-miss";
   const parsed = captureFilePipeline(callerBase.source, callerBase.doc.type.schema, work);
   if (!parsed.ok) return parsed;
+  work.inlineRoots = parsed.value.roots.map((root) => root.id);
   const actual = makeSession(callerBase.source, parsed.value, callerBase.revision);
   if (actual.doc.type.schema !== callerBase.doc.type.schema || !actual.doc.eq(callerBase.doc) || !sameMetadata(actual.roots, callerBase.roots) || !sameMetadata(actual.gaps, callerBase.gaps) || !sameMetadata(actual.protectedSources, callerBase.protectedSources) || !sameMetadata(actual.textSpans, callerBase.textSpans) || !sameMetadata(actual.layout.blankLines, callerBase.layout.blankLines) || !sameMetadata(actual.layout.fallback, callerBase.layout.fallback) || callerBase.layout.lists !== void 0 && !sameMetadata(actual.layout.lists, callerBase.layout.lists))
     return { ok: false, reason: "unsupported-source" };

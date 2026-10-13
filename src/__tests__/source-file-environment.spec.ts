@@ -126,6 +126,7 @@ it('recovers foreign authority once, preserves no-op identity, and rejects alter
   if (!first.ok) return
   expect(first.session).toBe(foreign)
   expect(first.file.work.fullCaptureCalls).toBe(1)
+  expect(first.file.work.inlineRoots).toEqual(base.roots.map(root=>root.id))
   expect(first.file.work.mode).toBe('full-fallback')
   expect(first.file.work.fallbackReason).toBe('cache-miss')
   const second = prepareFileSourceEdits(foreign, { expectedRevision: 0, edits: [] })
