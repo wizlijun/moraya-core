@@ -31,7 +31,7 @@ type FidelityResult = {
     ok: true;
     session: SourceSession;
 } | FidelityFailure;
-/** Experimental: one ordinary paragraph, with no work-text normalization. */
+/** Experimental: complete raw document with sparse writable paragraph spans. */
 declare function createSourceSession(source: string, schema?: Schema): FidelityResult;
 /** Pure preparation: a failure never supplies output or mutates the base session. */
 declare function applySourceTextTransaction(base: SourceSession, tr: Transaction): FidelityResult;

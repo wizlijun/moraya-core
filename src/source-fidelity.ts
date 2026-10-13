@@ -1,6 +1,6 @@
 import type { Node as PmNode, Schema } from 'prosemirror-model'
 import type { Transaction } from 'prosemirror-state'
-import { parseParagraphWithSourceCapture } from './markdown'
+import { parseDocumentWithSourceCapture } from './markdown'
 
 export type TextSourceSpan = Readonly<{
   sourceFrom: number; sourceTo: number
@@ -18,9 +18,9 @@ export type FidelityFailure = Readonly<{
 }>
 export type FidelityResult = { ok: true; session: SourceSession } | FidelityFailure
 
-/** Experimental: one ordinary paragraph, with no work-text normalization. */
+/** Experimental: complete raw document with sparse writable paragraph spans. */
 export function createSourceSession(source: string, schema?: Schema): FidelityResult {
-  const parsed = parseParagraphWithSourceCapture(source, schema)
+  const parsed = parseDocumentWithSourceCapture(source, schema)
   if (!parsed.ok) return parsed
   return { ok: true, session: { revision: 0, source, doc: parsed.value.doc, textSpans: parsed.value.textRuns } }
 }

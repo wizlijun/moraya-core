@@ -70,10 +70,18 @@ describe('source fidelity ordinary text session', () => {
     const stale = EditorState.create({doc:base.doc}).tr.insertText('丁',2,3)
     expect(applySourceTextTransaction(next,stale)).toEqual({ok:false,reason:'stale-document'})
   })
-  it('does not pretend unsupported source has writable exact mapping', () => {
-    for (const source of ['* item\n* item2', '```js\n甲\n```', '甲\r\n乙', '$x$', '{>>note<<}']) {
-      expect(createSourceSession(source)).toEqual({ok:false,reason:'unsupported-source'})
+  it('opens opaque source without claiming writable literal/container text', () => {
+    for (const source of ['* item\n* item2', '```js\n甲\n```', '$x$', '{>>note<<}']) {
+      const opened = session(source)
+      expect(opened.source).toBe(source)
+      expect(opened.doc.eq(parseMarkdown(source))).toBe(true)
+      expect(opened.textSpans).toEqual([])
     }
+  })
+  it('captures text after CRLF without normalizing raw source', () => {
+    const source = '甲\r\n乙', opened = session(source)
+    expect(opened.source).toBe(source)
+    expect(opened.textSpans.some(s => s.sourceFrom <= 3 && s.sourceTo > 3)).toBe(true)
   })
   it('preserves BOM and outer whitespace when unchanged by parser work normalization', () => {
     const source = '\uFEFF甲 _斜体_  '

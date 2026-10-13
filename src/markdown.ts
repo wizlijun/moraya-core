@@ -29,6 +29,8 @@ import { MarkdownParser, MarkdownSerializer } from 'prosemirror-markdown'
 import type { MarkdownSerializerState } from 'prosemirror-markdown'
 import type { Node as PmNode, Mark, Schema } from 'prosemirror-model'
 import { defaultSchema } from './schema'
+import { projectLineEndings } from './source-projection'
+import { identityTrace, sliceTrace, editTrace, type SourceTrace, type TraceEdit } from './source-trace'
 
 // ── markdown-it instance ────────────────────────────────────────
 
@@ -409,16 +411,20 @@ md.block.ruler.before(
   { alt: [] },
 )
 
-// Experimental provenance for one ordinary paragraph. These wrappers delegate to
+// Experimental provenance for top-level paragraphs. These wrappers delegate to
 // the installed rules; an env-local collector keeps ordinary parses unchanged.
 export type CapturedTextRun = {
   sourceFrom: number; sourceTo: number; pmFrom: number; pmTo: number
   kind: 'linear' | 'atomic'
 }
 export type CapturedParagraph = { doc: PmNode; textRuns: CapturedTextRun[] }
-type SourceRun = { from: number; to: number; text: string; kind: 'linear' | 'atomic' }
-type Capture = { source: string; offset: number; runs: CapturedTextRun[]; invalid: boolean }
-const captureKey = Symbol('paragraph source capture')
+type SourceRun = { text: string; kind?: undefined; trace?: undefined }
+  | { text: string; kind: 'linear' | 'atomic'; trace: SourceTrace }
+type Capture = { trace: SourceTrace; runs: CapturedTextRun[] }
+const captureKey = Symbol('document source capture')
+const owners = new WeakMap<object, SourceTrace>()
+const tokenArrays = new WeakMap<object, object>()
+const inlineStateOwners = new WeakMap<object, SourceTrace>()
 const tokenSources = new WeakMap<object, { collector: Capture; runs: SourceRun[] }>()
 const pendingSources = new WeakMap<object, SourceRun[]>()
 let captureAvailable = true
@@ -436,10 +442,15 @@ const collectorFor = (state: any): Capture | undefined => state.env?.[captureKey
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const inlineEngine = md.inline as any
 const OriginalInlineState = inlineEngine.State
+if (typeof OriginalInlineState !== 'function') captureAvailable = false
 inlineEngine.State = function (...args: unknown[]) {
   const state = new OriginalInlineState(...args)
   const collector = collectorFor(state)
-  if (collector) {
+  const owner = owners.get(args[3] as object)
+  if (collector && owner) {
+    if (state.src !== owner.text || state.tokens !== args[3] || typeof state.pending !== 'string'
+      || typeof state.pushPending !== 'function') throw new UnsupportedSourceCapture()
+    inlineStateOwners.set(state, owner)
     pendingSources.set(state, [])
     const pushPending = state.pushPending.bind(state)
     state.pushPending = () => {
@@ -452,16 +463,97 @@ inlineEngine.State = function (...args: unknown[]) {
   return state
 }
 wrapCaptureRule(md.core.ruler, 'normalize', (original, state) => {
-  const result = original(state)
   const collector = collectorFor(state)
-  if (collector && state.src !== collector.source) collector.invalid = true
+  if (!collector) return original(state)
+  if (state.src !== collector.trace.text) throw new UnsupportedSourceCapture()
+  const projection = projectLineEndings(state.src)
+  collector.trace = editTrace(collector.trace, projection.changes.map(c => ({
+    from: c.sourceFrom, to: c.sourceTo, text: '\n',
+  })))
+  const nulEdits: TraceEdit[] = []
+  for (let i = 0; i < collector.trace.text.length; i++) {
+    if (collector.trace.text[i] === '\0') nulEdits.push({ from: i, to: i + 1, text: '\uFFFD' })
+  }
+  collector.trace = editTrace(collector.trace, nulEdits)
+  const result = original(state)
+  if (state.src !== collector.trace.text) throw new UnsupportedSourceCapture()
+  return result
+})
+wrapCaptureRule(md.block.ruler, 'paragraph', (original, state, ...args) => {
+  const collector = collectorFor(state)
+  if (!collector || state.level !== 0 || state.blkIndent !== 0) return original(state, ...args)
+  const originalGetLines = state.getLines
+  if (typeof originalGetLines !== 'function' || !Array.isArray(state.bMarks)
+    || !Array.isArray(state.eMarks)) throw new UnsupportedSourceCapture()
+  const start = state.tokens.length
+  let capturedLines: SourceTrace | undefined
+  state.getLines = function (begin: number, end: number, indent: number, keepLastLF: boolean) {
+    const value = originalGetLines.call(this, begin, end, indent, keepLastLF)
+    if (indent !== 0) return value
+    const from = this.bMarks[begin]
+    const to = keepLastLF ? Math.min(this.src.length, this.eMarks[end - 1] + 1) : this.eMarks[end - 1]
+    const part = sliceTrace(collector.trace, from, to)
+    if (part.text !== value) throw new UnsupportedSourceCapture()
+    const left = value.length - value.trimStart().length
+    capturedLines = sliceTrace(part, left, left + value.trim().length)
+    return value
+  }
+  let result
+  try { result = original(state, ...args) } finally { state.getLines = originalGetLines }
+  if (result) for (const token of state.tokens.slice(start)) {
+    if (token.type !== 'inline' || token.level !== 1) continue
+    if (!capturedLines || capturedLines.text !== token.content || !Array.isArray(token.children)) {
+      throw new UnsupportedSourceCapture()
+    }
+    owners.set(token.children, capturedLines)
+    tokenArrays.set(token, token.children)
+  }
+  return result
+})
+wrapCaptureRule(md.core.ruler, 'inline', (original, state) => {
+  if (!collectorFor(state)) return original(state)
+  const mapped = state.tokens.filter((token: object) => tokenArrays.has(token))
+  const check = () => {
+    for (const token of mapped) {
+      if (!Array.isArray(token.children) || token.children !== tokenArrays.get(token)) throw new UnsupportedSourceCapture()
+    }
+  }
+  check()
+  const result = original(state)
+  check()
+  return result
+})
+// The installed newline rule removes trailing U+0020 before pushPending.
+// Mirror only that declared consumption so text before the break stays writable.
+wrapCaptureRule(md.inline.ruler, 'newline', (original, state, silent) => {
+  if (silent || !inlineStateOwners.has(state) || state.src[state.pos] !== '\n') return original(state, silent)
+  let end = state.pending.length
+  while (end > 0 && state.pending[end - 1] === ' ') end--
+  const expected = state.pending.slice(0, end)
+  let trim = state.pending.length - end
+  const runs = pendingSources.get(state)!
+  while (trim > 0 && runs.length) {
+    const run = runs.pop()!
+    if (run.text.length <= trim) { trim -= run.text.length; continue }
+    const keep = run.text.length - trim
+    runs.push(run.trace && run.kind === 'linear'
+      ? { text: run.text.slice(0, keep), kind: 'linear', trace: sliceTrace(run.trace, 0, keep) }
+      : { text: run.text.slice(0, keep) })
+    trim = 0
+  }
+  if (trim || runs.map(run => run.text).join('') !== expected) throw new UnsupportedSourceCapture()
+  const start = state.tokens.length
+  const result = original(state, silent)
+  if (!result || state.pending !== '' || (expected && (state.tokens[start]?.type !== 'text'
+    || state.tokens[start].content !== expected))) throw new UnsupportedSourceCapture()
   return result
 })
 wrapCaptureRule(md.inline.ruler, 'text', (original, state, silent) => {
   const from = state.pos
   const ok = original(state, silent)
-  if (ok && !silent && collectorFor(state)) {
-    pendingSources.get(state)!.push({ from, to: state.pos, text: state.src.slice(from, state.pos), kind: 'linear' })
+  const owner = inlineStateOwners.get(state)
+  if (ok && !silent && owner) {
+    pendingSources.get(state)!.push({ trace: sliceTrace(owner, from, state.pos), text: state.src.slice(from, state.pos), kind: 'linear' })
   }
   return ok
 })
@@ -470,10 +562,11 @@ for (const name of ['entity', 'escape']) {
     const from = state.pos
     const ok = original(state, silent)
     const collector = collectorFor(state)
-    if (ok && !silent && collector) {
+    const owner = inlineStateOwners.get(state)
+    if (ok && !silent && collector && owner) {
       const token = state.tokens[state.tokens.length - 1]
       if (token.type === 'text_special') tokenSources.set(token, { collector,
-        runs: [{ from, to: state.pos, text: token.content, kind: 'atomic' }] })
+        runs: [{ trace: sliceTrace(owner, from, state.pos), text: token.content, kind: 'atomic' }] })
     }
     return ok
   })
@@ -482,28 +575,22 @@ wrapCaptureRule(md.inline.ruler, 'emphasis', (original, state, silent) => {
   const from = state.pos
   const ok = original(state, silent)
   const collector = collectorFor(state)
-  if (ok && !silent && collector) {
+  const owner = inlineStateOwners.get(state)
+  if (ok && !silent && collector && owner) {
     const count = state.pos - from
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     state.tokens.slice(-count).forEach((token: any, i: number) => tokenSources.set(token, { collector,
-      runs: [{ from: from + i, to: from + i + 1, text: token.content, kind: 'linear' }] }))
+      runs: [{ trace: sliceTrace(owner, from + i, from + i + 1), text: token.content, kind: 'linear' }] }))
   }
   return ok
 })
-wrapCaptureRule(md.inline.ruler, 'link', (original, state, silent) => {
-  const collector = collectorFor(state)
-  const labelEnd = collector && !silent && state.src[state.pos] === '['
-    ? state.md.helpers.parseLinkLabel(state, state.pos, true) : -1
-  const ok = original(state, silent)
-  if (ok && !silent && collector && (labelEnd < 0 || state.src[labelEnd + 1] !== '(')) collector.invalid = true
-  return ok
-})
 md.inline.ruler.push('source_capture_fallback', (state, silent) => {
-  if (silent || !collectorFor(state)) return false
+  const owner = inlineStateOwners.get(state)
+  if (silent || !owner) return false
   const from = state.pos++
   const text = state.src.slice(from, state.pos)
   state.pending += text
-  pendingSources.get(state)!.push({ from, to: state.pos, text, kind: 'linear' })
+  pendingSources.get(state)!.push({ trace: sliceTrace(owner, from, state.pos), text, kind: 'linear' })
   return true
 })
 // Both installed join rules collapse adjacent text into the last surviving token.
@@ -512,13 +599,13 @@ function captureJoin(tokens: any[], collector: Capture, special: boolean) {
   let runs: SourceRun[] = []
   for (const token of tokens) {
     if (token.type !== 'text' && !(special && token.type === 'text_special')) { runs = []; continue }
-    runs = runs.concat(token.content ? tokenSources.get(token)?.runs ?? [] : [])
+    runs = runs.concat(token.content ? tokenSources.get(token)?.runs ?? [{ text: token.content }] : [])
     tokenSources.set(token, { collector, runs })
   }
 }
 wrapCaptureRule(md.inline.ruler2, 'fragments_join', (original, state) => {
   const collector = collectorFor(state)
-  if (collector) captureJoin(state.tokens, collector, false)
+  if (collector && inlineStateOwners.has(state)) captureJoin(state.tokens, collector, false)
   return original(state)
 })
 wrapCaptureRule(md.core.ruler, 'text_join', (original, state) => {
@@ -534,19 +621,35 @@ function captureText(state: any, token: any, delegate: () => void) {
   const provenance = tokenSources.get(token)
   if (!provenance) { delegate(); return }
   const { collector, runs } = provenance
+  if (!Array.isArray(state.stack) || !state.stack.length
+    || state.stack.some((frame: any) => !Array.isArray(frame.content) || !Array.isArray(frame.marks))) {
+    throw new UnsupportedSourceCapture()
+  }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const cursor = () => state.stack.reduce((n: number, frame: any) =>
     n + frame.content.reduce((sum: number, node: PmNode) => sum + node.nodeSize, 0), state.stack.length - 1)
-  if (runs.map(run => run.text).join('') !== token.content) collector.invalid = true
+  if (runs.map(run => run.text).join('') !== token.content) throw new UnsupportedSourceCapture()
   let pos = cursor()
+  const supported = state.stack[state.stack.length - 1].marks.every((mark: Mark) => ['em', 'strong', 'link'].includes(mark.type.name))
   for (const run of runs) {
-    if (!run.text) continue
-    collector.runs.push({ sourceFrom: collector.offset + run.from, sourceTo: collector.offset + run.to,
-      pmFrom: pos, pmTo: pos + run.text.length, kind: run.kind })
+    const a = pos
     pos += run.text.length
+    if (!supported || !run.trace || !run.text) continue
+    const ps = run.trace.pieces
+    if (run.kind === 'linear' && run.trace.text === run.text) {
+      for (const p of ps) if (p.kind !== 'generated') collector.runs.push({
+        sourceFrom: p.sourceFrom, sourceTo: p.sourceTo,
+        pmFrom: a + p.from, pmTo: a + p.to, kind: p.kind === 'copy' ? 'linear' : 'atomic',
+      })
+      continue
+    }
+    const contiguous = ps.length > 0 && ps.every((p, i) => p.kind !== 'generated' && (!i || ps[i - 1]!.sourceTo === p.sourceFrom))
+    if (!contiguous) continue
+    collector.runs.push({ sourceFrom: ps[0]!.sourceFrom, sourceTo: ps[ps.length - 1]!.sourceTo,
+      pmFrom: a, pmTo: pos, kind: 'atomic' })
   }
   delegate()
-  if (cursor() !== pos) collector.invalid = true
+  if (cursor() !== pos) throw new UnsupportedSourceCapture()
 }
 
 // Patch md.parse to inject paired-tag pre-processing and blank-line preservation
@@ -557,18 +660,6 @@ md.parse = function (src: string, env: unknown) {
   tagPairedHtmlInline(tokens)
   fixFootnoteDefMaps(tokens)
   tokens = preserveBlankLines(tokens)
-  const collector = (env as { [captureKey]?: Capture } | undefined)?.[captureKey]
-  if (collector) {
-    const inline = tokens[1]
-    const allowed = new Set(['text', 'em_open', 'em_close', 'strong_open', 'strong_close', 'link_open', 'link_close'])
-    if (tokens.length !== 3 || tokens[0]?.type !== 'paragraph_open' || inline?.type !== 'inline'
-      || tokens[2]?.type !== 'paragraph_close' || inline.content.includes('\n')
-      || collector.source.trim() !== inline.content
-      || inline.children?.some(token => !allowed.has(token.type) || token.markup === 'autolink')) {
-      throw new UnsupportedSourceCapture()
-    }
-    collector.offset = collector.source.length - collector.source.trimStart().length
-  }
   return tokens as unknown as ReturnType<typeof _origMdParse>
 }
 
@@ -1362,10 +1453,15 @@ function isPlainURL(mark: Mark, parent: PmNode, index: number, side: number): bo
  * Without blank lines, they get absorbed into the preceding paragraph as
  * inline tokens, causing wrong rendering and roundtrip corruption.
  */
-function normalizeMathBlocks(text: string): string {
+function normalizeMathBlocks(text: string, edits?: TraceEdit[]): string {
   if (!text.includes('$$')) return text
 
   const lines = text.split('\n')
+  const starts: number[] = []
+  if (edits) {
+    let offset = 0
+    for (const line of lines) { starts.push(offset); offset += line.length + 1 }
+  }
   const result: string[] = []
   let inFence = false
   let inMathBlock = false
@@ -1391,6 +1487,7 @@ function normalizeMathBlocks(text: string): string {
         const last = result[result.length - 1]
         if (result.length > 0 && last !== undefined && last.trim() !== '') {
           result.push('')
+          if (edits) edits.push({ from: starts[i]!, to: starts[i]!, text: '\n' })
         }
         result.push(line)
         inMathBlock = true
@@ -1402,6 +1499,7 @@ function normalizeMathBlocks(text: string): string {
         const next = lines[i + 1]
         if (next !== undefined && next.trim() !== '') {
           result.push('')
+          if (edits) edits.push({ from: starts[i + 1]!, to: starts[i + 1]!, text: '\n' })
         }
       }
     } else {
@@ -1417,24 +1515,26 @@ function normalizeMathBlocks(text: string): string {
  * Only targets image/link title delimiters to preserve intentional smart quotes in prose.
  * Pattern: `](url "title")` or `](url 'title')` with curly quotes.
  */
-function normalizeSmartQuotes(text: string): string {
-  // Quick bail: no curly quotes at all
+type QuoteTraceObserver = (before: string, after: string, edits: readonly TraceEdit[]) => void
+function normalizeSmartQuotes(text: string, observe?: QuoteTraceObserver): string {
   if (!/[“”„‟‘’‚‛]/.test(text)) return text
-
+  const passes: [RegExp, string][] = [
+    [/(\]\([^\n)]*\s)“([^”\n]*)”(\s*\))/g, '"'],
+    [/(\]\([^\n)]*\s)“([^”\n]*)”(\s*\))/g, '"'],
+    [/(\]\([^\n)]*\s)‘([^’\n]*)’(\s*\))/g, "'"],
+  ]
+  for (const [pattern, quote] of passes) {
+    const before = text, edits: TraceEdit[] = []
+    text = text.replace(pattern, (_m, pre: string, title: string, post: string, offset: number) => {
+      if (observe) {
+        const left = offset + pre.length, right = left + 1 + title.length
+        edits.push({ from: left, to: left + 1, text: quote }, { from: right, to: right + 1, text: quote })
+      }
+      return pre + quote + title + quote + post
+    })
+    observe?.(before, text, edits)
+  }
   return text
-    .replace(
-      /(\]\([^\n)]*\s)“([^”\n]*)”(\s*\))/g,
-      (_m, pre, title, post) => `${pre}"${title}"${post}`,
-    )
-    .replace(
-      /(\]\([^\n)]*\s)“([^”\n]*)”(\s*\))/g,
-      (_m, pre, title, post) => `${pre}"${title}"${post}`,
-    )
-    // Also handle single curly quotes as title delimiters
-    .replace(
-      /(\]\([^\n)]*\s)‘([^’\n]*)’(\s*\))/g,
-      (_m, pre, title, post) => `${pre}'${title}'${post}`,
-    )
 }
 
 /**
@@ -1550,29 +1650,56 @@ export function serializeMarkdown(doc: PmNode): string {
 class UnsupportedSourceCapture extends Error {}
 
 /** Internal experimental hook. Never uses parseMarkdown's empty-doc fallback. */
-export function parseParagraphWithSourceCapture(source: string, schema?: Schema):
+export function parseDocumentWithSourceCapture(source: string, schema?: Schema):
   { ok: true; value: CapturedParagraph } | { ok: false; reason: 'unsupported-source' | 'parse-error' } {
-  const work = normalizeSmartQuotes(normalizeMathBlocks(source))
-  if (!captureAvailable || work !== source || /\{(?:>>|==|\+\+|--|~~)/.test(source)) {
-    return { ok: false, reason: 'unsupported-source' }
-  }
-  const collector: Capture = { source, offset: 0, runs: [], invalid: false }
+  if (!captureAvailable) return { ok: false, reason: 'unsupported-source' }
   try {
-    const doc = getParserFor(schema).parse(work, { [captureKey]: collector })
-    let pos = 1
-    for (const run of collector.runs) {
-      if (run.pmFrom !== pos || run.pmTo <= pos || run.sourceFrom < collector.offset
-        || run.sourceTo > source.length) collector.invalid = true
-      pos = run.pmTo
-    }
-    if (doc.childCount !== 1 || doc.firstChild?.type.name !== 'paragraph'
-      || pos !== doc.content.size - 1 || collector.invalid) return { ok: false, reason: 'unsupported-source' }
-    let supported = true
-    doc.firstChild.forEach(node => {
-      if (!node.isText || node.marks.some(mark => !['em', 'strong', 'link'].includes(mark.type.name))) supported = false
+    const mathEdits: TraceEdit[] = []
+    const math = normalizeMathBlocks(source, mathEdits)
+    let trace = editTrace(identityTrace(source), mathEdits)
+    if (trace.text !== math) throw new UnsupportedSourceCapture()
+    const work = normalizeSmartQuotes(math, (before, after, edits) => {
+      if (trace.text !== before) throw new UnsupportedSourceCapture()
+      trace = editTrace(trace, edits)
+      if (trace.text !== after) throw new UnsupportedSourceCapture()
     })
-    return supported ? { ok: true, value: { doc, textRuns: collector.runs } } : { ok: false, reason: 'unsupported-source' }
+    const collector: Capture = { trace, runs: [] }
+    const doc = getParserFor(schema).parse(work, { [captureKey]: collector })
+    let pmEnd = 0, sourceEnd = 0
+    for (const run of collector.runs) {
+      if (run.pmFrom < pmEnd || run.pmTo <= run.pmFrom || run.pmTo > doc.content.size
+        || run.sourceFrom < sourceEnd || run.sourceTo <= run.sourceFrom || run.sourceTo > source.length) {
+        throw new UnsupportedSourceCapture()
+      }
+      const from = doc.resolve(run.pmFrom), to = doc.resolve(run.pmTo)
+      if (from.depth !== 1 || from.parent.type.name !== 'paragraph' || !from.sameParent(to)
+        || doc.textBetween(run.pmFrom, run.pmTo).length !== run.pmTo - run.pmFrom
+        || (run.kind === 'linear' && source.slice(run.sourceFrom, run.sourceTo) !== doc.textBetween(run.pmFrom, run.pmTo))) {
+        throw new UnsupportedSourceCapture()
+      }
+      pmEnd = run.pmTo
+      sourceEnd = run.sourceTo
+    }
+    return { ok: true, value: { doc, textRuns: collector.runs } }
   } catch (error) {
     return { ok: false, reason: error instanceof UnsupportedSourceCapture ? 'unsupported-source' : 'parse-error' }
   }
+}
+
+/** Compatibility hook for callers requiring a fully mapped ordinary paragraph. */
+export function parseParagraphWithSourceCapture(source: string, schema?: Schema):
+  { ok: true; value: CapturedParagraph } | { ok: false; reason: 'unsupported-source' | 'parse-error' } {
+  const parsed = parseDocumentWithSourceCapture(source, schema)
+  if (!parsed.ok) return parsed
+  const { doc, textRuns } = parsed.value
+  if (doc.childCount !== 1 || doc.firstChild?.type.name !== 'paragraph') return { ok: false, reason: 'unsupported-source' }
+  let pos = 1, supported = true
+  for (const run of textRuns) {
+    if (run.pmFrom !== pos) supported = false
+    pos = run.pmTo
+  }
+  doc.firstChild.forEach(node => {
+    if (!node.isText || node.marks.some(mark => !['em', 'strong', 'link'].includes(mark.type.name))) supported = false
+  })
+  return supported && pos === doc.content.size - 1 ? parsed : { ok: false, reason: 'unsupported-source' }
 }

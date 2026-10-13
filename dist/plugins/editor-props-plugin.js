@@ -1324,6 +1324,74 @@ var defaultSchema = new Schema({
   marks
 });
 
+// src/source-projection.ts
+function projectLineEndings(source) {
+  const chunks = [];
+  const changes = [];
+  let start = 0;
+  let view = 0;
+  for (let i = 0; i < source.length; i++) {
+    if (source.charCodeAt(i) !== 13) continue;
+    chunks.push(source.slice(start, i));
+    view += i - start;
+    const end = i + (source.charCodeAt(i + 1) === 10 ? 2 : 1);
+    changes.push({ sourceFrom: i, sourceTo: end, viewFrom: view, viewTo: view + 1 });
+    chunks.push("\n");
+    view++;
+    i = end - 1;
+    start = end;
+  }
+  chunks.push(source.slice(start));
+  return { text: chunks.join(""), sourceLength: source.length, changes };
+}
+
+// src/source-trace.ts
+function sliceTrace(t, from, to) {
+  const pieces = [];
+  for (const p of t.pieces) {
+    const a = Math.max(from, p.from), b = Math.min(to, p.to);
+    if (a >= b) continue;
+    const whole = a === p.from && b === p.to;
+    pieces.push({
+      from: a - from,
+      to: b - from,
+      sourceFrom: p.kind === "copy" ? p.sourceFrom + a - p.from : p.sourceFrom,
+      sourceTo: p.kind === "copy" ? p.sourceFrom + b - p.from : p.sourceTo,
+      kind: p.kind === "atomic" && !whole ? "generated" : p.kind
+    });
+  }
+  return { text: t.text.slice(from, to), pieces };
+}
+function editTrace(t, edits) {
+  let at = 0, text2 = "";
+  const pieces = [];
+  const append = (part) => {
+    const shift = text2.length;
+    text2 += part.text;
+    pieces.push(...part.pieces.map((p) => ({ ...p, from: p.from + shift, to: p.to + shift })));
+  };
+  for (const e of edits) {
+    if (e.from < at || e.to < e.from || e.to > t.text.length) throw new RangeError("trace edit");
+    append(sliceTrace(t, at, e.from));
+    if (e.text) {
+      const old = sliceTrace(t, e.from, e.to).pieces;
+      const anchor = t.pieces.find((p) => p.from <= e.from && p.to >= e.from);
+      const raw = anchor ? anchor.kind === "copy" ? anchor.sourceFrom + e.from - anchor.from : anchor.sourceFrom : 0;
+      const contiguous = old.length > 0 && old.every((p, i) => p.kind !== "generated" && (!i || old[i - 1].sourceTo === p.sourceFrom));
+      append({ text: e.text, pieces: [{
+        from: 0,
+        to: e.text.length,
+        sourceFrom: contiguous ? old[0].sourceFrom : raw,
+        sourceTo: contiguous ? old[old.length - 1].sourceTo : raw,
+        kind: contiguous ? "atomic" : "generated"
+      }] });
+    }
+    at = e.to;
+  }
+  append(sliceTrace(t, at, t.text.length));
+  return { text: text2, pieces };
+}
+
 // src/markdown.ts
 var md = new MarkdownIt({
   html: true,
@@ -1581,7 +1649,10 @@ md.block.ruler.before(
   },
   { alt: [] }
 );
-var captureKey = /* @__PURE__ */ Symbol("paragraph source capture");
+var captureKey = /* @__PURE__ */ Symbol("document source capture");
+var owners = /* @__PURE__ */ new WeakMap();
+var tokenArrays = /* @__PURE__ */ new WeakMap();
+var inlineStateOwners = /* @__PURE__ */ new WeakMap();
 var tokenSources = /* @__PURE__ */ new WeakMap();
 var pendingSources = /* @__PURE__ */ new WeakMap();
 var captureAvailable = true;
@@ -1596,10 +1667,14 @@ function wrapCaptureRule(ruler, name, wrapper) {
 var collectorFor = (state) => state.env?.[captureKey];
 var inlineEngine = md.inline;
 var OriginalInlineState = inlineEngine.State;
+if (typeof OriginalInlineState !== "function") captureAvailable = false;
 inlineEngine.State = function(...args) {
   const state = new OriginalInlineState(...args);
   const collector = collectorFor(state);
-  if (collector) {
+  const owner = owners.get(args[3]);
+  if (collector && owner) {
+    if (state.src !== owner.text || state.tokens !== args[3] || typeof state.pending !== "string" || typeof state.pushPending !== "function") throw new UnsupportedSourceCapture();
+    inlineStateOwners.set(state, owner);
     pendingSources.set(state, []);
     const pushPending = state.pushPending.bind(state);
     state.pushPending = () => {
@@ -1612,16 +1687,100 @@ inlineEngine.State = function(...args) {
   return state;
 };
 wrapCaptureRule(md.core.ruler, "normalize", (original, state) => {
-  const result = original(state);
   const collector = collectorFor(state);
-  if (collector && state.src !== collector.source) collector.invalid = true;
+  if (!collector) return original(state);
+  if (state.src !== collector.trace.text) throw new UnsupportedSourceCapture();
+  const projection = projectLineEndings(state.src);
+  collector.trace = editTrace(collector.trace, projection.changes.map((c) => ({
+    from: c.sourceFrom,
+    to: c.sourceTo,
+    text: "\n"
+  })));
+  const nulEdits = [];
+  for (let i = 0; i < collector.trace.text.length; i++) {
+    if (collector.trace.text[i] === "\0") nulEdits.push({ from: i, to: i + 1, text: "\uFFFD" });
+  }
+  collector.trace = editTrace(collector.trace, nulEdits);
+  const result = original(state);
+  if (state.src !== collector.trace.text) throw new UnsupportedSourceCapture();
+  return result;
+});
+wrapCaptureRule(md.block.ruler, "paragraph", (original, state, ...args) => {
+  const collector = collectorFor(state);
+  if (!collector || state.level !== 0 || state.blkIndent !== 0) return original(state, ...args);
+  const originalGetLines = state.getLines;
+  if (typeof originalGetLines !== "function" || !Array.isArray(state.bMarks) || !Array.isArray(state.eMarks)) throw new UnsupportedSourceCapture();
+  const start = state.tokens.length;
+  let capturedLines;
+  state.getLines = function(begin, end, indent, keepLastLF) {
+    const value = originalGetLines.call(this, begin, end, indent, keepLastLF);
+    if (indent !== 0) return value;
+    const from = this.bMarks[begin];
+    const to = keepLastLF ? Math.min(this.src.length, this.eMarks[end - 1] + 1) : this.eMarks[end - 1];
+    const part = sliceTrace(collector.trace, from, to);
+    if (part.text !== value) throw new UnsupportedSourceCapture();
+    const left = value.length - value.trimStart().length;
+    capturedLines = sliceTrace(part, left, left + value.trim().length);
+    return value;
+  };
+  let result;
+  try {
+    result = original(state, ...args);
+  } finally {
+    state.getLines = originalGetLines;
+  }
+  if (result) for (const token of state.tokens.slice(start)) {
+    if (token.type !== "inline" || token.level !== 1) continue;
+    if (!capturedLines || capturedLines.text !== token.content || !Array.isArray(token.children)) {
+      throw new UnsupportedSourceCapture();
+    }
+    owners.set(token.children, capturedLines);
+    tokenArrays.set(token, token.children);
+  }
+  return result;
+});
+wrapCaptureRule(md.core.ruler, "inline", (original, state) => {
+  if (!collectorFor(state)) return original(state);
+  const mapped = state.tokens.filter((token) => tokenArrays.has(token));
+  const check = () => {
+    for (const token of mapped) {
+      if (!Array.isArray(token.children) || token.children !== tokenArrays.get(token)) throw new UnsupportedSourceCapture();
+    }
+  };
+  check();
+  const result = original(state);
+  check();
+  return result;
+});
+wrapCaptureRule(md.inline.ruler, "newline", (original, state, silent) => {
+  if (silent || !inlineStateOwners.has(state) || state.src[state.pos] !== "\n") return original(state, silent);
+  let end = state.pending.length;
+  while (end > 0 && state.pending[end - 1] === " ") end--;
+  const expected = state.pending.slice(0, end);
+  let trim = state.pending.length - end;
+  const runs = pendingSources.get(state);
+  while (trim > 0 && runs.length) {
+    const run = runs.pop();
+    if (run.text.length <= trim) {
+      trim -= run.text.length;
+      continue;
+    }
+    const keep = run.text.length - trim;
+    runs.push(run.trace && run.kind === "linear" ? { text: run.text.slice(0, keep), kind: "linear", trace: sliceTrace(run.trace, 0, keep) } : { text: run.text.slice(0, keep) });
+    trim = 0;
+  }
+  if (trim || runs.map((run) => run.text).join("") !== expected) throw new UnsupportedSourceCapture();
+  const start = state.tokens.length;
+  const result = original(state, silent);
+  if (!result || state.pending !== "" || expected && (state.tokens[start]?.type !== "text" || state.tokens[start].content !== expected)) throw new UnsupportedSourceCapture();
   return result;
 });
 wrapCaptureRule(md.inline.ruler, "text", (original, state, silent) => {
   const from = state.pos;
   const ok = original(state, silent);
-  if (ok && !silent && collectorFor(state)) {
-    pendingSources.get(state).push({ from, to: state.pos, text: state.src.slice(from, state.pos), kind: "linear" });
+  const owner = inlineStateOwners.get(state);
+  if (ok && !silent && owner) {
+    pendingSources.get(state).push({ trace: sliceTrace(owner, from, state.pos), text: state.src.slice(from, state.pos), kind: "linear" });
   }
   return ok;
 });
@@ -1630,11 +1789,12 @@ for (const name of ["entity", "escape"]) {
     const from = state.pos;
     const ok = original(state, silent);
     const collector = collectorFor(state);
-    if (ok && !silent && collector) {
+    const owner = inlineStateOwners.get(state);
+    if (ok && !silent && collector && owner) {
       const token = state.tokens[state.tokens.length - 1];
       if (token.type === "text_special") tokenSources.set(token, {
         collector,
-        runs: [{ from, to: state.pos, text: token.content, kind: "atomic" }]
+        runs: [{ trace: sliceTrace(owner, from, state.pos), text: token.content, kind: "atomic" }]
       });
     }
     return ok;
@@ -1644,28 +1804,23 @@ wrapCaptureRule(md.inline.ruler, "emphasis", (original, state, silent) => {
   const from = state.pos;
   const ok = original(state, silent);
   const collector = collectorFor(state);
-  if (ok && !silent && collector) {
+  const owner = inlineStateOwners.get(state);
+  if (ok && !silent && collector && owner) {
     const count = state.pos - from;
     state.tokens.slice(-count).forEach((token, i) => tokenSources.set(token, {
       collector,
-      runs: [{ from: from + i, to: from + i + 1, text: token.content, kind: "linear" }]
+      runs: [{ trace: sliceTrace(owner, from + i, from + i + 1), text: token.content, kind: "linear" }]
     }));
   }
   return ok;
 });
-wrapCaptureRule(md.inline.ruler, "link", (original, state, silent) => {
-  const collector = collectorFor(state);
-  const labelEnd = collector && !silent && state.src[state.pos] === "[" ? state.md.helpers.parseLinkLabel(state, state.pos, true) : -1;
-  const ok = original(state, silent);
-  if (ok && !silent && collector && (labelEnd < 0 || state.src[labelEnd + 1] !== "(")) collector.invalid = true;
-  return ok;
-});
 md.inline.ruler.push("source_capture_fallback", (state, silent) => {
-  if (silent || !collectorFor(state)) return false;
+  const owner = inlineStateOwners.get(state);
+  if (silent || !owner) return false;
   const from = state.pos++;
   const text2 = state.src.slice(from, state.pos);
   state.pending += text2;
-  pendingSources.get(state).push({ from, to: state.pos, text: text2, kind: "linear" });
+  pendingSources.get(state).push({ trace: sliceTrace(owner, from, state.pos), text: text2, kind: "linear" });
   return true;
 });
 function captureJoin(tokens, collector, special) {
@@ -1675,13 +1830,13 @@ function captureJoin(tokens, collector, special) {
       runs = [];
       continue;
     }
-    runs = runs.concat(token.content ? tokenSources.get(token)?.runs ?? [] : []);
+    runs = runs.concat(token.content ? tokenSources.get(token)?.runs ?? [{ text: token.content }] : []);
     tokenSources.set(token, { collector, runs });
   }
 }
 wrapCaptureRule(md.inline.ruler2, "fragments_join", (original, state) => {
   const collector = collectorFor(state);
-  if (collector) captureJoin(state.tokens, collector, false);
+  if (collector && inlineStateOwners.has(state)) captureJoin(state.tokens, collector, false);
   return original(state);
 });
 wrapCaptureRule(md.core.ruler, "text_join", (original, state) => {
@@ -1698,22 +1853,40 @@ function captureText(state, token, delegate) {
     return;
   }
   const { collector, runs } = provenance;
+  if (!Array.isArray(state.stack) || !state.stack.length || state.stack.some((frame) => !Array.isArray(frame.content) || !Array.isArray(frame.marks))) {
+    throw new UnsupportedSourceCapture();
+  }
   const cursor = () => state.stack.reduce((n, frame) => n + frame.content.reduce((sum, node) => sum + node.nodeSize, 0), state.stack.length - 1);
-  if (runs.map((run) => run.text).join("") !== token.content) collector.invalid = true;
+  if (runs.map((run) => run.text).join("") !== token.content) throw new UnsupportedSourceCapture();
   let pos = cursor();
+  const supported = state.stack[state.stack.length - 1].marks.every((mark) => ["em", "strong", "link"].includes(mark.type.name));
   for (const run of runs) {
-    if (!run.text) continue;
-    collector.runs.push({
-      sourceFrom: collector.offset + run.from,
-      sourceTo: collector.offset + run.to,
-      pmFrom: pos,
-      pmTo: pos + run.text.length,
-      kind: run.kind
-    });
+    const a = pos;
     pos += run.text.length;
+    if (!supported || !run.trace || !run.text) continue;
+    const ps = run.trace.pieces;
+    if (run.kind === "linear" && run.trace.text === run.text) {
+      for (const p of ps) if (p.kind !== "generated") collector.runs.push({
+        sourceFrom: p.sourceFrom,
+        sourceTo: p.sourceTo,
+        pmFrom: a + p.from,
+        pmTo: a + p.to,
+        kind: p.kind === "copy" ? "linear" : "atomic"
+      });
+      continue;
+    }
+    const contiguous = ps.length > 0 && ps.every((p, i) => p.kind !== "generated" && (!i || ps[i - 1].sourceTo === p.sourceFrom));
+    if (!contiguous) continue;
+    collector.runs.push({
+      sourceFrom: ps[0].sourceFrom,
+      sourceTo: ps[ps.length - 1].sourceTo,
+      pmFrom: a,
+      pmTo: pos,
+      kind: "atomic"
+    });
   }
   delegate();
-  if (cursor() !== pos) collector.invalid = true;
+  if (cursor() !== pos) throw new UnsupportedSourceCapture();
 }
 var _origMdParse = md.parse.bind(md);
 md.parse = function(src, env) {
@@ -1721,15 +1894,6 @@ md.parse = function(src, env) {
   tagPairedHtmlInline(tokens);
   fixFootnoteDefMaps(tokens);
   tokens = preserveBlankLines(tokens);
-  const collector = env?.[captureKey];
-  if (collector) {
-    const inline = tokens[1];
-    const allowed = /* @__PURE__ */ new Set(["text", "em_open", "em_close", "strong_open", "strong_close", "link_open", "link_close"]);
-    if (tokens.length !== 3 || tokens[0]?.type !== "paragraph_open" || inline?.type !== "inline" || tokens[2]?.type !== "paragraph_close" || inline.content.includes("\n") || collector.source.trim() !== inline.content || inline.children?.some((token) => !allowed.has(token.type) || token.markup === "autolink")) {
-      throw new UnsupportedSourceCapture();
-    }
-    collector.offset = collector.source.length - collector.source.trimStart().length;
-  }
   return tokens;
 };
 var parserTokens = {
@@ -2351,9 +2515,17 @@ function isPlainURL(mark, parent, index, side) {
   const next = parent.child(index + (side < 0 ? -2 : 1));
   return !mark.isInSet(next.marks);
 }
-function normalizeMathBlocks(text2) {
+function normalizeMathBlocks(text2, edits) {
   if (!text2.includes("$$")) return text2;
   const lines = text2.split("\n");
+  const starts = [];
+  if (edits) {
+    let offset = 0;
+    for (const line of lines) {
+      starts.push(offset);
+      offset += line.length + 1;
+    }
+  }
   const result = [];
   let inFence = false;
   let inMathBlock = false;
@@ -2374,6 +2546,7 @@ function normalizeMathBlocks(text2) {
         const last = result[result.length - 1];
         if (result.length > 0 && last !== void 0 && last.trim() !== "") {
           result.push("");
+          if (edits) edits.push({ from: starts[i], to: starts[i], text: "\n" });
         }
         result.push(line);
         inMathBlock = true;
@@ -2383,6 +2556,7 @@ function normalizeMathBlocks(text2) {
         const next = lines[i + 1];
         if (next !== void 0 && next.trim() !== "") {
           result.push("");
+          if (edits) edits.push({ from: starts[i + 1], to: starts[i + 1], text: "\n" });
         }
       }
     } else {
@@ -2391,18 +2565,25 @@ function normalizeMathBlocks(text2) {
   }
   return result.join("\n");
 }
-function normalizeSmartQuotes(text2) {
+function normalizeSmartQuotes(text2, observe) {
   if (!/[“”„‟‘’‚‛]/.test(text2)) return text2;
-  return text2.replace(
-    /(\]\([^\n)]*\s)“([^”\n]*)”(\s*\))/g,
-    (_m, pre, title, post) => `${pre}"${title}"${post}`
-  ).replace(
-    /(\]\([^\n)]*\s)“([^”\n]*)”(\s*\))/g,
-    (_m, pre, title, post) => `${pre}"${title}"${post}`
-  ).replace(
-    /(\]\([^\n)]*\s)‘([^’\n]*)’(\s*\))/g,
-    (_m, pre, title, post) => `${pre}'${title}'${post}`
-  );
+  const passes = [
+    [/(\]\([^\n)]*\s)“([^”\n]*)”(\s*\))/g, '"'],
+    [/(\]\([^\n)]*\s)“([^”\n]*)”(\s*\))/g, '"'],
+    [/(\]\([^\n)]*\s)‘([^’\n]*)’(\s*\))/g, "'"]
+  ];
+  for (const [pattern, quote] of passes) {
+    const before = text2, edits = [];
+    text2 = text2.replace(pattern, (_m, pre, title, post, offset) => {
+      if (observe) {
+        const left = offset + pre.length, right = left + 1 + title.length;
+        edits.push({ from: left, to: left + 1, text: quote }, { from: right, to: right + 1, text: quote });
+      }
+      return pre + quote + title + quote + post;
+    });
+    observe?.(before, text2, edits);
+  }
+  return text2;
 }
 function parseMarkdown(markdown, schemaArg) {
   const p = getParserFor(schemaArg);

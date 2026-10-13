@@ -54,6 +54,14 @@ declare function parseMarkdownAsync(markdown: string, schemaArg?: Schema): Promi
  */
 declare function serializeMarkdown(doc: Node): string;
 /** Internal experimental hook. Never uses parseMarkdown's empty-doc fallback. */
+declare function parseDocumentWithSourceCapture(source: string, schema?: Schema): {
+    ok: true;
+    value: CapturedParagraph;
+} | {
+    ok: false;
+    reason: 'unsupported-source' | 'parse-error';
+};
+/** Compatibility hook for callers requiring a fully mapped ordinary paragraph. */
 declare function parseParagraphWithSourceCapture(source: string, schema?: Schema): {
     ok: true;
     value: CapturedParagraph;
@@ -62,4 +70,4 @@ declare function parseParagraphWithSourceCapture(source: string, schema?: Schema
     reason: 'unsupported-source' | 'parse-error';
 };
 
-export { type CapturedParagraph, type CapturedTextRun, parseMarkdown, parseMarkdownAsync, parseParagraphWithSourceCapture, serializeMarkdown };
+export { type CapturedParagraph, type CapturedTextRun, parseDocumentWithSourceCapture, parseMarkdown, parseMarkdownAsync, parseParagraphWithSourceCapture, serializeMarkdown };
