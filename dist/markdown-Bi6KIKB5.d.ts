@@ -120,7 +120,17 @@ declare function capturedSourceLists(source: string, doc: Node, roots: readonly 
 /** Internal source-render guard; a missing capture fact is not permission. */
 declare function sourceRootHasClosedFences(root: SourceRoot): boolean;
 /** Internal source-root renderer; default serializeMarkdown stays unchanged. */
-declare function serializeSourceRootMarkdown(doc: Node): string;
+type SourceListStyle = Readonly<{
+    marker: '-' | '+' | '*' | '.' | ')';
+    tight: boolean;
+}>;
+type SourceRootRenderOptions = Readonly<{
+    lists?: readonly Readonly<{
+        node: Node;
+        style: SourceListStyle;
+    }>[];
+}>;
+declare function serializeSourceRootMarkdown(doc: Node, options?: SourceRootRenderOptions): string;
 /**
  * Parse a markdown string into a ProseMirror document node. Never throws (§4.5).
  *
@@ -158,4 +168,4 @@ declare function parseParagraphWithSourceCapture(source: string, schema?: Schema
     reason: 'unsupported-source' | 'parse-error';
 };
 
-export { type BlankLineUnit as B, type CapturedDocument as C, type FallbackEmpty as F, type LayoutContainer as L, type ProtectedSource as P, type SourceRoot as S, type SourceGap as a, type SourceLayout as b, type SourceEdit as c, type SyntheticEmission as d, parseMarkdownAsync as e, type CapturedParagraph as f, type CapturedTextRun as g, capturedSourceLists as h, parseDocumentWithSourceCapture as i, parseParagraphWithSourceCapture as j, serializeSourceRootMarkdown as k, sourceRootHasClosedFences as l, parseMarkdown as p, serializeMarkdown as s };
+export { type BlankLineUnit as B, type CapturedDocument as C, type FallbackEmpty as F, type LayoutContainer as L, type ProtectedSource as P, type SourceRoot as S, type SourceGap as a, type SourceLayout as b, type SourceEdit as c, type SyntheticEmission as d, parseMarkdownAsync as e, type CapturedParagraph as f, type CapturedTextRun as g, type SourceListStyle as h, type SourceRootRenderOptions as i, capturedSourceLists as j, parseDocumentWithSourceCapture as k, parseParagraphWithSourceCapture as l, serializeSourceRootMarkdown as m, sourceRootHasClosedFences as n, parseMarkdown as p, serializeMarkdown as s };

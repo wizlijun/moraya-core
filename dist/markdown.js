@@ -3166,8 +3166,40 @@ var sourceRootSerializer = new MarkdownSerializer({
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 }, sourceMarks, { hardBreakNodeName: "hardbreak", strict: false });
-function serializeSourceRootMarkdown(doc2) {
-  let result = sourceRootSerializer.serialize(doc2, { tightLists: true });
+function renderSourceList(state, node, style, indent, firstDelim) {
+  if (node.attrs.tight !== void 0 && node.attrs.tight !== style.tight) throw new UnsupportedSourceCapture();
+  const previous = state.options.tightLists;
+  state.options.tightLists = style.tight;
+  try {
+    state.renderList(node, indent, firstDelim);
+  } finally {
+    if (previous === void 0) delete state.options.tightLists;
+    else state.options.tightLists = previous;
+  }
+}
+function serializeSourceRootMarkdown(doc2, options = {}) {
+  const styles = new Map(options.lists?.map((binding) => [binding.node, binding.style]));
+  const styleFor = (node) => {
+    const style = styles.get(node);
+    if (!style) throw new UnsupportedSourceCapture();
+    return style;
+  };
+  const current = new MarkdownSerializer({
+    ...sourceRootSerializer.nodes,
+    bullet_list(state, node) {
+      const style = styleFor(node);
+      if (!["-", "+", "*"].includes(style.marker)) throw new UnsupportedSourceCapture();
+      renderSourceList(state, node, style, "  ", () => style.marker + " ");
+    },
+    ordered_list(state, node) {
+      const style = styleFor(node), start = node.attrs.order;
+      if (![".", ")"].includes(style.marker) || !Number.isInteger(start) || start < 0 || start > 999999999) throw new UnsupportedSourceCapture();
+      const number = (i) => start + i <= 999999999 ? start + i : start;
+      const width = String(number(node.childCount - 1)).length + 2;
+      renderSourceList(state, node, style, " ".repeat(width), (i) => String(number(i)).padStart(width - 2, " ") + style.marker + " ");
+    }
+  }, sourceRootSerializer.marks, sourceRootSerializer.options);
+  let result = current.serialize(doc2, { tightLists: true });
   result = relaxEscapes(result, doc2);
   return result.replace(/\u200B/g, "");
 }

@@ -2956,6 +2956,10 @@ var capturedFenceClosed = /* @__PURE__ */ new WeakMap();
 var capturedRootFencesClosed = /* @__PURE__ */ new WeakMap();
 var capturedListLayouts = /* @__PURE__ */ new WeakMap();
 var captureAvailable = true;
+function capturedSourceLists(source, doc2, roots, layout) {
+  const bound = capturedListLayouts.get(layout);
+  return bound && bound.source === source && bound.doc === doc2 && bound.roots === roots && bound.lists === layout.lists ? bound.lists : void 0;
+}
 function sourceRootHasClosedFences(root) {
   return capturedRootFencesClosed.get(root) === true;
 }
@@ -4317,8 +4321,40 @@ var sourceRootSerializer = new MarkdownSerializer({
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 }, sourceMarks, { hardBreakNodeName: "hardbreak", strict: false });
-function serializeSourceRootMarkdown(doc2) {
-  let result = sourceRootSerializer.serialize(doc2, { tightLists: true });
+function renderSourceList(state, node, style, indent, firstDelim) {
+  if (node.attrs.tight !== void 0 && node.attrs.tight !== style.tight) throw new UnsupportedSourceCapture();
+  const previous = state.options.tightLists;
+  state.options.tightLists = style.tight;
+  try {
+    state.renderList(node, indent, firstDelim);
+  } finally {
+    if (previous === void 0) delete state.options.tightLists;
+    else state.options.tightLists = previous;
+  }
+}
+function serializeSourceRootMarkdown(doc2, options = {}) {
+  const styles = new Map(options.lists?.map((binding) => [binding.node, binding.style]));
+  const styleFor = (node) => {
+    const style = styles.get(node);
+    if (!style) throw new UnsupportedSourceCapture();
+    return style;
+  };
+  const current = new MarkdownSerializer({
+    ...sourceRootSerializer.nodes,
+    bullet_list(state, node) {
+      const style = styleFor(node);
+      if (!["-", "+", "*"].includes(style.marker)) throw new UnsupportedSourceCapture();
+      renderSourceList(state, node, style, "  ", () => style.marker + " ");
+    },
+    ordered_list(state, node) {
+      const style = styleFor(node), start = node.attrs.order;
+      if (![".", ")"].includes(style.marker) || !Number.isInteger(start) || start < 0 || start > 999999999) throw new UnsupportedSourceCapture();
+      const number = (i) => start + i <= 999999999 ? start + i : start;
+      const width = String(number(node.childCount - 1)).length + 2;
+      renderSourceList(state, node, style, " ".repeat(width), (i) => String(number(i)).padStart(width - 2, " ") + style.marker + " ");
+    }
+  }, sourceRootSerializer.marks, sourceRootSerializer.options);
+  let result = current.serialize(doc2, { tightLists: true });
   result = relaxEscapes(result, doc2);
   return result.replace(/\u200B/g, "");
 }
@@ -6832,12 +6868,15 @@ async function createEditor(opts) {
 // src/source-fidelity.ts
 import { Fragment as Fragment3 } from "prosemirror-model";
 import { EditorState as EditorState2 } from "prosemirror-state";
-import { AddMarkStep as AddMarkStep2, RemoveMarkStep as RemoveMarkStep2, ReplaceStep as ReplaceStep2 } from "prosemirror-transform";
+import { AddMarkStep as AddMarkStep2, RemoveMarkStep as RemoveMarkStep2, ReplaceStep as ReplaceStep2, Mapping } from "prosemirror-transform";
 
 // src/source-structure.ts
 import { AddMarkStep, RemoveMarkStep, ReplaceStep, ReplaceAroundStep, AttrStep, AddNodeMarkStep, RemoveNodeMarkStep } from "prosemirror-transform";
 var UnsupportedSourceStructure = class extends Error {
 };
+function isSourceListBoundary(node) {
+  return node.type.name === "html_block" && node.textContent === "<!-- notemd:list-boundary -->" && node.hasMarkup(node.type) && node.childCount === 1 && node.firstChild.isText && node.firstChild.marks.length === 0;
+}
 function fail() {
   throw new UnsupportedSourceStructure();
 }
@@ -6998,6 +7037,15 @@ function advanceLedger(ledger, before, after, step, index) {
   }
   const refs = ledger.children.slice(w.before.from, w.before.to).map((l) => l.ref);
   const boundary2 = ledger.boundaries[w.before.from];
+  for (let child = w.before.from; child <= w.before.to; child++) {
+    const position = ledger.children[child]?.from ?? before.content.size;
+    if (!(range.from < position && position < range.to)) continue;
+    let crossed = ledger.boundaries[child];
+    while (crossed.kind === "tombstone") {
+      refs.push({ kind: "component", id: crossed.component });
+      crossed = crossed.prior;
+    }
+  }
   if (!refs.length) {
     if (boundary2.kind === "inside-root") refs.push({ kind: "base", origin: { kind: "root", id: boundary2.rootId } });
     else if (boundary2.kind === "generated" || boundary2.kind === "tombstone") refs.push({ kind: "component", id: boundary2.component });
@@ -7154,7 +7202,7 @@ function makeRecipe(base, ledger, slots, render, rootHasClosedFences) {
       const r2 = base.roots[o.id];
       if (base.protectedSources.some((p) => p.sourceFrom < r2.sourceTo && p.sourceTo > r2.sourceFrom)) fail();
       if (!rootHasClosedFences(r2)) fail();
-      if (!["paragraph_open", "heading_open", "bullet_list_open", "ordered_list_open", "blockquote_open", "table_open", "hr", "fence"].includes(r2.tokenType)) fail();
+      if (!["paragraph_open", "heading_open", "bullet_list_open", "ordered_list_open", "blockquote_open", "table_open", "hr", "fence"].includes(r2.tokenType) && !(r2.tokenType === "html_block" && r2.childTo === r2.childFrom + 1 && isSourceListBoundary(base.doc.child(r2.childFrom)))) fail();
     }
     const rootSlots = slots.filter((s) => (s.kind === "body" || s.kind === "terminator") && originIds.has(s.id));
     const terminal = rootSlots.filter((s) => s.kind === "terminator").at(-1);
@@ -7177,8 +7225,8 @@ function makeRecipe(base, ledger, slots, render, rootHasClosedFences) {
         if (finalIndex !== baseline) atoms2.push(generated("blank", "\n", anchor, stepOf(c2)));
         continue;
       }
-      const output = render([node]);
-      if (output.family === "closed-literal" && node.type.name !== "code_block") fail();
+      const output = render([node], [ledger.children[finalIndex].from]);
+      if (output.family === "closed-literal" && node.type.name !== "code_block" && !isSourceListBoundary(node)) fail();
       let text2 = output.text;
       if (output.terminal === "content-eol") {
         if (!text2.endsWith(output.eol)) fail();
@@ -7466,6 +7514,86 @@ function applySourceTextTransaction(base, tr) {
 }
 var UnsupportedBlockTransaction = class extends Error {
 };
+function sameSourceMetadata(a, b) {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object" || Array.isArray(a) !== Array.isArray(b)) return false;
+  const left = a, right = b, keys = Object.keys(left);
+  return keys.length === Object.keys(right).length && keys.every((k) => Object.hasOwn(right, k) && sameSourceMetadata(left[k], right[k]));
+}
+function prepareListAuthority(base) {
+  const bound = capturedSourceLists(base.source, base.doc, base.roots, base.layout);
+  if (bound) return { base, facts: bound };
+  const capture = createSourceSession(base.source, base.doc.type.schema);
+  if (!capture.ok) throw new UnsupportedBlockTransaction();
+  const actual = capture.session;
+  if (actual.doc.type.schema !== base.doc.type.schema || !actual.doc.eq(base.doc) || !sameSourceMetadata(actual.roots, base.roots) || !sameSourceMetadata(actual.gaps, base.gaps) || !sameSourceMetadata(actual.protectedSources, base.protectedSources) || !sameSourceMetadata(actual.textSpans, base.textSpans) || !sameSourceMetadata(actual.layout.blankLines, base.layout.blankLines) || !sameSourceMetadata(actual.layout.fallback, base.layout.fallback) || base.layout.lists !== void 0 && !sameSourceMetadata(actual.layout.lists, base.layout.lists)) throw new UnsupportedBlockTransaction();
+  const facts = capturedSourceLists(actual.source, actual.doc, actual.roots, actual.layout);
+  if (!facts) throw new UnsupportedBlockTransaction();
+  return { base: { ...actual, revision: base.revision }, facts };
+}
+var isList = (node) => node.type.name === "bullet_list" || node.type.name === "ordered_list";
+function transactionListStyles(tr, facts, targets) {
+  const ranges = [];
+  for (const { node, pos } of targets) {
+    if (tr.doc.nodeAt(pos) !== node) throw new UnsupportedBlockTransaction();
+    if (isList(node)) ranges.push({ from: pos, to: pos + node.nodeSize });
+    node.descendants((child, offset) => {
+      if (isList(child)) ranges.push({ from: pos + 1 + offset, to: pos + 1 + offset + child.nodeSize });
+    });
+  }
+  if (!ranges.length) return /* @__PURE__ */ new Map();
+  const chainMapping = new Mapping(tr.steps.map((step) => step.getMap()));
+  const relevant = (pos, size, step) => {
+    const mapping = chainMapping.slice(step), from = mapping.map(pos, -1), to = mapping.map(pos + size, 1);
+    return ranges.some((r2) => from < r2.to && to > r2.from);
+  };
+  let shells = facts.filter((f) => relevant(f.pmFrom, f.pmTo - f.pmFrom, 0)).map((f) => {
+    const node = tr.before.nodeAt(f.pmFrom);
+    if (!node || node.type.name !== f.kind + "_list" || node.nodeSize !== f.pmTo - f.pmFrom) throw new UnsupportedBlockTransaction();
+    return { node, pos: f.pmFrom, origins: [{ kind: node.type.name, style: { marker: f.marker, tight: f.tight } }] };
+  });
+  let items = shells.flatMap((shell2) => {
+    const result = [];
+    shell2.node.forEach((node, offset) => result.push({ node, pos: shell2.pos + 1 + offset, origins: shell2.origins }));
+    return result;
+  });
+  for (let i = 0; i < tr.steps.length; i++) {
+    const after = tr.docs[i + 1] ?? tr.doc, map = tr.steps[i].getMap();
+    const shellOrigins = /* @__PURE__ */ new Map(), itemOrigins = /* @__PURE__ */ new Map();
+    for (const shell2 of shells) {
+      const start = map.mapResult(shell2.pos, 1), end = map.mapResult(shell2.pos + shell2.node.nodeSize, -1), node = after.nodeAt(start.pos);
+      if (!start.deleted && !end.deleted && !start.deletedAcross && !end.deletedAcross && node?.type === shell2.node.type && start.pos + node.nodeSize === end.pos)
+        shellOrigins.set(start.pos, shell2.origins);
+    }
+    for (const item of items) for (const [pos, assoc] of [[item.pos + 1, 1], [item.pos + item.node.nodeSize - 1, -1]]) {
+      const mapped = map.mapResult(pos, assoc);
+      if (mapped.deletedAcross || mapped.deleted) continue;
+      {
+        const resolved = after.resolve(mapped.pos);
+        for (let depth = resolved.depth; depth > 0; depth--) if (resolved.node(depth).type.name === "list_item") {
+          const itemPos = resolved.before(depth), origins = itemOrigins.get(itemPos) ?? [];
+          for (const origin of item.origins) if (!origins.includes(origin)) origins.push(origin);
+          itemOrigins.set(itemPos, origins);
+          break;
+        }
+      }
+    }
+    shells = [];
+    items = [];
+    after.descendants((node, pos) => {
+      if (!isList(node) || !relevant(pos, node.nodeSize, i + 1)) return;
+      const origins = [];
+      node.forEach((_item, offset) => {
+        for (const origin of itemOrigins.get(pos + 1 + offset) ?? []) if (origin.kind === node.type.name && !origins.includes(origin)) origins.push(origin);
+      });
+      if (!origins.length) origins.push(...shellOrigins.get(pos) ?? []);
+      if (!origins.length) origins.push({ kind: node.type.name, style: { marker: node.type.name === "bullet_list" ? "-" : ".", tight: true } });
+      shells.push({ node, pos, origins });
+      node.forEach((item, offset) => items.push({ node: item, pos: pos + 1 + offset, origins: itemOrigins.get(pos + 1 + offset)?.filter((o) => o.kind === node.type.name).length ? itemOrigins.get(pos + 1 + offset).filter((o) => o.kind === node.type.name) : origins }));
+    });
+  }
+  return new Map(shells.map((s) => [s.pos, { marker: s.origins[0].style.marker, tight: s.origins.every((o) => o.style.tight) }]));
+}
 function indexSourceRoots(base) {
   const rootById = base.roots;
   const ownerByChild = new Array(base.doc.childCount);
@@ -7548,10 +7676,15 @@ var renderableRoots = /* @__PURE__ */ new Set([
   "math_block",
   "math_block_eqno"
 ]);
-function rootRenderNode(node) {
+function rootRenderNode(node, pos, styles, bindings) {
   const children2 = [];
-  node.forEach((child) => children2.push(rootRenderNode(child)));
-  const rendered = node.isLeaf ? node : node.copy(Fragment3.fromArray(children2));
+  node.forEach((child, offset) => children2.push(rootRenderNode(child, pos + 1 + offset, styles, bindings)));
+  const rendered = node.isLeaf ? node : isList(node) ? node.type.create(node.attrs, Fragment3.fromArray(children2), node.marks) : node.copy(Fragment3.fromArray(children2));
+  if (isList(node)) {
+    const style = styles.get(pos);
+    if (!style) throw new UnsupportedBlockTransaction();
+    bindings.push({ node: rendered, style });
+  }
   const highlight2 = rendered.marks.findIndex((mark) => mark.type.name === "highlight" && mark.attrs.delimiter === "equals");
   if (highlight2 < 1) return rendered;
   let outer = highlight2;
@@ -7570,12 +7703,14 @@ function endsInTerminalHardbreak(node) {
   const last = node.lastChild;
   return !!last && endsInTerminalHardbreak(last);
 }
-function renderChangedRoot(base, doc2, root) {
+function renderChangedRoot(base, doc2, root, styles) {
   if (overlapsProtectedSource(base, root.sourceFrom, root.sourceTo) || !renderableRoots.has(root.tokenType)) throw new UnsupportedBlockTransaction();
   if (!sourceRootHasClosedFences(root)) throw new UnsupportedBlockTransaction();
-  const nodes = [];
-  for (let i = root.childFrom; i < root.childTo; i++) nodes.push(rootRenderNode(doc2.child(i)));
-  let generated = serializeSourceRootMarkdown(doc2.type.create(doc2.attrs, Fragment3.fromArray(nodes)));
+  const nodes = [], lists = [];
+  doc2.forEach((node, pos, index) => {
+    if (index >= root.childFrom && index < root.childTo) nodes.push(rootRenderNode(node, pos, styles, lists));
+  });
+  let generated = serializeSourceRootMarkdown(doc2.type.create(doc2.attrs, Fragment3.fromArray(nodes)), { lists });
   const last = nodes[nodes.length - 1], tail = base.source.slice(root.tailFrom, root.sourceTo);
   if (last.type.name === "table") {
     if (!generated.endsWith("\n") || generated.endsWith("\n\n")) throw new UnsupportedBlockTransaction();
@@ -7603,11 +7738,22 @@ function applySourceEdits(base, edits, ids, ownership) {
 }
 function applySourceBlockTransaction(base, tr) {
   if (!tr.before.eq(base.doc)) return { ok: false, reason: "stale-document" };
+  const caller = base;
   try {
-    if (classifyTransaction(base, tr) === "structural") {
-      const render = (nodes) => {
-        const rendered = nodes.map(rootRenderNode), doc2 = tr.doc.type.create(tr.doc.attrs, Fragment3.fromArray(rendered));
-        const text2 = serializeSourceRootMarkdown(doc2), last = rendered[rendered.length - 1];
+    const authority = prepareListAuthority(base);
+    base = authority.base;
+    const classification = classifyTransaction(base, tr);
+    for (let i = 0; i < tr.steps.length; i++) {
+      const before = tr.docs[i], after = tr.docs[i + 1] ?? tr.doc;
+      if (i === 0 && !before.eq(base.doc)) throw new UnsupportedBlockTransaction();
+      const result = tr.steps[i].apply(before);
+      if (result.failed || !result.doc || !result.doc.eq(after)) throw new UnsupportedBlockTransaction();
+    }
+    tr.doc.check();
+    if (classification === "structural") {
+      const render = (nodes, positions) => {
+        const lists = [], styles2 = transactionListStyles(tr, authority.facts, nodes.map((node, i) => ({ node, pos: positions[i] }))), rendered = nodes.map((node, i) => rootRenderNode(node, positions[i], styles2, lists)), doc2 = tr.doc.type.create(tr.doc.attrs, Fragment3.fromArray(rendered));
+        const text2 = serializeSourceRootMarkdown(doc2, { lists }), last = rendered[rendered.length - 1];
         return {
           text: text2,
           terminal: last.type.name === "table" || endsInTerminalHardbreak(last) ? "content-eol" : "none",
@@ -7616,7 +7762,7 @@ function applySourceBlockTransaction(base, tr) {
         };
       };
       const result = applyStructuralTransaction(base, tr, render, sourceRootHasClosedFences);
-      if (result.unchanged) return { ok: true, session: base, mode: "unchanged", edits: [], changedRoots: [] };
+      if (result.unchanged) return { ok: true, session: caller, mode: "unchanged", edits: [], changedRoots: [] };
       const parsed2 = createSourceSession(result.source, base.doc.type.schema);
       if (!parsed2.ok || !parsed2.session.doc.eq(tr.doc)) return { ok: false, reason: "semantic-mismatch" };
       return {
@@ -7631,7 +7777,7 @@ function applySourceBlockTransaction(base, tr) {
     const changedRoots = changedNaturalRoots(base, tr, ownership);
     if (!changedRoots.length) {
       if (!tr.doc.eq(base.doc)) return { ok: false, reason: "unsupported-step" };
-      return { ok: true, session: base, mode: "unchanged", edits: [], changedRoots: [] };
+      return { ok: true, session: caller, mode: "unchanged", edits: [], changedRoots: [] };
     }
     if (tr.steps.length === 1 && tr.steps[0] instanceof ReplaceStep2) {
       const replay = EditorState2.create({ doc: base.doc }).tr.step(tr.steps[0]);
@@ -7644,9 +7790,17 @@ function applySourceBlockTransaction(base, tr) {
         return { ok: true, session: exact.session, mode: "exact-text", edits: edits2, changedRoots };
       }
     }
+    const targets = [];
+    tr.doc.forEach((node, pos, index) => {
+      if (changedRoots.some((id) => {
+        const root = ownership.rootById[id];
+        return index >= root.childFrom && index < root.childTo;
+      })) targets.push({ node, pos });
+    });
+    const styles = transactionListStyles(tr, authority.facts, targets);
     const edits = changedRoots.map((id) => {
       const root = ownership.rootById[id];
-      return { from: root.sourceFrom, to: root.sourceTo, text: renderChangedRoot(base, tr.doc, root) };
+      return { from: root.sourceFrom, to: root.sourceTo, text: renderChangedRoot(base, tr.doc, root, styles) };
     });
     const source = applySourceEdits(base, edits, changedRoots, ownership);
     const parsed = createSourceSession(source, base.doc.type.schema);

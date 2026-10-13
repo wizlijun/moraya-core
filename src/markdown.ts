@@ -1889,9 +1889,35 @@ const sourceRootSerializer = new MarkdownSerializer({
 }, sourceMarks, ({ hardBreakNodeName: 'hardbreak', strict: false } as any))
 
 /** Internal source-root renderer; default serializeMarkdown stays unchanged. */
-export function serializeSourceRootMarkdown(doc: PmNode): string {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let result = sourceRootSerializer.serialize(doc, ({ tightLists: true } as any))
+export type SourceListStyle = Readonly<{marker:'-'|'+'|'*'|'.'|')';tight:boolean}>
+export type SourceRootRenderOptions = Readonly<{lists?:readonly Readonly<{node:PmNode;style:SourceListStyle}>[]}>
+function renderSourceList(state:MarkdownSerializerState,node:PmNode,style:SourceListStyle,indent:string,firstDelim:(index:number)=>string):void {
+  if(node.attrs.tight!==undefined&&node.attrs.tight!==style.tight)throw new UnsupportedSourceCapture()
+  const previous=state.options.tightLists
+  state.options.tightLists=style.tight
+  try{state.renderList(node,indent,firstDelim)}finally{
+    if(previous===undefined)delete state.options.tightLists
+    else state.options.tightLists=previous
+  }
+}
+export function serializeSourceRootMarkdown(doc: PmNode, options:SourceRootRenderOptions={}): string {
+  const styles=new Map(options.lists?.map(binding=>[binding.node,binding.style]))
+  const styleFor=(node:PmNode)=>{const style=styles.get(node);if(!style)throw new UnsupportedSourceCapture();return style}
+  const current=new MarkdownSerializer({...sourceRootSerializer.nodes,
+    bullet_list(state,node){
+      const style=styleFor(node)
+      if(!['-','+','*'].includes(style.marker))throw new UnsupportedSourceCapture()
+      renderSourceList(state,node,style,'  ',()=>style.marker+' ')
+    },
+    ordered_list(state,node){
+      const style=styleFor(node),start=node.attrs.order
+      if(!['.',')'].includes(style.marker)||!Number.isInteger(start)||start<0||start>999999999)throw new UnsupportedSourceCapture()
+      const number=(i:number)=>start+i<=999999999?start+i:start
+      const width=String(number(node.childCount-1)).length+2
+      renderSourceList(state,node,style,' '.repeat(width),i=>String(number(i)).padStart(width-2,' ')+style.marker+' ')
+    },
+  },sourceRootSerializer.marks,sourceRootSerializer.options)
+  let result = current.serialize(doc, {tightLists:true})
   result = relaxEscapes(result, doc)
   return result.replace(/\u200B/g, '')
 }

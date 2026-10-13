@@ -1,8 +1,8 @@
 import { Fragment, type Node as PmNode, type ResolvedPos, type Schema } from 'prosemirror-model'
 import { EditorState, type Transaction } from 'prosemirror-state'
-import { AddMarkStep, RemoveMarkStep, ReplaceStep } from 'prosemirror-transform'
-import { parseDocumentWithSourceCapture, serializeSourceRootMarkdown, sourceRootHasClosedFences } from './markdown'
-import type { SourceLayout } from './source-layout'
+import { AddMarkStep, RemoveMarkStep, ReplaceStep, Mapping } from 'prosemirror-transform'
+import { parseDocumentWithSourceCapture, serializeSourceRootMarkdown, sourceRootHasClosedFences, capturedSourceLists, type SourceListStyle } from './markdown'
+import type { SourceLayout, SourceListLexeme } from './source-layout'
 import type { SourceRoot, SourceGap, SourceEdit, ProtectedSource } from './source-ownership'
 import {classifyTransaction,applyStructuralTransaction,UnsupportedSourceStructure,type StructuralRendered} from './source-structure'
 
@@ -127,6 +127,95 @@ export type SourceBlockResult =
     edits:readonly SourceEdit[];changedRoots:readonly number[]}
  | FidelityFailure
 class UnsupportedBlockTransaction extends Error {}
+// Public metadata is observational. Only a capture binding or one fully checked
+// recapture may drive rendering (including the existing fence provenance guard).
+function sameSourceMetadata(a:unknown,b:unknown):boolean {
+ if(a===b)return true
+ if(!a||!b||typeof a!=='object'||typeof b!=='object'||Array.isArray(a)!==Array.isArray(b))return false
+ const left=a as Record<string,unknown>,right=b as Record<string,unknown>,keys=Object.keys(left)
+ return keys.length===Object.keys(right).length&&keys.every(k=>Object.hasOwn(right,k)&&sameSourceMetadata(left[k],right[k]))
+}
+function prepareListAuthority(base:SourceSession):{base:SourceSession;facts:readonly SourceListLexeme[]} {
+ const bound=capturedSourceLists(base.source,base.doc,base.roots,base.layout)
+ if(bound)return {base,facts:bound}
+ const capture=createSourceSession(base.source,base.doc.type.schema)
+ if(!capture.ok)throw new UnsupportedBlockTransaction()
+ const actual=capture.session
+ if(actual.doc.type.schema!==base.doc.type.schema||!actual.doc.eq(base.doc)
+  ||!sameSourceMetadata(actual.roots,base.roots)||!sameSourceMetadata(actual.gaps,base.gaps)
+  ||!sameSourceMetadata(actual.protectedSources,base.protectedSources)||!sameSourceMetadata(actual.textSpans,base.textSpans)
+  ||!sameSourceMetadata(actual.layout.blankLines,base.layout.blankLines)||!sameSourceMetadata(actual.layout.fallback,base.layout.fallback)
+  ||base.layout.lists!==undefined&&!sameSourceMetadata(actual.layout.lists,base.layout.lists))throw new UnsupportedBlockTransaction()
+ const facts=capturedSourceLists(actual.source,actual.doc,actual.roots,actual.layout)
+ if(!facts)throw new UnsupportedBlockTransaction()
+ return {base:{...actual,revision:base.revision},facts}
+}
+type ListOrigin={kind:string;style:SourceListStyle}
+type ListShell={node:PmNode;pos:number;origins:readonly ListOrigin[]}
+type ListItem={node:PmNode;pos:number;origins:readonly ListOrigin[]}
+const isList=(node:PmNode)=>node.type.name==='bullet_list'||node.type.name==='ordered_list'
+/** Pure lexical lineage, never root/slot authorization. Called only after the
+ * standard step chain has been validated. Full replacements have no witnesses. */
+function transactionListStyles(tr:Transaction,facts:readonly SourceListLexeme[],targets:readonly {node:PmNode;pos:number}[]):Map<number,SourceListStyle> {
+ const ranges:{from:number;to:number}[]=[]
+ for(const {node,pos} of targets){
+  if(tr.doc.nodeAt(pos)!==node)throw new UnsupportedBlockTransaction()
+  if(isList(node))ranges.push({from:pos,to:pos+node.nodeSize})
+  node.descendants((child,offset)=>{if(isList(child))ranges.push({from:pos+1+offset,to:pos+1+offset+child.nodeSize})})
+ }
+ if(!ranges.length)return new Map()
+ // This range filter only limits lexical work. It cannot authorize rendering;
+ // the caller's natural-root or structural recipe guard does that separately.
+ const chainMapping=new Mapping(tr.steps.map(step=>step.getMap()))
+ const relevant=(pos:number,size:number,step:number)=>{
+  const mapping=chainMapping.slice(step),from=mapping.map(pos,-1),to=mapping.map(pos+size,1)
+  return ranges.some(r=>from<r.to&&to>r.from)
+ }
+ let shells:ListShell[]=facts.filter(f=>relevant(f.pmFrom,f.pmTo-f.pmFrom,0)).map(f=>{
+  const node=tr.before.nodeAt(f.pmFrom)
+  if(!node||node.type.name!==f.kind+'_list'||node.nodeSize!==f.pmTo-f.pmFrom)throw new UnsupportedBlockTransaction()
+  return {node,pos:f.pmFrom,origins:[{kind:node.type.name,style:{marker:f.marker,tight:f.tight}}]}
+ })
+ let items:ListItem[]=shells.flatMap(shell=>{
+  const result:ListItem[]=[];shell.node.forEach((node,offset)=>result.push({node,pos:shell.pos+1+offset,origins:shell.origins}));return result
+ })
+ for(let i=0;i<tr.steps.length;i++){
+  const after=tr.docs[i+1]??tr.doc,map=tr.steps[i]!.getMap()
+  const shellOrigins=new Map<number,readonly ListOrigin[]>(),itemOrigins=new Map<number,ListOrigin[]>()
+  for(const shell of shells){
+   const start=map.mapResult(shell.pos,1),end=map.mapResult(shell.pos+shell.node.nodeSize,-1),node=after.nodeAt(start.pos)
+   if(!start.deleted&&!end.deleted&&!start.deletedAcross&&!end.deletedAcross&&node?.type===shell.node.type&&start.pos+node.nodeSize===end.pos)
+    shellOrigins.set(start.pos,shell.origins)
+  }
+  // The two content boundaries are real retained fragments of a direct item.
+  // Split maps them into separate items; join maps them into the surviving item.
+  // Resolve the immediate list_item ancestry, never an ancestor list by ordinal.
+  for(const item of items)for(const [pos,assoc] of [[item.pos+1,1],[item.pos+item.node.nodeSize-1,-1]] as const){
+   const mapped=map.mapResult(pos,assoc)
+   if(mapped.deletedAcross||mapped.deleted)continue
+   {
+    const resolved=after.resolve(mapped.pos)
+    for(let depth=resolved.depth;depth>0;depth--)if(resolved.node(depth).type.name==='list_item'){
+     const itemPos=resolved.before(depth),origins=itemOrigins.get(itemPos)??[]
+     for(const origin of item.origins)if(!origins.includes(origin))origins.push(origin)
+     itemOrigins.set(itemPos,origins);break
+    }
+   }
+  }
+  shells=[];items=[]
+  after.descendants((node,pos)=>{
+   if(!isList(node)||!relevant(pos,node.nodeSize,i+1))return
+   const origins:ListOrigin[]=[]
+   node.forEach((_item,offset)=>{for(const origin of itemOrigins.get(pos+1+offset)??[])if(origin.kind===node.type.name&&!origins.includes(origin))origins.push(origin)})
+   if(!origins.length)origins.push(...shellOrigins.get(pos)??[])
+   if(!origins.length)origins.push({kind:node.type.name,style:{marker:node.type.name==='bullet_list'?'-':'.',tight:true}})
+   shells.push({node,pos,origins})
+   node.forEach((item,offset)=>items.push({node:item,pos:pos+1+offset,origins:itemOrigins.get(pos+1+offset)?.filter(o=>o.kind===node.type.name).length
+    ?itemOrigins.get(pos+1+offset)!.filter(o=>o.kind===node.type.name):origins}))
+  })
+ }
+ return new Map(shells.map(s=>[s.pos,{marker:s.origins[0]!.style.marker,tight:s.origins.every(o=>o.style.tight)}]))
+}
 type RootIndex={rootById:readonly SourceRoot[];ownerByChild:readonly (SourceRoot|undefined)[]}
 function indexSourceRoots(base:SourceSession):RootIndex {
  const rootById=base.roots
@@ -205,10 +294,18 @@ const renderableRoots=new Set(['paragraph_open','heading_open','bullet_list_open
 // Render-only nesting: splitting ==highlight== before a leading space emits
 // invalid Markdown. Keep it outside adjacent strong/em marks in this fragment;
 // the intended document and its schema-ranked marks remain untouched.
-function rootRenderNode(node: PmNode): PmNode {
+function rootRenderNode(node: PmNode, pos:number, styles:ReadonlyMap<number,SourceListStyle>, bindings: {node:PmNode;style:SourceListStyle}[]): PmNode {
   const children: PmNode[] = []
-  node.forEach(child => children.push(rootRenderNode(child)))
-  const rendered = node.isLeaf ? node : node.copy(Fragment.fromArray(children))
+  node.forEach((child,offset) => children.push(rootRenderNode(child,pos+1+offset,styles,bindings)))
+  // A list render copy is occurrence-specific, even if the target deliberately
+  // reuses the same immutable PM node at multiple positions.
+  const rendered = node.isLeaf ? node : isList(node)
+    ? node.type.create(node.attrs,Fragment.fromArray(children),node.marks)
+    : node.copy(Fragment.fromArray(children))
+  if(isList(node)){
+    const style=styles.get(pos);if(!style)throw new UnsupportedBlockTransaction()
+    bindings.push({node:rendered,style})
+  }
   const highlight = rendered.marks.findIndex(mark =>
     mark.type.name === 'highlight' && mark.attrs.delimiter === 'equals')
   if (highlight < 1) return rendered
@@ -228,12 +325,12 @@ function endsInTerminalHardbreak(node:PmNode):boolean {
  if(!['doc','bullet_list','ordered_list','list_item','blockquote'].includes(node.type.name))return false
  const last=node.lastChild;return !!last&&endsInTerminalHardbreak(last)
 }
-function renderChangedRoot(base:SourceSession,doc:PmNode,root:SourceRoot):string {
+function renderChangedRoot(base:SourceSession,doc:PmNode,root:SourceRoot,styles:ReadonlyMap<number,SourceListStyle>):string {
  if(overlapsProtectedSource(base,root.sourceFrom,root.sourceTo)||!renderableRoots.has(root.tokenType))throw new UnsupportedBlockTransaction()
  if(!sourceRootHasClosedFences(root))throw new UnsupportedBlockTransaction()
- const nodes:PmNode[]=[]
- for(let i=root.childFrom;i<root.childTo;i++)nodes.push(rootRenderNode(doc.child(i)))
- let generated=serializeSourceRootMarkdown(doc.type.create(doc.attrs,Fragment.fromArray(nodes)))
+ const nodes:PmNode[]=[],lists:{node:PmNode;style:SourceListStyle}[]=[]
+ doc.forEach((node,pos,index)=>{if(index>=root.childFrom&&index<root.childTo)nodes.push(rootRenderNode(node,pos,styles,lists))})
+ let generated=serializeSourceRootMarkdown(doc.type.create(doc.attrs,Fragment.fromArray(nodes)),{lists})
  const last=nodes[nodes.length-1]!,tail=base.source.slice(root.tailFrom,root.sourceTo)
  if(last.type.name==='table'){
   if(!generated.endsWith('\n')||generated.endsWith('\n\n'))throw new UnsupportedBlockTransaction()
@@ -265,16 +362,27 @@ function applySourceEdits(base:SourceSession,edits:readonly SourceEdit[],ids:rea
 }
 export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):SourceBlockResult {
  if(!tr.before.eq(base.doc))return {ok:false,reason:'stale-document'}
+ const caller=base
  try {
-  if(classifyTransaction(base,tr)==='structural'){
-   const render=(nodes:PmNode[]):StructuralRendered=>{
-    const rendered=nodes.map(rootRenderNode),doc=tr.doc.type.create(tr.doc.attrs,Fragment.fromArray(rendered))
-    const text=serializeSourceRootMarkdown(doc),last=rendered[rendered.length-1]!
+  const authority=prepareListAuthority(base);base=authority.base
+  const classification=classifyTransaction(base,tr)
+  // Validate the actual standard chain before metadata mapping or rendering.
+  for(let i=0;i<tr.steps.length;i++){
+   const before=tr.docs[i]!,after=tr.docs[i+1]??tr.doc
+   if(i===0&&!before.eq(base.doc))throw new UnsupportedBlockTransaction()
+   const result=tr.steps[i]!.apply(before)
+   if(result.failed||!result.doc||!result.doc.eq(after))throw new UnsupportedBlockTransaction()
+  }
+  tr.doc.check()
+  if(classification==='structural'){
+   const render=(nodes:PmNode[],positions:readonly number[]):StructuralRendered=>{
+    const lists:{node:PmNode;style:SourceListStyle}[]=[],styles=transactionListStyles(tr,authority.facts,nodes.map((node,i)=>({node,pos:positions[i]!}))),rendered=nodes.map((node,i)=>rootRenderNode(node,positions[i]!,styles,lists)),doc=tr.doc.type.create(tr.doc.attrs,Fragment.fromArray(rendered))
+    const text=serializeSourceRootMarkdown(doc,{lists}),last=rendered[rendered.length-1]!
     return {text,terminal:last.type.name==='table'||endsInTerminalHardbreak(last)?'content-eol':'none',
      family:last.type.name==='table'?'table':['paragraph','heading','bullet_list','ordered_list','blockquote','horizontal_rule'].includes(last.type.name)?'flow':'closed-literal',eol:'\n'}
    }
    const result=applyStructuralTransaction(base,tr,render,sourceRootHasClosedFences)
-   if(result.unchanged)return {ok:true,session:base,mode:'unchanged',edits:[],changedRoots:[]}
+   if(result.unchanged)return {ok:true,session:caller,mode:'unchanged',edits:[],changedRoots:[]}
    const parsed=createSourceSession(result.source,base.doc.type.schema)
    if(!parsed.ok||!parsed.session.doc.eq(tr.doc))return {ok:false,reason:'semantic-mismatch'}
    return {ok:true,session:{...parsed.session,revision:base.revision+1},mode:'root-render',
@@ -284,7 +392,7 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
   const changedRoots=changedNaturalRoots(base,tr,ownership)
   if(!changedRoots.length) {
    if(!tr.doc.eq(base.doc))return {ok:false,reason:'unsupported-step'}
-   return {ok:true,session:base,mode:'unchanged',edits:[],changedRoots:[]}
+   return {ok:true,session:caller,mode:'unchanged',edits:[],changedRoots:[]}
   }
   // Only a single ReplaceStep can satisfy the old exact API. Replay this one
   // document step to remove stored-mark bookkeeping without touching the caller.
@@ -301,9 +409,12 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
   }
   // Exact rejection is not authorization: changedNaturalRoots has already
   // proved step kinds, real ranges, stable root identity and ownership.
+  const targets:{node:PmNode;pos:number}[]=[]
+  tr.doc.forEach((node,pos,index)=>{if(changedRoots.some(id=>{const root=ownership.rootById[id]!;return index>=root.childFrom&&index<root.childTo}))targets.push({node,pos})})
+  const styles=transactionListStyles(tr,authority.facts,targets)
   const edits=changedRoots.map(id=>{
    const root=ownership.rootById[id]!
-   return {from:root.sourceFrom,to:root.sourceTo,text:renderChangedRoot(base,tr.doc,root)}
+   return {from:root.sourceFrom,to:root.sourceTo,text:renderChangedRoot(base,tr.doc,root,styles)}
   })
   const source=applySourceEdits(base,edits,changedRoots,ownership)
   const parsed=createSourceSession(source,base.doc.type.schema)

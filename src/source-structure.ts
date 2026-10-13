@@ -29,6 +29,12 @@ type Step=ReplaceStep|ReplaceAroundStep|AddMarkStep|RemoveMarkStep|AttrStep|AddN
 type Slot=RawSpan & {kind:'body'|'terminator'|'blank'|'separator'|'protected'|'envelope';id:number}
 type Atom={kind:'body'|'terminator'|'blank'|'separator'|'protected'|'envelope';piece:Piece;
  anchor:number;step?:number;slot?:Slot}
+// Exact ordinary HTML boundary; defaults include every schema attr and mark.
+// Business IDs, if any, must already have passed the caller's approved projection.
+export function isSourceListBoundary(node:PMNode):boolean {
+ return node.type.name==='html_block'&&node.textContent==='<!-- notemd:list-boundary -->'
+  &&node.hasMarkup(node.type)&&node.childCount===1&&node.firstChild!.isText&&node.firstChild!.marks.length===0
+}
 function fail():never {throw new UnsupportedSourceStructure()}
 const sameOrigin=(a:Origin,b:Origin)=>a.kind===b.kind&&(a.kind==='fallback'||b.kind!=='fallback'&&a.id===b.id)
 const empty=(n:PMNode)=>n.type.name==='paragraph'&&n.content.size===0&&n.marks.length===0
@@ -156,6 +162,17 @@ function advanceLedger(ledger:Ledger,before:PMNode,after:PMNode,step:Step,index:
  }
  const refs=ledger.children.slice(w.before.from,w.before.to).map(l=>l.ref)
  const boundary=ledger.boundaries[w.before.from]!
+ // A removed node may leave a boundary component with no surviving lane.
+ // Only a real structural range crossing its actual position may absorb it;
+ // merely sharing the expanded child window (or touching an endpoint) may not.
+ for(let child=w.before.from;child<=w.before.to;child++){
+  const position=ledger.children[child]?.from??before.content.size
+  if(!(range.from<position&&position<range.to))continue
+  let crossed=ledger.boundaries[child]!
+  while(crossed.kind==='tombstone'){
+   refs.push({kind:'component',id:crossed.component});crossed=crossed.prior
+  }
+ }
  if(!refs.length){
   if(boundary.kind==='inside-root')refs.push({kind:'base',origin:{kind:'root',id:boundary.rootId}})
   else if(boundary.kind==='generated'||boundary.kind==='tombstone')refs.push({kind:'component',id:boundary.component})
@@ -231,7 +248,7 @@ function partitionSlots(base:SourceSession):Slot[] {
  if(at<base.source.length)result.push({kind:'envelope',id:result.length,from:at,to:base.source.length})
  return result
 }
-function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:PMNode[])=>StructuralRendered,
+function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:PMNode[],positions:readonly number[])=>StructuralRendered,
  rootHasClosedFences:(root:SourceRoot)=>boolean):Recipe {
  const claims:Claim[]=[],removed=new Set<Slot>(),insertions=new Map<number,Atom[]>(),changedRoots:number[]=[]
  const dirty=new Map<number,Component>(),blankDirty=new Map<number,Component>()
@@ -283,7 +300,8 @@ function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:
   // Independent pre-serializer guard. Final edit guards do not replace this.
   for(const o of origins){const r=base.roots[o.id]!;if(base.protectedSources.some(p=>p.sourceFrom<r.sourceTo&&p.sourceTo>r.sourceFrom))fail()
    if(!rootHasClosedFences(r))fail()
-   if(!['paragraph_open','heading_open','bullet_list_open','ordered_list_open','blockquote_open','table_open','hr','fence'].includes(r.tokenType))fail()}
+   if(!['paragraph_open','heading_open','bullet_list_open','ordered_list_open','blockquote_open','table_open','hr','fence'].includes(r.tokenType)
+    &&!(r.tokenType==='html_block'&&r.childTo===r.childFrom+1&&isSourceListBoundary(base.doc.child(r.childFrom))))fail()}
   const rootSlots=slots.filter(s=>(s.kind==='body'||s.kind==='terminator')&&originIds.has(s.id))
   const terminal=rootSlots.filter(s=>s.kind==='terminator').at(-1)
   let lastVisible=nodes.length-1
@@ -303,8 +321,8 @@ function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:
   for(let n=0;n<nodes.length;n++){
    const node=nodes[n]!,finalIndex=c.finalRuns[0]!.from+n
    if(empty(node)){if(finalIndex!==baseline)atoms.push(generated('blank','\n',anchor,stepOf(c)));continue}
-   const output=render([node])
-   if(output.family==='closed-literal'&&node.type.name!=='code_block')fail()
+   const output=render([node],[ledger.children[finalIndex]!.from])
+   if(output.family==='closed-literal'&&node.type.name!=='code_block'&&!isSourceListBoundary(node))fail()
    let text=output.text
    if(output.terminal==='content-eol'){if(!text.endsWith(output.eol))fail();text=text.slice(0,-output.eol.length)}
    atoms.push(generated('body',text,anchor,stepOf(c)))
@@ -440,7 +458,7 @@ function applyRecipe(base:SourceSession,recipe:Recipe):string {
  for(const edit of recipe.edits){chunks.push(base.source.slice(at,edit.from),edit.text);at=edit.to}
  chunks.push(base.source.slice(at));return chunks.join('')
 }
-export function applyStructuralTransaction(base:SourceSession,tr:Transaction,render:(nodes:PMNode[])=>StructuralRendered,
+export function applyStructuralTransaction(base:SourceSession,tr:Transaction,render:(nodes:PMNode[],positions:readonly number[])=>StructuralRendered,
  rootHasClosedFences:(root:SourceRoot)=>boolean):
  {source:string;edits:SourceEdit[];changedRoots:number[];unchanged:boolean} {
  const ledger=createLedger(base)

@@ -278,10 +278,10 @@ it('a dirty root beside an untouched unclosed container keeps that raw neighbor'
  const r=accept(b,tr,'A\n\nB\r\n \t\r\n> ```js\n> A')
  expect(r.changedRoots).toEqual([0]);expect(r.edits.every(e=>e.to<=b.roots[0]!.tailFrom)).toBe(true)
 })
-it('missing root capture provenance cannot be treated as a closed literal',()=>{
+it('foreign root metadata receives a real capture before either render path',()=>{
  const b=open('A'+tail),unknown={...b,roots:b.roots.map(root=>({...root}))}
- reject(unknown,command(state(b,1),wrapIn(b.doc.type.schema.nodes.blockquote!)))
- reject(unknown,state(b,1).tr.addMark(1,2,b.doc.type.schema.marks.strong!.create()))
+ accept(unknown,command(state(b,1),wrapIn(b.doc.type.schema.nodes.blockquote!)),'> A'+tail)
+ accept(unknown,state(b,1).tr.addMark(1,2,b.doc.type.schema.marks.strong!.create()),'**A**'+tail)
 })
 it.each(['attrs','marks'] as const)('literal-first list does not discard an empty paragraph with nondefault %s',kind=>{
  const paragraph=defaultSchema.spec.nodes.get('paragraph')!,item=defaultSchema.spec.nodes.get('list_item')!
