@@ -23,6 +23,11 @@ type SourceGap = Readonly<{
     kind: 'trivia' | 'opaque';
     synthetic: readonly SyntheticEmission[];
 }>;
+type SourceEdit = Readonly<{
+    from: number;
+    to: number;
+    text: string;
+}>;
 
 /**
  * Markdown ↔ ProseMirror Doc roundtrip for `@moraya/core`.
@@ -98,4 +103,4 @@ declare function parseParagraphWithSourceCapture(source: string, schema?: Schema
     reason: 'unsupported-source' | 'parse-error';
 };
 
-export { type CapturedDocument as C, type SourceRoot as S, type SourceGap as a, parseMarkdownAsync as b, type CapturedParagraph as c, type CapturedTextRun as d, parseDocumentWithSourceCapture as e, parseParagraphWithSourceCapture as f, parseMarkdown as p, serializeMarkdown as s };
+export { type CapturedDocument as C, type SourceRoot as S, type SourceGap as a, type SourceEdit as b, type SyntheticEmission as c, parseMarkdownAsync as d, type CapturedParagraph as e, type CapturedTextRun as f, parseDocumentWithSourceCapture as g, parseParagraphWithSourceCapture as h, parseMarkdown as p, serializeMarkdown as s };

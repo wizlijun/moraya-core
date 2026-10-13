@@ -1,2 +1,2 @@
 import 'prosemirror-model';
-export { C as CapturedDocument, c as CapturedParagraph, d as CapturedTextRun, e as parseDocumentWithSourceCapture, p as parseMarkdown, b as parseMarkdownAsync, f as parseParagraphWithSourceCapture, s as serializeMarkdown } from './markdown-Bnn17Tqp.js';
+export { C as CapturedDocument, e as CapturedParagraph, f as CapturedTextRun, g as parseDocumentWithSourceCapture, p as parseMarkdown, d as parseMarkdownAsync, h as parseParagraphWithSourceCapture, s as serializeMarkdown } from './markdown-f5FnxmDM.js';

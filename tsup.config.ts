@@ -28,6 +28,7 @@ export default defineConfig({
   target: 'es2022',
   external: [
     'prosemirror-state',
+    'prosemirror-transform',
     'prosemirror-view',
     'prosemirror-model',
     'prosemirror-markdown',

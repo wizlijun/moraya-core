@@ -6273,6 +6273,9 @@ async function createEditor(opts) {
 }
 
 // src/source-fidelity.ts
+import { Fragment as Fragment3 } from "prosemirror-model";
+import { EditorState as EditorState2 } from "prosemirror-state";
+import { AddMarkStep, RemoveMarkStep, ReplaceStep } from "prosemirror-transform";
 function createSourceSession(source, schema2) {
   const parsed = parseDocumentWithSourceCapture(source, schema2);
   if (!parsed.ok) return parsed;
@@ -6304,7 +6307,7 @@ function boundary(span, pos) {
   if (span.kind === "linear") return span.sourceFrom + pos - span.pmFrom;
   return void 0;
 }
-function applySourceTextTransaction(base, tr) {
+function applySourceTextTransactionWithEdit(base, tr) {
   if (!tr.before.eq(base.doc)) return { ok: false, reason: "stale-document" };
   if (tr.steps.length !== 1) return { ok: false, reason: "unsupported-step" };
   if (tr.storedMarksSet) return { ok: false, reason: "unsupported-step" };
@@ -6335,9 +6338,181 @@ function applySourceTextTransaction(base, tr) {
   const candidate = base.source.slice(0, sourceFrom) + insert + base.source.slice(sourceTo);
   const result = createSourceSession(candidate, base.doc.type.schema);
   if (!result.ok || !result.session.doc.eq(tr.doc)) return { ok: false, reason: "semantic-mismatch" };
-  return { ok: true, session: { ...result.session, revision: base.revision + 1 } };
+  return {
+    ok: true,
+    session: { ...result.session, revision: base.revision + 1 },
+    edit: { from: sourceFrom, to: sourceTo, text: insert }
+  };
+}
+function applySourceTextTransaction(base, tr) {
+  const result = applySourceTextTransactionWithEdit(base, tr);
+  return result.ok ? { ok: true, session: result.session } : result;
+}
+var UnsupportedBlockTransaction = class extends Error {
+};
+function indexSourceRoots(base) {
+  const rootById = base.roots;
+  const ownerByChild = new Array(base.doc.childCount);
+  let previousChildTo = 0;
+  for (let id = 0; id < rootById.length; id++) {
+    const root = rootById[id];
+    if (root.id !== id || !Number.isInteger(root.childFrom) || !Number.isInteger(root.childTo) || root.childFrom < previousChildTo || root.childTo <= root.childFrom || root.childTo > base.doc.childCount)
+      throw new UnsupportedBlockTransaction();
+    for (let child = root.childFrom; child < root.childTo; child++) ownerByChild[child] = root;
+    previousChildTo = root.childTo;
+  }
+  return { rootById, ownerByChild };
+}
+function splitsInlineText(position) {
+  if (!position.textOffset) return false;
+  const node = position.parent.child(position.index());
+  return node.isText && splitsSurrogate(node.text, position.textOffset);
+}
+function authorizeStepRoots(before, step, ownership, authorized) {
+  const { from, to } = step;
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to < from || to > before.content.size)
+    throw new UnsupportedBlockTransaction();
+  const a = before.resolve(from), b = before.resolve(to);
+  if (splitsInlineText(a) || splitsInlineText(b)) throw new UnsupportedBlockTransaction();
+  if (step instanceof ReplaceStep) {
+    if (step.structure || !a.sameParent(b) || !a.parent.inlineContent || step.slice.openStart || step.slice.openEnd)
+      throw new UnsupportedBlockTransaction();
+    let inline = true;
+    step.slice.content.forEach((node) => {
+      if (!node.isInline) inline = false;
+    });
+    if (!inline) throw new UnsupportedBlockTransaction();
+  } else if (from === to) return;
+  const first = a.index(0);
+  const last = from === to ? first : b.index(0) - (b.depth === 0 ? 1 : 0);
+  if (first < 0 || last < first || last >= before.childCount) throw new UnsupportedBlockTransaction();
+  for (let child = first; child <= last; child++) {
+    const root = ownership.ownerByChild[child];
+    if (!root) throw new UnsupportedBlockTransaction();
+    authorized.add(root.id);
+  }
+}
+function changedNaturalRoots(base, tr, ownership) {
+  const authorized = /* @__PURE__ */ new Set();
+  for (let i = 0; i < tr.steps.length; i++) {
+    const step = tr.steps[i], prototype = Object.getPrototypeOf(step);
+    if (prototype !== ReplaceStep.prototype && prototype !== AddMarkStep.prototype && prototype !== RemoveMarkStep.prototype)
+      throw new UnsupportedBlockTransaction();
+    const before = tr.docs[i];
+    if (before.childCount !== base.doc.childCount) throw new UnsupportedBlockTransaction();
+    authorizeStepRoots(before, step, ownership, authorized);
+  }
+  if (!base.doc.sameMarkup(tr.doc) || base.doc.childCount !== tr.doc.childCount)
+    throw new UnsupportedBlockTransaction();
+  const changed = /* @__PURE__ */ new Set();
+  base.doc.forEach((node, _offset, child) => {
+    const next = tr.doc.child(child);
+    if (!node.sameMarkup(next)) throw new UnsupportedBlockTransaction();
+    if (node.eq(next)) return;
+    const root = ownership.ownerByChild[child];
+    if (!root || !authorized.has(root.id)) throw new UnsupportedBlockTransaction();
+    changed.add(root.id);
+  });
+  return ownership.rootById.filter((root) => changed.has(root.id)).map((root) => root.id);
+}
+var renderableRoots = /* @__PURE__ */ new Set([
+  "paragraph_open",
+  "heading_open",
+  "bullet_list_open",
+  "ordered_list_open",
+  "blockquote_open",
+  "table_open",
+  "footnote_reference_open",
+  "dl_open",
+  "hr",
+  "fence",
+  "code_block",
+  "front_matter",
+  "html_block",
+  "math_block",
+  "math_block_eqno"
+]);
+function rootRenderNode(node) {
+  const children = [];
+  node.forEach((child) => children.push(rootRenderNode(child)));
+  const rendered = node.isLeaf ? node : node.copy(Fragment3.fromArray(children));
+  const highlight2 = rendered.marks.findIndex((mark) => mark.type.name === "highlight" && mark.attrs.delimiter === "equals");
+  if (highlight2 < 1) return rendered;
+  let outer = highlight2;
+  while (outer > 0 && ["strong", "em"].includes(rendered.marks[outer - 1].type.name)) outer--;
+  if (outer === highlight2) return rendered;
+  const marks2 = [...rendered.marks];
+  marks2.splice(outer, 0, marks2.splice(highlight2, 1)[0]);
+  return rendered.mark(marks2);
+}
+function renderChangedRoot(base, doc2, root) {
+  if (!renderableRoots.has(root.tokenType)) throw new UnsupportedBlockTransaction();
+  const nodes = [];
+  for (let i = root.childFrom; i < root.childTo; i++) nodes.push(rootRenderNode(doc2.child(i)));
+  let generated = serializeMarkdown(doc2.type.create(doc2.attrs, Fragment3.fromArray(nodes)));
+  const last = nodes[nodes.length - 1];
+  if (last.type.name === "table") {
+    if (!generated.endsWith("\n") || generated.endsWith("\n\n")) throw new UnsupportedBlockTransaction();
+    generated = generated.slice(0, -1);
+  }
+  return generated + base.source.slice(root.tailFrom, root.sourceTo);
+}
+function applySourceEdits(base, edits, ids, ownership) {
+  const authorized = ids.map((id) => ownership.rootById[id]);
+  let at = 0, ownerIndex = 0;
+  const chunks = [];
+  for (const edit of edits) {
+    while (ownerIndex < authorized.length && authorized[ownerIndex].sourceTo < edit.to) ownerIndex++;
+    const owner = authorized[ownerIndex];
+    if (!owner || owner.sourceFrom > edit.from || owner.sourceTo < edit.to || edit.from < at || edit.to < edit.from || edit.to > base.source.length || splitsSurrogate(base.source, edit.from) || splitsSurrogate(base.source, edit.to))
+      throw new UnsupportedBlockTransaction();
+    chunks.push(base.source.slice(at, edit.from), edit.text);
+    at = edit.to;
+  }
+  chunks.push(base.source.slice(at));
+  return chunks.join("");
+}
+function applySourceBlockTransaction(base, tr) {
+  if (!tr.before.eq(base.doc)) return { ok: false, reason: "stale-document" };
+  try {
+    const ownership = indexSourceRoots(base);
+    const changedRoots = changedNaturalRoots(base, tr, ownership);
+    if (!changedRoots.length) {
+      if (!tr.doc.eq(base.doc)) return { ok: false, reason: "unsupported-step" };
+      return { ok: true, session: base, mode: "unchanged", edits: [], changedRoots: [] };
+    }
+    if (tr.steps.length === 1 && tr.steps[0] instanceof ReplaceStep) {
+      const replay = EditorState2.create({ doc: base.doc }).tr.step(tr.steps[0]);
+      if (!replay.doc.eq(tr.doc)) return { ok: false, reason: "unsupported-step" };
+      const exact = applySourceTextTransactionWithEdit(base, replay);
+      if (exact.ok) {
+        const edits2 = [exact.edit];
+        if (applySourceEdits(base, edits2, changedRoots, ownership) !== exact.session.source)
+          return { ok: false, reason: "semantic-mismatch" };
+        return { ok: true, session: exact.session, mode: "exact-text", edits: edits2, changedRoots };
+      }
+    }
+    const edits = changedRoots.map((id) => {
+      const root = ownership.rootById[id];
+      return { from: root.sourceFrom, to: root.sourceTo, text: renderChangedRoot(base, tr.doc, root) };
+    });
+    const source = applySourceEdits(base, edits, changedRoots, ownership);
+    const parsed = createSourceSession(source, base.doc.type.schema);
+    if (!parsed.ok || !parsed.session.doc.eq(tr.doc)) return { ok: false, reason: "semantic-mismatch" };
+    return {
+      ok: true,
+      session: { ...parsed.session, revision: base.revision + 1 },
+      mode: "root-render",
+      edits,
+      changedRoots
+    };
+  } catch (error) {
+    if (error instanceof UnsupportedBlockTransaction) return { ok: false, reason: "unsupported-step" };
+    return { ok: false, reason: "parse-error" };
+  }
 }
 export {
+  applySourceBlockTransaction,
   applySourceTextTransaction,
   createDocCache,
   createEditor,
