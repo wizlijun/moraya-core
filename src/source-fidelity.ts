@@ -2,7 +2,7 @@ import { Fragment, type Node as PmNode, type ResolvedPos, type Schema } from 'pr
 import { EditorState, type Transaction } from 'prosemirror-state'
 import { AddMarkStep, RemoveMarkStep, ReplaceStep } from 'prosemirror-transform'
 import { parseDocumentWithSourceCapture, serializeMarkdown } from './markdown'
-import type { SourceRoot, SourceGap, SourceEdit } from './source-ownership'
+import type { SourceRoot, SourceGap, SourceEdit, ProtectedSource } from './source-ownership'
 
 export type TextSourceSpan = Readonly<{
   sourceFrom: number; sourceTo: number
@@ -13,6 +13,7 @@ export type SourceSession = Readonly<{
   revision: number; source: string; doc: PmNode
   textSpans: readonly TextSourceSpan[]
   roots: readonly SourceRoot[]; gaps: readonly SourceGap[]
+  protectedSources: readonly ProtectedSource[]
 }>
 export type FidelityFailure = Readonly<{
   ok: false
@@ -26,7 +27,7 @@ export function createSourceSession(source: string, schema?: Schema): FidelityRe
   const parsed = parseDocumentWithSourceCapture(source, schema)
   if (!parsed.ok) return parsed
   return { ok: true, session: { revision: 0, source, doc: parsed.value.doc, textSpans: parsed.value.textRuns,
-    roots: parsed.value.roots, gaps: parsed.value.gaps } }
+    roots: parsed.value.roots, gaps: parsed.value.gaps, protectedSources: parsed.value.protectedSources } }
 }
 
 function splitsSurrogate(text: string, offset: number): boolean {
@@ -51,6 +52,20 @@ function boundary(span: TextSourceSpan, pos: number): number | undefined {
   if (pos === span.pmTo) return span.sourceTo
   if (span.kind === 'linear') return span.sourceFrom + pos - span.pmFrom
   return undefined
+}
+
+// Sorted disjoint parser-consumed ranges permit one binary lookup per edit.
+// Insertions at either boundary are allowed; strictly interior insertions are not.
+function overlapsProtectedSource(base: SourceSession, from: number, to: number): boolean {
+  const ranges = base.protectedSources
+  let low = 0, high = ranges.length
+  while (low < high) {
+    const middle = (low + high) >>> 1
+    if (ranges[middle]!.sourceTo <= from) low = middle + 1
+    else high = middle
+  }
+  const range = ranges[low]
+  return !!range && (from === to ? range.sourceFrom < from : range.sourceFrom < to)
 }
 
 type ExactTextResult = { ok: true; session: SourceSession; edit: SourceEdit } | FidelityFailure
@@ -90,6 +105,7 @@ function applySourceTextTransactionWithEdit(base: SourceSession, tr: Transaction
     || splitsSurrogate(base.source, sourceFrom) || splitsSurrogate(base.source, sourceTo)) {
     return { ok: false, reason: 'unmapped-range' }
   }
+  if (overlapsProtectedSource(base, sourceFrom, sourceTo)) return { ok: false, reason: 'unsupported-step' }
   const insert = (step.slice?.content ?? []).map((node: { text: string }) => node.text).join('')
   const candidate = base.source.slice(0, sourceFrom) + insert + base.source.slice(sourceTo)
   const result = createSourceSession(candidate, base.doc.type.schema)
@@ -201,7 +217,7 @@ function rootRenderNode(node: PmNode): PmNode {
   return rendered.mark(marks)
 }
 function renderChangedRoot(base:SourceSession,doc:PmNode,root:SourceRoot):string {
- if(!renderableRoots.has(root.tokenType))throw new UnsupportedBlockTransaction()
+ if(overlapsProtectedSource(base,root.sourceFrom,root.sourceTo)||!renderableRoots.has(root.tokenType))throw new UnsupportedBlockTransaction()
  const nodes:PmNode[]=[]
  for(let i=root.childFrom;i<root.childTo;i++)nodes.push(rootRenderNode(doc.child(i)))
  let generated=serializeMarkdown(doc.type.create(doc.attrs,Fragment.fromArray(nodes)))
@@ -221,7 +237,7 @@ function applySourceEdits(base:SourceSession,edits:readonly SourceEdit[],ids:rea
   // ids and edits are in raw source order; each authorized root is visited at most once.
   while(ownerIndex<authorized.length&&authorized[ownerIndex]!.sourceTo<edit.to)ownerIndex++
   const owner=authorized[ownerIndex]
-  if(!owner||owner.sourceFrom>edit.from||owner.sourceTo<edit.to
+  if(overlapsProtectedSource(base,edit.from,edit.to)||!owner||owner.sourceFrom>edit.from||owner.sourceTo<edit.to
    ||edit.from<at||edit.to<edit.from||edit.to>base.source.length
    ||splitsSurrogate(base.source,edit.from)||splitsSurrogate(base.source,edit.to))
    throw new UnsupportedBlockTransaction()

@@ -1,6 +1,6 @@
 export { createSchema, getDocumentBaseDir, setDocumentBaseDir } from './schema.js';
-import { S as SourceRoot, a as SourceGap, b as SourceEdit } from './markdown-f5FnxmDM.js';
-export { c as SyntheticEmission, p as parseMarkdown, d as parseMarkdownAsync, s as serializeMarkdown } from './markdown-f5FnxmDM.js';
+import { S as SourceRoot, a as SourceGap, P as ProtectedSource, b as SourceEdit } from './markdown-Dp-_6v9A.js';
+export { c as SyntheticEmission, p as parseMarkdown, d as parseMarkdownAsync, s as serializeMarkdown } from './markdown-Dp-_6v9A.js';
 export { CreateEditorOptions, EditorPluginOptions, MorayaEditorInstance, createEditor, createEditorPlugins, preloadEnhancementPlugins } from './setup.js';
 export { insertHorizontalRule, insertImage, insertMathBlock, insertTable, setHeading, toggleBlockquote, toggleBold, toggleBulletList, toggleCode, toggleCodeBlock, toggleHighlight, toggleItalic, toggleLink, toggleOrderedList, toggleStrikethrough } from './commands.js';
 export { DocCache, createDocCache, djb2Hash } from './doc-cache.js';
@@ -25,6 +25,7 @@ type SourceSession = Readonly<{
     textSpans: readonly TextSourceSpan[];
     roots: readonly SourceRoot[];
     gaps: readonly SourceGap[];
+    protectedSources: readonly ProtectedSource[];
 }>;
 type FidelityFailure = Readonly<{
     ok: false;
@@ -61,4 +62,4 @@ declare function projectLineEndings(source: string): EolProjection;
 declare function sourceOffsetAt(p: EolProjection, n: number): number;
 declare function viewOffsetAt(p: EolProjection, n: number, bias: -1 | 1): number;
 
-export { type EolChange, type EolProjection, type FidelityFailure, type FidelityResult, type SourceBlockResult, SourceEdit, SourceGap, SourceRoot, type SourceSession, type TextSourceSpan, applySourceBlockTransaction, applySourceTextTransaction, createSourceSession, projectLineEndings, sourceOffsetAt, viewOffsetAt };
+export { type EolChange, type EolProjection, type FidelityFailure, type FidelityResult, ProtectedSource, type SourceBlockResult, SourceEdit, SourceGap, SourceRoot, type SourceSession, type TextSourceSpan, applySourceBlockTransaction, applySourceTextTransaction, createSourceSession, projectLineEndings, sourceOffsetAt, viewOffsetAt };

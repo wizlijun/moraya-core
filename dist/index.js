@@ -2928,6 +2928,27 @@ wrapCaptureRule(md.core.ruler, "normalize", (original, state) => {
   collector.trace = editTrace(collector.trace, nulEdits);
   const result = original(state);
   if (state.src !== collector.trace.text) throw new UnsupportedSourceCapture();
+  collector.lineStarts = lineStarts(collector.trace.text);
+  return result;
+});
+wrapCaptureRule(md.block.ruler, "reference", (original, state, startLine, endLine, silent) => {
+  const collector = collectorFor(state);
+  const scope = state.level === 0 && state.blkIndent === 0 ? "top-level" : "nested";
+  const result = original(state, startLine, endLine, silent);
+  if (!collector || !result || silent) return result;
+  const from = collector.lineStarts[startLine], to = collector.lineStarts[state.line];
+  if (from === void 0 || to === void 0 || to <= from) throw new UnsupportedSourceCapture();
+  const raw = rawRange(collector.trace, from, to);
+  if (raw) {
+    const previous = collector.protectedSources[collector.protectedSources.length - 1];
+    if (previous && previous.sourceTo > raw.from) throw new UnsupportedSourceCapture();
+    collector.protectedSources.push(Object.freeze({
+      kind: "reference-definition",
+      sourceFrom: raw.from,
+      sourceTo: raw.to,
+      scope
+    }));
+  }
   return result;
 });
 wrapCaptureRule(md.block.ruler, "paragraph", (original, state, ...args) => {
@@ -3155,7 +3176,7 @@ var syntheticTokens = /* @__PURE__ */ new WeakSet();
 var rootStarts = /* @__PURE__ */ new WeakMap();
 var rootEnds = /* @__PURE__ */ new WeakMap();
 function prepareRootEvents(tokens, collector) {
-  const starts = lineStarts(collector.trace.text);
+  const starts = collector.lineStarts;
   let natural = 0;
   const renderable = /* @__PURE__ */ new Set([
     "paragraph_open",
@@ -4055,7 +4076,7 @@ function parseDocumentWithSourceCapture(source, schema2) {
       trace = editTrace(trace, edits);
       if (trace.text !== after) throw new UnsupportedSourceCapture();
     });
-    const collector = { trace, runs: [], roots: [], synthetic: [] };
+    const collector = { trace, lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [] };
     const doc2 = getParserFor(schema2).parse(work, { [captureKey]: collector });
     const text2 = [];
     doc2.forEach((paragraph2, offset) => {
@@ -4088,6 +4109,7 @@ function parseDocumentWithSourceCapture(source, schema2) {
     return { ok: true, value: {
       doc: doc2,
       textRuns: collector.runs,
+      protectedSources: Object.freeze(collector.protectedSources),
       roots: collector.roots,
       gaps: buildSourceGaps(source, collector.roots, collector.synthetic)
     } };
@@ -6285,7 +6307,8 @@ function createSourceSession(source, schema2) {
     doc: parsed.value.doc,
     textSpans: parsed.value.textRuns,
     roots: parsed.value.roots,
-    gaps: parsed.value.gaps
+    gaps: parsed.value.gaps,
+    protectedSources: parsed.value.protectedSources
   } };
 }
 function splitsSurrogate(text2, offset) {
@@ -6306,6 +6329,17 @@ function boundary(span, pos) {
   if (pos === span.pmTo) return span.sourceTo;
   if (span.kind === "linear") return span.sourceFrom + pos - span.pmFrom;
   return void 0;
+}
+function overlapsProtectedSource(base, from, to) {
+  const ranges = base.protectedSources;
+  let low = 0, high = ranges.length;
+  while (low < high) {
+    const middle = low + high >>> 1;
+    if (ranges[middle].sourceTo <= from) low = middle + 1;
+    else high = middle;
+  }
+  const range = ranges[low];
+  return !!range && (from === to ? range.sourceFrom < from : range.sourceFrom < to);
 }
 function applySourceTextTransactionWithEdit(base, tr) {
   if (!tr.before.eq(base.doc)) return { ok: false, reason: "stale-document" };
@@ -6334,6 +6368,7 @@ function applySourceTextTransactionWithEdit(base, tr) {
   if (sourceFrom === void 0 || sourceTo === void 0 || spans.some((span, i) => i > 0 && spans[i - 1].sourceTo !== span.sourceFrom) || splitsSurrogate(base.source, sourceFrom) || splitsSurrogate(base.source, sourceTo)) {
     return { ok: false, reason: "unmapped-range" };
   }
+  if (overlapsProtectedSource(base, sourceFrom, sourceTo)) return { ok: false, reason: "unsupported-step" };
   const insert = (step.slice?.content ?? []).map((node) => node.text).join("");
   const candidate = base.source.slice(0, sourceFrom) + insert + base.source.slice(sourceTo);
   const result = createSourceSession(candidate, base.doc.type.schema);
@@ -6446,7 +6481,7 @@ function rootRenderNode(node) {
   return rendered.mark(marks2);
 }
 function renderChangedRoot(base, doc2, root) {
-  if (!renderableRoots.has(root.tokenType)) throw new UnsupportedBlockTransaction();
+  if (overlapsProtectedSource(base, root.sourceFrom, root.sourceTo) || !renderableRoots.has(root.tokenType)) throw new UnsupportedBlockTransaction();
   const nodes = [];
   for (let i = root.childFrom; i < root.childTo; i++) nodes.push(rootRenderNode(doc2.child(i)));
   let generated = serializeMarkdown(doc2.type.create(doc2.attrs, Fragment3.fromArray(nodes)));
@@ -6464,7 +6499,7 @@ function applySourceEdits(base, edits, ids, ownership) {
   for (const edit of edits) {
     while (ownerIndex < authorized.length && authorized[ownerIndex].sourceTo < edit.to) ownerIndex++;
     const owner = authorized[ownerIndex];
-    if (!owner || owner.sourceFrom > edit.from || owner.sourceTo < edit.to || edit.from < at || edit.to < edit.from || edit.to > base.source.length || splitsSurrogate(base.source, edit.from) || splitsSurrogate(base.source, edit.to))
+    if (overlapsProtectedSource(base, edit.from, edit.to) || !owner || owner.sourceFrom > edit.from || owner.sourceTo < edit.to || edit.from < at || edit.to < edit.from || edit.to > base.source.length || splitsSurrogate(base.source, edit.from) || splitsSurrogate(base.source, edit.to))
       throw new UnsupportedBlockTransaction();
     chunks.push(base.source.slice(at, edit.from), edit.text);
     at = edit.to;

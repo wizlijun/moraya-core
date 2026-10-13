@@ -23,6 +23,12 @@ type SourceGap = Readonly<{
     kind: 'trivia' | 'opaque';
     synthetic: readonly SyntheticEmission[];
 }>;
+type ProtectedSource = Readonly<{
+    kind: 'reference-definition';
+    sourceFrom: number;
+    sourceTo: number;
+    scope: 'top-level' | 'nested';
+}>;
 type SourceEdit = Readonly<{
     from: number;
     to: number;
@@ -65,6 +71,7 @@ type CapturedParagraph = {
 type CapturedDocument = CapturedParagraph & {
     roots: SourceRoot[];
     gaps: SourceGap[];
+    protectedSources: readonly ProtectedSource[];
 };
 /**
  * Parse a markdown string into a ProseMirror document node. Never throws (§4.5).
@@ -103,4 +110,4 @@ declare function parseParagraphWithSourceCapture(source: string, schema?: Schema
     reason: 'unsupported-source' | 'parse-error';
 };
 
-export { type CapturedDocument as C, type SourceRoot as S, type SourceGap as a, type SourceEdit as b, type SyntheticEmission as c, parseMarkdownAsync as d, type CapturedParagraph as e, type CapturedTextRun as f, parseDocumentWithSourceCapture as g, parseParagraphWithSourceCapture as h, parseMarkdown as p, serializeMarkdown as s };
+export { type CapturedDocument as C, type ProtectedSource as P, type SourceRoot as S, type SourceGap as a, type SourceEdit as b, type SyntheticEmission as c, parseMarkdownAsync as d, type CapturedParagraph as e, type CapturedTextRun as f, parseDocumentWithSourceCapture as g, parseParagraphWithSourceCapture as h, parseMarkdown as p, serializeMarkdown as s };

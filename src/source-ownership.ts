@@ -13,6 +13,9 @@ export type SourceGap = Readonly<{
   kind: 'trivia' | 'opaque'
   synthetic: readonly SyntheticEmission[]
 }>
+export type ProtectedSource = Readonly<{
+  kind: 'reference-definition'; sourceFrom: number; sourceTo: number; scope: 'top-level' | 'nested'
+}>
 export type SourceEdit = Readonly<{ from: number; to: number; text: string }>
 
 export class UnsupportedOwnership extends Error {}

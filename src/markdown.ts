@@ -30,7 +30,7 @@ import type { MarkdownSerializerState } from 'prosemirror-markdown'
 import type { Node as PmNode, Mark, Schema } from 'prosemirror-model'
 import { defaultSchema } from './schema'
 import { projectLineEndings } from './source-projection'
-import { rawRange, lineStarts, rendererTailStart, UnsupportedOwnership, type SourceRoot, type SourceGap, type SyntheticEmission } from './source-ownership'
+import { rawRange, lineStarts, rendererTailStart, UnsupportedOwnership, type SourceRoot, type SourceGap, type SyntheticEmission, type ProtectedSource } from './source-ownership'
 import { identityTrace, sliceTrace, editTrace, type SourceTrace, type TraceEdit } from './source-trace'
 
 // ── markdown-it instance ────────────────────────────────────────
@@ -421,11 +421,11 @@ export type CapturedTextRun = {
   kind: 'linear' | 'atomic'
 }
 export type CapturedParagraph = { doc: PmNode; textRuns: CapturedTextRun[] }
-export type CapturedDocument = CapturedParagraph & { roots: SourceRoot[]; gaps: SourceGap[] }
+export type CapturedDocument = CapturedParagraph & { roots: SourceRoot[]; gaps: SourceGap[]; protectedSources: readonly ProtectedSource[] }
 type SourceRun = { text: string; kind?: undefined; trace?: undefined }
   | { text: string; kind: 'linear' | 'atomic'; trace: SourceTrace }
 type Capture = {
-  trace: SourceTrace; runs: CapturedTextRun[]; roots: SourceRoot[]
+  trace: SourceTrace; lineStarts: number[]; protectedSources: ProtectedSource[]; runs: CapturedTextRun[]; roots: SourceRoot[]
   synthetic: { gapIndex: number; emission: SyntheticEmission }[]
 }
 const captureKey = Symbol('document source capture')
@@ -484,6 +484,27 @@ wrapCaptureRule(md.core.ruler, 'normalize', (original, state) => {
   collector.trace = editTrace(collector.trace, nulEdits)
   const result = original(state)
   if (state.src !== collector.trace.text) throw new UnsupportedSourceCapture()
+  collector.lineStarts = lineStarts(collector.trace.text)
+  return result
+})
+wrapCaptureRule(md.block.ruler, 'reference', (original, state, startLine, endLine, silent) => {
+  const collector = collectorFor(state)
+  const scope = state.level === 0 && state.blkIndent === 0 ? 'top-level' : 'nested'
+  const result = original(state, startLine, endLine, silent)
+  if (!collector || !result || silent) return result
+  // bMarks is temporarily shifted inside quotes. Physical cached line starts
+  // retain all container markers. Only final state.line survives title rollback.
+  const from = collector.lineStarts[startLine], to = collector.lineStarts[state.line]
+  if (from === undefined || to === undefined || to <= from) throw new UnsupportedSourceCapture()
+  const raw = rawRange(collector.trace, from, to)
+  if (raw) {
+    // Successful block consumption is in source order, including nested rules
+    // and duplicate labels; no per-root scanning or env-reference diff is needed.
+    const previous = collector.protectedSources[collector.protectedSources.length - 1]
+    if (previous && previous.sourceTo > raw.from) throw new UnsupportedSourceCapture()
+    collector.protectedSources.push(Object.freeze({ kind: 'reference-definition',
+      sourceFrom: raw.from, sourceTo: raw.to, scope }))
+  }
   return result
 })
 wrapCaptureRule(md.block.ruler, 'paragraph', (original, state, ...args) => {
@@ -717,7 +738,7 @@ const rootStarts = new WeakMap<object, RootDraft>()
 const rootEnds = new WeakMap<object, RootDraft>()
 
 function prepareRootEvents(tokens: InlineToken[], collector: Capture): void {
-  const starts = lineStarts(collector.trace.text)
+  const starts = collector.lineStarts
   let natural = 0
   const renderable = new Set(['paragraph_open', 'heading_open', 'bullet_list_open', 'ordered_list_open',
     'blockquote_open', 'table_open', 'footnote_reference_open', 'dl_open', 'hr',
@@ -1828,7 +1849,7 @@ export function parseDocumentWithSourceCapture(source: string, schema?: Schema):
       trace = editTrace(trace, edits)
       if (trace.text !== after) throw new UnsupportedSourceCapture()
     })
-    const collector: Capture = { trace, runs: [], roots: [], synthetic: [] }
+    const collector: Capture = { trace, lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [] }
     const doc = getParserFor(schema).parse(work, { [captureKey]: collector })
     // Build one independent PM index. Only actual top-level paragraph text
     // children qualify; atoms leave gaps, and paragraph identity is retained.
@@ -1865,6 +1886,7 @@ export function parseDocumentWithSourceCapture(source: string, schema?: Schema):
       sourceEnd = run.sourceTo
     }
     return { ok: true, value: { doc, textRuns: collector.runs,
+      protectedSources: Object.freeze(collector.protectedSources),
       roots: collector.roots, gaps: buildSourceGaps(source, collector.roots, collector.synthetic) } }
   } catch (error) {
     return { ok: false, reason: error instanceof UnsupportedSourceCapture || error instanceof UnsupportedOwnership ? 'unsupported-source' : 'parse-error' }

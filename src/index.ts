@@ -81,4 +81,4 @@ export type { TextSourceSpan, SourceSession, FidelityFailure, FidelityResult, So
 export { projectLineEndings, sourceOffsetAt, viewOffsetAt } from './source-projection'
 export type { EolChange, EolProjection } from './source-projection'
 
-export type { SourceRoot, SourceGap, SyntheticEmission, SourceEdit } from './source-ownership'
+export type { SourceRoot, SourceGap, SyntheticEmission, SourceEdit, ProtectedSource } from './source-ownership'

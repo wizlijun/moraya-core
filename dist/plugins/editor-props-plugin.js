@@ -1775,6 +1775,27 @@ wrapCaptureRule(md.core.ruler, "normalize", (original, state) => {
   collector.trace = editTrace(collector.trace, nulEdits);
   const result = original(state);
   if (state.src !== collector.trace.text) throw new UnsupportedSourceCapture();
+  collector.lineStarts = lineStarts(collector.trace.text);
+  return result;
+});
+wrapCaptureRule(md.block.ruler, "reference", (original, state, startLine, endLine, silent) => {
+  const collector = collectorFor(state);
+  const scope = state.level === 0 && state.blkIndent === 0 ? "top-level" : "nested";
+  const result = original(state, startLine, endLine, silent);
+  if (!collector || !result || silent) return result;
+  const from = collector.lineStarts[startLine], to = collector.lineStarts[state.line];
+  if (from === void 0 || to === void 0 || to <= from) throw new UnsupportedSourceCapture();
+  const raw = rawRange(collector.trace, from, to);
+  if (raw) {
+    const previous = collector.protectedSources[collector.protectedSources.length - 1];
+    if (previous && previous.sourceTo > raw.from) throw new UnsupportedSourceCapture();
+    collector.protectedSources.push(Object.freeze({
+      kind: "reference-definition",
+      sourceFrom: raw.from,
+      sourceTo: raw.to,
+      scope
+    }));
+  }
   return result;
 });
 wrapCaptureRule(md.block.ruler, "paragraph", (original, state, ...args) => {
@@ -2002,7 +2023,7 @@ var syntheticTokens = /* @__PURE__ */ new WeakSet();
 var rootStarts = /* @__PURE__ */ new WeakMap();
 var rootEnds = /* @__PURE__ */ new WeakMap();
 function prepareRootEvents(tokens, collector) {
-  const starts = lineStarts(collector.trace.text);
+  const starts = collector.lineStarts;
   let natural = 0;
   const renderable = /* @__PURE__ */ new Set([
     "paragraph_open",
