@@ -1,5 +1,5 @@
 import type { Node as PmNode } from 'prosemirror-model'
-import { TextSelection, type Command, type EditorState } from 'prosemirror-state'
+import { TextSelection, type Command, type EditorState, type Transaction } from 'prosemirror-state'
 
 export type GfmTableAction =
   | { kind: 'insert' }
@@ -43,6 +43,8 @@ export function gfmTableCommand(action: GfmTableAction): Command {
   return (state, dispatch) => {
     const { table, table_header_row, table_row, table_header, table_cell, paragraph } = state.schema.nodes
     if (!table || !table_header_row || !table_row || !table_header || !table_cell || !paragraph) return false
+    const send = (tr: Transaction, tablePos: number, column: number) =>
+      dispatch!(tr.setMeta('moraya:gfm-table-operation', { v: 1, kind: action.kind, tablePos, column }))
     const freshCell = (header: boolean, alignment: 'left' | 'center' | 'right') =>
       (header ? table_header : table_cell).createAndFill({ alignment, colspan: 1, rowspan: 1, colwidth: null })!
     if (action.kind === 'insert') {
@@ -52,11 +54,12 @@ export function gfmTableCommand(action: GfmTableAction): Command {
         ...Array.from({ length: 2 }, () => table_row.create(null, Array.from({ length: 3 }, () => freshCell(false, 'left')))),
       ])
       const tr = state.tr.replaceSelectionWith(tableNode)
+      let tablePos = 0
       tr.doc.descendants((node, pos) => {
-        if (node === tableNode) { tr.setSelection(TextSelection.near(tr.doc.resolve(pos + 3))); return false }
+        if (node === tableNode) { tr.setSelection(TextSelection.near(tr.doc.resolve(pos + 3))); tablePos = pos; return false }
         return true
       })
-      dispatch(tr.scrollIntoView())
+      send(tr.scrollIntoView(), tablePos, 0)
       return true
     }
     const context = tableContext(state)
@@ -76,7 +79,7 @@ export function gfmTableCommand(action: GfmTableAction): Command {
         rowPos += current.nodeSize
       }
       // Keep probe/execute consistent even when the column already has this alignment.
-      dispatch(tr)
+      send(tr, context.pos, context.column)
       return true
     }
     const freshRow = () => table_row.create(null, children(rows[0]!).map(cell => freshCell(false, cell.attrs.alignment)))
@@ -114,7 +117,7 @@ export function gfmTableCommand(action: GfmTableAction): Command {
     position += 1
     for (let index = 0; index < column; index++) position += rows[row]!.child(index).nodeSize
     tr.setSelection(TextSelection.near(tr.doc.resolve(position + 1))).scrollIntoView()
-    dispatch(tr)
+    send(tr, context.pos, context.column)
     return true
   }
 }

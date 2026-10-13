@@ -42,6 +42,7 @@ function gfmTableCommand(action) {
   return (state, dispatch) => {
     const { table, table_header_row, table_row, table_header, table_cell, paragraph } = state.schema.nodes;
     if (!table || !table_header_row || !table_row || !table_header || !table_cell || !paragraph) return false;
+    const send = (tr2, tablePos, column2) => dispatch(tr2.setMeta("moraya:gfm-table-operation", { v: 1, kind: action.kind, tablePos, column: column2 }));
     const freshCell = (header, alignment) => (header ? table_header : table_cell).createAndFill({ alignment, colspan: 1, rowspan: 1, colwidth: null });
     if (action.kind === "insert") {
       if (!dispatch) return true;
@@ -50,14 +51,16 @@ function gfmTableCommand(action) {
         ...Array.from({ length: 2 }, () => table_row.create(null, Array.from({ length: 3 }, () => freshCell(false, "left"))))
       ]);
       const tr2 = state.tr.replaceSelectionWith(tableNode);
+      let tablePos = 0;
       tr2.doc.descendants((node, pos) => {
         if (node === tableNode) {
           tr2.setSelection(TextSelection.near(tr2.doc.resolve(pos + 3)));
+          tablePos = pos;
           return false;
         }
         return true;
       });
-      dispatch(tr2.scrollIntoView());
+      send(tr2.scrollIntoView(), tablePos, 0);
       return true;
     }
     const context = tableContext(state);
@@ -76,7 +79,7 @@ function gfmTableCommand(action) {
         if (cell.attrs.alignment !== action.alignment) tr2.setNodeMarkup(cellPos, void 0, { ...cell.attrs, alignment: action.alignment }, cell.marks);
         rowPos += current.nodeSize;
       }
-      dispatch(tr2);
+      send(tr2, context.pos, context.column);
       return true;
     }
     const freshRow = () => table_row.create(null, children(rows[0]).map((cell) => freshCell(false, cell.attrs.alignment)));
@@ -123,7 +126,7 @@ function gfmTableCommand(action) {
     position += 1;
     for (let index = 0; index < column; index++) position += rows[row].child(index).nodeSize;
     tr.setSelection(TextSelection.near(tr.doc.resolve(position + 1))).scrollIntoView();
-    dispatch(tr);
+    send(tr, context.pos, context.column);
     return true;
   };
 }
