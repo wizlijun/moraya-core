@@ -224,3 +224,23 @@ it('ordered marker width keeps nested continuation at a digit transition',()=>{
  const b=open('9) A\n10) B\n    + C'+tail),tr=state(b,'A').tr.insertText('Z',text(b.doc,'A'),text(b.doc,'A')+1)
  accept(b,tr,' 9) Z\n10) B\n    + C'+tail)
 })
+it.each([
+ ['* outer\n  + A\n\n  + B\n* end','* outer\n  + A\n* B\n* end',[true,false]],
+ ['* outer\n\n  + A\n  + B\n\n* end','* outer\n\n  + A\n\n* B\n\n* end',[false,true]],
+] as const)('mixed lift preserves the actual surviving outer shell: %s',(raw,expected,tight)=>{
+ const b=open(raw+tail);expect(b.layout.lists!.map(f=>f.tight)).toEqual(tight)
+ const tr=command(state(b,'B'),liftListItem(b.doc.type.schema.nodes.list_item!)),r=accept(b,tr,expected+tail)
+ expect(r.session.layout.lists!.map(f=>f.marker)).toEqual(['*','+']);expect(r.session.layout.lists![0]!.tight).toBe(tight[0])
+})
+it('true sibling join merges tight and loose sources and keeps the left marker',()=>{
+ const b=open(`+ A\n\n${M}\n\n* B\n\n* C`+tail),left=b.doc.child(0).nodeSize
+ const tr=state(b,'A').tr.delete(left,left+b.doc.child(1).nodeSize).join(left),r=accept(b,tr,'+ A\n\n+ B\n\n+ C'+tail)
+ expect(r.session.layout.lists!.map(f=>[f.marker,f.tight])).toEqual([['+',false]])
+})
+it('lift then split propagates the surviving outer style to both actual fragments',()=>{
+ const b=open('* outer\n  + A\n\n  + B\n* end'+tail),tr=command(state(b,'B'),liftListItem(b.doc.type.schema.nodes.list_item!))
+ const itemPos=tr.doc.resolve(text(tr.doc,'B')).before(2);tr.split(itemPos,1)
+ const seam=tr.doc.child(0).nodeSize;augmentScenarioSeam(tr,seam)
+ const r=accept(b,tr,`* outer\n  + A\n\n${M}\n\n* B\n* end`+tail)
+ expect(r.session.layout.lists!.map(f=>f.marker)).toEqual(['*','+','*']);expect(r.session.layout.lists!.filter(f=>f.marker==='*').map(f=>f.tight)).toEqual([true,true])
+})

@@ -7582,14 +7582,14 @@ function transactionListStyles(tr, facts, targets) {
     items = [];
     after.descendants((node, pos) => {
       if (!isList(node) || !relevant(pos, node.nodeSize, i + 1)) return;
-      const origins = [];
-      node.forEach((_item, offset) => {
+      const origins = [...shellOrigins.get(pos) ?? []];
+      if (!origins.length) node.forEach((_item, offset) => {
         for (const origin of itemOrigins.get(pos + 1 + offset) ?? []) if (origin.kind === node.type.name && !origins.includes(origin)) origins.push(origin);
       });
-      if (!origins.length) origins.push(...shellOrigins.get(pos) ?? []);
       if (!origins.length) origins.push({ kind: node.type.name, style: { marker: node.type.name === "bullet_list" ? "-" : ".", tight: true } });
-      shells.push({ node, pos, origins });
-      node.forEach((item, offset) => items.push({ node: item, pos: pos + 1 + offset, origins: itemOrigins.get(pos + 1 + offset)?.filter((o) => o.kind === node.type.name).length ? itemOrigins.get(pos + 1 + offset).filter((o) => o.kind === node.type.name) : origins }));
+      const current = { kind: node.type.name, style: { marker: origins[0].style.marker, tight: origins.every((o) => o.style.tight) } };
+      shells.push({ node, pos, origins: [current] });
+      node.forEach((item, offset) => items.push({ node: item, pos: pos + 1 + offset, origins: [current] }));
     });
   }
   return new Map(shells.map((s) => [s.pos, { marker: s.origins[0].style.marker, tight: s.origins.every((o) => o.style.tight) }]));
