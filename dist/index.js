@@ -3304,6 +3304,13 @@ for (const name of ["list", "blockquote", "footnote_def"]) wrapCaptureRule(md.bl
       const at = rawPoint(collector.trace, read.body);
       if (at !== void 0) place = { kind: "prepend", at, eol: actualEol(collector, read.e), continuation: read.prefix };
     }
+    if (name === "list" && place?.kind === "inline" && place.before && read.prefix) {
+      const eol = actualEol(collector, read.e);
+      if (eol && place.range.to === eol.from && collector.protectedSources.some((p) => p.sourceFrom === eol.to)) {
+        const prefix = read.prefix.map((p) => "spaces" in p ? " ".repeat(p.spaces) : collector.source.slice(p.from, p.to)).join("");
+        place = { ...place, after: collector.source.slice(eol.from, eol.to) + prefix };
+      }
+    }
     if (place) containerEnds.set(last, { collector, place, kind: name === "list" ? "list_item" : name === "blockquote" ? "blockquote" : "footnote_definition" });
     const children2 = [];
     for (let i = index + 1; i < close; i++) {
@@ -3330,6 +3337,20 @@ for (const name of ["list", "blockquote", "footnote_def"]) wrapCaptureRule(md.bl
       const touchesDefinition = firstInRun && (definitionLeft || definitionRight);
       const left = children2.filter((child) => child.to <= blank.line).at(-1), right = children2.find((child) => child.from > blank.line);
       if (touchesDefinition) {
+        if (!children2.length && blank.line === read.line && place?.kind === "inline" && place.range.from === blank.range.from && place.range.to === blank.range.to) {
+          const baseline = {
+            kind: "nested-blank",
+            range: blank.range,
+            prefix: name !== "blockquote" && read.prefix ? read.prefix : blank.prefix,
+            ...blank.eol ? { eol: blank.eol } : {},
+            leftBody: definitionLeft,
+            rightBody: definitionRight,
+            leftSeparator: true
+          };
+          const pending = nestedBlanks.get(last);
+          if (pending) nestedBlanks.set(last, pending.map((item) => item.place === place ? { ...item, place: baseline } : item));
+          else containerEnds.set(last, { collector, place: baseline, kind: name === "list" ? "list_item" : name === "blockquote" ? "blockquote" : "footnote_definition" });
+        }
         const begin2 = blank.prefix[0];
         const definition = definitionRight && !definitionLeft ? collector.protectedSources.find((p) => p.sourceFrom === end) : definitionLeft && !definitionRight && begin2 && "from" in begin2 ? collector.protectedSources.find((p) => p.sourceTo === begin2.from) : void 0;
         const side = definitionRight ? "left" : "right", child = definitionRight ? left : right, target2 = child && state.tokens[child.index + 1];

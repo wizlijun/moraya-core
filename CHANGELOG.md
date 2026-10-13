@@ -4,6 +4,8 @@ All notable changes to `@moraya/core` are documented here. SemVer.
 
 ## Unreleased
 
+- First input in definition-only empty quote and list paragraphs now keeps the actual reference-definition separator, including marker-only list lines and continued input after deleting a point note. Protected definition bytes remain unchanged.
+
 - Source code-mark toggles now encode only selected text whose code context changes, retaining untouched entity/escape bytes. Deleting a marked point note removes only actual wrappers left without content, including its certified terminal EOL; wrappers covering surviving text remain.
 
 - Source-preserving CriticMarkup edits update only actual annotation payloads, retain separate source wrappers and inner formatting, and support range-note addition/removal plus point-note insert/edit/remove in certified empty paragraphs and table cells. Point-only deletion consumes only certified redundant separators or its own terminal EOL. Aggregate inline/annotation artifacts and installed consumer validation accompany this change; full file UI/history and formula editing remain separate.

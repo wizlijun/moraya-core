@@ -189,7 +189,7 @@ it.each([
  const r=apply(b,tr,expected);expect(b.source).toBe(raw);
  for(const [i,old] of b.protectedSources.entries()){const delta=r.edits.filter(e=>e.to<=old.sourceFrom).reduce((n,e)=>n+e.text.length-e.to+e.from,0);expect(r.session.protectedSources[i]).toEqual({...old,sourceFrom:old.sourceFrom+delta,sourceTo:old.sourceTo+delta})}
  const after=open(r.session.source),at=pos(after.doc,after.doc.firstChild!.type.name==='blockquote'?[0,0]:after.doc.firstChild!.type.name==='table'?[0,1,1,0]:[0]);
- const next=EditorState.create({doc:after.doc}).tr.insertText('Z',at),edited=applySourceBlockTransaction(after,next);if(expected==='>\n> [r]: /u\n'){expect(edited).toEqual({ok:false,reason:'semantic-mismatch'});expect(after.source).toBe(expected)}else{expect(edited.ok).toBe(true);if(edited.ok)expect(edited.session.doc.eq(next.doc)).toBe(true)}
+ const next=EditorState.create({doc:after.doc}).tr.insertText('Z',at),edited=applySourceBlockTransaction(after,next);expect(edited.ok,edited.ok?undefined:edited.reason).toBe(true);if(edited.ok){expect(edited.session.doc.eq(next.doc)).toBe(true);if(expected==='>\n> [r]: /u\n')expect(edited.session.source).toBe('>Z\n>\n> [r]: /u\n')}
 });
 it('final I2 code point spelling is text and wider or mixed leaf deletions stay atomic',()=>{
  const literal=open('`{>>原注<<}`\n');expect(markdown.capturedInlineRecipeFacts(literal)!.critic).toHaveLength(0);
@@ -198,4 +198,18 @@ it('final I2 code point spelling is text and wider or mixed leaf deletions stay 
  const wide=state.tr.delete(p.pmFrom,p.pmTo+1),mixed=state.tr.delete(p.pmFrom,p.pmTo);mixed.addMark(mixed.mapping.map(atom.pmFrom),mixed.mapping.map(atom.pmTo),b.doc.type.schema.marks.strong!.create());
  expect(applySourceBlockTransaction(b,wide).ok).toBe(false);expect(applySourceBlockTransaction(b,mixed).ok).toBe(false);expect(b.source).toBe(raw);
  expect(applySourceBlockTransaction(b,state.tr.delete(p.pmFrom,p.pmTo)).ok).toBe(true);
+});
+
+
+it.each(['{>>原注<<}','**{>>原注<<}**'])('definition-only point removal permits same-session consecutive input: %s',point=>{
+ const raw='>'+point+'\n>\n> [r]: /u\n',b=open(raw),p=markdown.capturedInlineRecipeFacts(b)!.critic[0]!;
+ const removed=apply(b,EditorState.create({doc:b.doc}).tr.delete(p.pmFrom,p.pmTo),'>\n> [r]: /u\n');
+ const tr=EditorState.create({doc:removed.session.doc}).tr.insertText('Z',2);
+ expect(open('>Z\n>\n> [r]: /u\n').doc.eq(tr.doc)).toBe(true);
+ const first=apply(removed.session,tr,'>Z\n>\n> [r]: /u\n');
+ const next=EditorState.create({doc:first.session.doc}).tr.insertText('Q',3);
+ const second=apply(first.session,next,'>ZQ\n>\n> [r]: /u\n');
+ expect(first.session.protectedSources).toEqual(removed.session.protectedSources.map(p=>({...p,sourceFrom:p.sourceFrom+3,sourceTo:p.sourceTo+3})));
+ expect(second.session.protectedSources).toEqual(first.session.protectedSources.map(p=>({...p,sourceFrom:p.sourceFrom+1,sourceTo:p.sourceTo+1})));
+ expect(b.source).toBe(raw);
 });

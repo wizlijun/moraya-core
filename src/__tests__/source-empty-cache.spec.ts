@@ -199,3 +199,94 @@ it.each([
   return {...p,sourceFrom:p.sourceFrom+shift,sourceTo:p.sourceTo+shift};
  }));
 });
+
+
+it.each([
+ ['>\n> [r]: /u\n',2,'>Z\n>\n> [r]: /u\n',1,'Z\n>'],
+ ['>\r\n> [r]: /u\r\n',2,'>Z\r\n>\r\n> [r]: /u\r\n',1,'Z\r\n>'],
+ ['\uFEFF>\r\n> [r]: /u\r\n',2,'\uFEFF>Z\r\n>\r\n> [r]: /u\r\n',2,'Z\r\n>'],
+ ['-\n  [r]: /u\n',3,'- Z\n  \n  [r]: /u\n',1,' Z\n  '],
+ ['-\n\n[r]: /u\n',3,'- Z\n\n[r]: /u\n',1,' Z'],
+ ['> -\n\n[r]: /u\n',4,'> - Z\n\n[r]: /u\n',3,' Z'],
+ ['> -\n>   [r]: /u\n',4,'> - Z\n>   \n>   [r]: /u\n',3,' Z\n>   '],
+ ['\uFEFF> -\r\n>   [r]: /u\r\n',4,'\uFEFF> - Z\r\n>   \r\n>   [r]: /u\r\n',4,' Z\r\n>   '],
+ ['- \n  [r]: /u\n',3,'- Z\n  \n  [r]: /u\n',2,'Z\n  '],
+ ['> - \n>   [r]: /u\n',4,'> - Z\n>   \n>   [r]: /u\n',4,'Z\n>   '],
+ ['\uFEFF> - \r\n>   [r]: /u\r\n',4,'\uFEFF> - Z\r\n>   \r\n>   [r]: /u\r\n',5,'Z\r\n>   '],
+ ['>\n> [r]: /u\n> [r]: /v\n',2,'>Z\n>\n> [r]: /u\n> [r]: /v\n',1,'Z\n>'],
+ ['>\n> [r]: /u\n>\n',2,'>Z\n>\n> [r]: /u\n>\n',1,'Z\n>'],
+ ['>\n> [r]: /u\n\nTail __raw__\n',2,'>Z\n>\n> [r]: /u\n\nTail __raw__\n',1,'Z\n>'],
+] as const)('definition-only baseline first input retains actual separator %j',(raw,pos,expected,rawAt,text)=>{
+ const b=open(raw),snapshot=JSON.stringify(b),tr=EditorState.create({doc:b.doc}).tr.insertText('Z',pos);
+ expect(b.doc.resolve(pos).parent.content.size).toBe(0);
+ expect(open(expected).doc.eq(tr.doc)).toBe(true);
+ const facts=capturedEmptyBodies(raw,b.doc,b.roots,b.layout)!;expect(facts).toHaveLength(1);
+ const result=applySourceBlockTransaction(b,tr);expect(result.ok,result.ok?undefined:result.reason).toBe(true);if(!result.ok)throw Error(result.reason);
+ expect(result.session.source).toBe(expected);expect(result.session.doc.eq(tr.doc)).toBe(true);
+ expect(result.edits).toEqual([{from:rawAt,to:rawAt,text}]);
+ expect(result.session.protectedSources).toEqual(b.protectedSources.map(p=>({...p,sourceFrom:p.sourceFrom+text.length,sourceTo:p.sourceTo+text.length})));
+ expect(JSON.stringify(b)).toBe(snapshot);
+ const next=EditorState.create({doc:result.session.doc}).tr.insertText('Q',pos+1),again=applySourceBlockTransaction(result.session,next);
+ expect(again.ok,again.ok?undefined:again.reason).toBe(true);if(!again.ok)throw Error(again.reason);
+ expect(again.session.source).toBe(expected.replace('Z','ZQ'));expect(again.session.doc.eq(next.doc)).toBe(true);
+ expect(again.session.protectedSources).toEqual(result.session.protectedSources.map(p=>({...p,sourceFrom:p.sourceFrom+1,sourceTo:p.sourceTo+1})));
+});
+
+
+it.each([
+ ['>\n>\n> [r]: /u\n',2,'>Z\n>\n>\n> [r]: /u\n',2],
+ ['>\n>\n> [r]: /u\n',4,'>\n>Z\n>\n> [r]: /u\n',2],
+ ['>\n>\n> A\n>\n> [r]: /u\n',2,'>Z\n>\n>\n> A\n>\n> [r]: /u\n',2],
+] as const)('baseline and additional actual blanks emit exactly once %j',(raw,pos,expected,count)=>{
+ const b=open(raw),facts=capturedEmptyBodies(raw,b.doc,b.roots,b.layout)!;
+ expect(facts).toHaveLength(count);expect(new Set(facts.map(f=>f.pmAt)).size).toBe(count);
+ const tr=EditorState.create({doc:b.doc}).tr.insertText('Z',pos);expect(open(expected).doc.eq(tr.doc)).toBe(true);
+ const r=applySourceBlockTransaction(b,tr);expect(r.ok,r.ok?undefined:r.reason).toBe(true);if(!r.ok)throw Error(r.reason);
+ expect(r.session.source).toBe(expected);expect(r.session.doc.eq(tr.doc)).toBe(true);
+ expect(r.session.protectedSources).toEqual(b.protectedSources.map(p=>({...p,sourceFrom:p.sourceFrom+3,sourceTo:p.sourceTo+3})));
+});
+it.each(['>\r\n> [r]: /u\r\n','- \n  [r]: /u\n','> - \n>   [r]: /u\n','-\n  [r]: /u\n','> -\n>   [r]: /u\n'])('definition-only facts survive three replay generations %j',raw=>{
+ const first=captureFilePipeline(raw);expect(first.ok).toBe(true);if(!first.ok)throw Error(first.reason);let cached=first;
+ const original=capturedEmptyBodies(raw,first.value.doc,first.value.roots,first.value.layout)!;
+ const expected=raw.startsWith('> -')?'> - Z\n>   \n>   [r]: /u\n':raw.startsWith('-')?'- Z\n  \n  [r]: /u\n':'>Z\r\n>\r\n> [r]: /u\r\n';
+ for(let generation=0;generation<3;generation++){
+  const next=replayFilePipeline(cached.cache);expect(next.ok).toBe(true);if(!next.ok)throw Error(next.reason);
+  const v=next.value,b={revision:0,source:raw,doc:v.doc,textSpans:v.textRuns,roots:v.roots,gaps:v.gaps,layout:v.layout,protectedSources:v.protectedSources};
+  const facts=capturedEmptyBodies(raw,b.doc,b.roots,b.layout)!;expect(facts.map(f=>f.place)).toEqual(original.map(f=>f.place));
+  const tr=EditorState.create({doc:b.doc}).tr.insertText('Z',facts[0]!.pmAt);
+  expect(prepareEmptyBodyTransaction(b,tr,original).kind).toBe('unsupported');
+  expect(prepareEmptyBodyTransaction(b,tr,facts.map(f=>({...f}))).kind).toBe('unsupported');
+  expect(open(expected).doc.eq(tr.doc)).toBe(true);
+  const r=applySourceBlockTransaction(b,tr);expect(r.ok,r.ok?undefined:r.reason).toBe(true);if(!r.ok)throw Error(r.reason);
+  expect(r.session.source).toBe(expected);expect(r.session.doc.eq(tr.doc)).toBe(true);
+  for(const fresh of [r.session,open(expected)]){
+   const second=EditorState.create({doc:fresh.doc}).tr.insertText('Q',facts[0]!.pmAt+1),typed=applySourceBlockTransaction(fresh,second);
+   expect(typed.ok,typed.ok?undefined:typed.reason).toBe(true);if(!typed.ok)throw Error(typed.reason);
+   expect(typed.session.source).toBe(expected.replace('Z','ZQ'));expect(typed.session.doc.eq(second.doc)).toBe(true);
+  }
+  cached=next;
+ }
+});
+it('definition-only baseline facts shift through three file-cache generations',()=>{
+ let b=open('A\n\n>\n> [r]: /u\n');
+ for(const prefix of ['Longer','New\n\nLonger','Newest\n\nLonger']){
+  const end=b.source.indexOf('\n\n>'),changed=prepareFileSourceEdits(b,{expectedRevision:b.revision,edits:[{from:0,to:end,removed:b.source.slice(0,end),text:prefix}]});
+  expect(changed.ok).toBe(true);if(!changed.ok)throw Error(changed.reason);b=changed.session;
+  const facts=capturedEmptyBodies(b.source,b.doc,b.roots,b.layout)!,f=facts[0]!;
+  expect(facts).toHaveLength(1);const tr=EditorState.create({doc:b.doc}).tr.insertText('Z',f.pmAt),expected=prefix+'\n\n>Z\n>\n> [r]: /u\n';
+  expect(open(expected).doc.eq(tr.doc)).toBe(true);
+  const r=applySourceBlockTransaction(b,tr);expect(r.ok,r.ok?undefined:r.reason).toBe(true);if(!r.ok)throw Error(r.reason);
+  expect(r.session.source).toBe(expected);expect(r.session.doc.eq(tr.doc)).toBe(true);
+  expect(r.session.protectedSources).toEqual(b.protectedSources.map(p=>({...p,sourceFrom:p.sourceFrom+3,sourceTo:p.sourceTo+3})));
+ }
+});
+it('baseline definition fact cannot authorize forged steps or crossing its prefix',()=>{
+ const raw='>\n> [r]: /u\n',b=open(raw),snapshot=JSON.stringify(b),state=EditorState.create({doc:b.doc});class Fake extends ReplaceStep {}
+ const spy=vi.spyOn(markdown,'serializeSourceRootMarkdown');
+ try{
+  const fake=state.tr.step(new Fake(2,2,new Slice(Fragment.from(b.doc.type.schema.text('Z')),0,0)));
+  const widened=state.tr.insertText('Z',2);Object.assign(widened.steps[0]!,{from:1,to:2});
+  for(const tr of [fake,widened]){expect(applySourceBlockTransaction(b,tr).ok).toBe(false);expect(JSON.stringify(b)).toBe(snapshot)}
+  expect(spy).not.toHaveBeenCalled();
+ }finally{spy.mockRestore()}
+});

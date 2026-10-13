@@ -691,6 +691,15 @@ for(const name of ['list','blockquote','footnote_def'])wrapCaptureRule(md.block.
    const at=rawPoint(collector.trace,read.body)
    if(at!==undefined)place={kind:'prepend',at,eol:actualEol(collector,read.e),continuation:read.prefix}
   }
+  // A marker-only list line has no owned blank because its required padding
+  // is generated. Its actual EOL and continuation still certify the separator.
+  if(name==='list'&&place?.kind==='inline'&&place.before&&read.prefix){
+   const eol=actualEol(collector,read.e)
+   if(eol&&place.range.to===eol.from&&collector.protectedSources.some(p=>p.sourceFrom===eol.to)){
+    const prefix=read.prefix.map(p=>'spaces' in p?' '.repeat(p.spaces):collector.source.slice(p.from,p.to)).join('')
+    place={...place,after:collector.source.slice(eol.from,eol.to)+prefix}
+   }
+  }
   if(place)containerEnds.set(last,{collector,place,kind:name==='list'?'list_item':name==='blockquote'?'blockquote':'footnote_definition'})
   const children:{from:number;to:number;index:number}[]=[]
   for(let i=index+1;i<close;i++){
@@ -720,6 +729,17 @@ for(const name of ['list','blockquote','footnote_def'])wrapCaptureRule(md.block.
    // First between-body blank is the separator; empty-only baseline is
    // emitted by the schema and already certified at the actual close token.
    if(touchesDefinition){
+    // The schema-filled baseline is also a real empty body. Keep the
+    // definition separator proved by this owned blank on that same fact.
+    if(!children.length&&blank.line===read.line&&place?.kind==='inline'
+     &&place.range.from===blank.range.from&&place.range.to===blank.range.to){
+     const baseline:EmptyPlace={kind:'nested-blank',range:blank.range,
+      prefix:name!=='blockquote'&&read.prefix?read.prefix:blank.prefix,
+      ...(blank.eol?{eol:blank.eol}:{}),leftBody:definitionLeft,rightBody:definitionRight,leftSeparator:true}
+     const pending=nestedBlanks.get(last)
+     if(pending)nestedBlanks.set(last,pending.map(item=>item.place===place?{...item,place:baseline}:item))
+     else containerEnds.set(last,{collector,place:baseline,kind:name==='list'?'list_item':name==='blockquote'?'blockquote':'footnote_definition'})
+    }
     const begin=blank.prefix[0]
     const definition=definitionRight&&!definitionLeft?collector.protectedSources.find(p=>p.sourceFrom===end):definitionLeft&&!definitionRight&&begin&&'from' in begin?collector.protectedSources.find(p=>p.sourceTo===begin.from):undefined
     const side=definitionRight?'left':'right',child=definitionRight?left:right,target=child&&state.tokens[child.index+1]
