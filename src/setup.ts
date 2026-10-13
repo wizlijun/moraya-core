@@ -25,6 +25,7 @@ import {
   PluginKey,
   Selection,
   TextSelection,
+  type Transaction,
 } from 'prosemirror-state'
 import { Decoration, DecorationSet, EditorView } from 'prosemirror-view'
 import { keymap } from 'prosemirror-keymap'
@@ -725,6 +726,12 @@ export interface CreateEditorOptions extends EditorPluginOptions {
   docCache?: DocCache
   onFocus?: () => void
   onBlur?: () => void
+  /** Customize the schema before plugins, state, or NodeViews are created. */
+  configureSchema?: (base: Schema) => Schema
+  /** Supply the first state; skips initialContent parsing entirely. */
+  createState?: (schema: Schema, plugins: readonly Plugin[]) => EditorState
+  /** Own transaction admission and installation; defaults to PM dispatch. */
+  dispatchTransaction?: (view: EditorView, tr: Transaction) => void
 }
 
 export interface MorayaEditorInstance {
@@ -892,7 +899,8 @@ export async function createEditor(opts: CreateEditorOptions): Promise<MorayaEdi
     ...(opts.linkOpener ? { linkOpener: opts.linkOpener } : {}),
     ...(opts.spreadsheetViewFactory ? { spreadsheetViewFactory: opts.spreadsheetViewFactory } : {}),
   }
-  const schema = createSchema(schemaConfig)
+  const baseSchema = createSchema(schemaConfig)
+  const schema = opts.configureSchema ? opts.configureSchema(baseSchema) : baseSchema
   const docCache = opts.docCache ?? createDocCache(10)
   void docCache // exposed for caller; not auto-applied at v0.1.0
 
@@ -1009,14 +1017,26 @@ export async function createEditor(opts: CreateEditorOptions): Promise<MorayaEdi
     }
   }
 
-  const initialDoc = opts.initialContent
-    ? parseMarkdown(opts.initialContent, schema)
-    : schema.topNodeType.createAndFill()!
-
-  const state = EditorState.create({ schema, doc: initialDoc, plugins })
+  const state = opts.createState
+    ? opts.createState(schema, plugins)
+    : EditorState.create({
+      schema,
+      doc: opts.initialContent
+        ? parseMarkdown(opts.initialContent, schema)
+        : schema.topNodeType.createAndFill()!,
+      plugins,
+    })
+  if (state.schema !== schema) {
+    throw new TypeError('@moraya/core: createState() must use the configured schema')
+  }
   const view = new EditorView(opts.container, {
     state,
     nodeViews,
+    ...(opts.dispatchTransaction ? {
+      dispatchTransaction(this: EditorView, tr: Transaction) {
+        opts.dispatchTransaction!(this, tr)
+      },
+    } : {}),
     attributes: {
       class: 'moraya-editor',
       spellcheck: 'true',

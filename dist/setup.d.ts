@@ -1,4 +1,4 @@
-import { Plugin } from 'prosemirror-state';
+import { Plugin, EditorState, Transaction } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
 import { InputRule } from 'prosemirror-inputrules';
 import { Schema } from 'prosemirror-model';
@@ -87,6 +87,12 @@ interface CreateEditorOptions extends EditorPluginOptions {
     docCache?: DocCache;
     onFocus?: () => void;
     onBlur?: () => void;
+    /** Customize the schema before plugins, state, or NodeViews are created. */
+    configureSchema?: (base: Schema) => Schema;
+    /** Supply the first state; skips initialContent parsing entirely. */
+    createState?: (schema: Schema, plugins: readonly Plugin[]) => EditorState;
+    /** Own transaction admission and installation; defaults to PM dispatch. */
+    dispatchTransaction?: (view: EditorView, tr: Transaction) => void;
 }
 interface MorayaEditorInstance {
     view: EditorView;

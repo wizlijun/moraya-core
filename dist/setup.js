@@ -7527,7 +7527,8 @@ async function createEditor(opts) {
     ...opts.linkOpener ? { linkOpener: opts.linkOpener } : {},
     ...opts.spreadsheetViewFactory ? { spreadsheetViewFactory: opts.spreadsheetViewFactory } : {}
   };
-  const schema = createSchema(schemaConfig);
+  const baseSchema = createSchema(schemaConfig);
+  const schema = opts.configureSchema ? opts.configureSchema(baseSchema) : baseSchema;
   const docCache = opts.docCache ?? createDocCache(10);
   void docCache;
   const plugins = await createEditorPlugins(opts, schema);
@@ -7624,11 +7625,22 @@ async function createEditor(opts) {
       };
     };
   }
-  const initialDoc = opts.initialContent ? parseMarkdown(opts.initialContent, schema) : schema.topNodeType.createAndFill();
-  const state = EditorState.create({ schema, doc: initialDoc, plugins });
+  const state = opts.createState ? opts.createState(schema, plugins) : EditorState.create({
+    schema,
+    doc: opts.initialContent ? parseMarkdown(opts.initialContent, schema) : schema.topNodeType.createAndFill(),
+    plugins
+  });
+  if (state.schema !== schema) {
+    throw new TypeError("@moraya/core: createState() must use the configured schema");
+  }
   const view = new EditorView(opts.container, {
     state,
     nodeViews,
+    ...opts.dispatchTransaction ? {
+      dispatchTransaction(tr) {
+        opts.dispatchTransaction(this, tr);
+      }
+    } : {},
     attributes: {
       class: "moraya-editor",
       spellcheck: "true"
