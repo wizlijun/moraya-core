@@ -619,10 +619,17 @@ md.inline.ruler.push('source_capture_fallback', (state, silent) => {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function captureJoin(tokens: any[], collector: Capture, special: boolean) {
   let runs: SourceRun[] = []
-  for (const token of tokens) {
-    if (token.type !== 'text' && !(special && token.type === 'text_special')) { runs = []; continue }
-    runs = runs.concat(token.content ? tokenSources.get(token)?.runs ?? [{ text: token.content }] : [])
-    tokenSources.set(token, { collector, runs })
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]
+    if (token.type !== 'text' && !(special && token.type === 'text_special')) continue
+    if (token.content) for (const run of tokenSources.get(token)?.runs ?? [{ text: token.content }]) runs.push(run)
+    const next = tokens[i + 1]
+    if (!next || (next.type !== 'text' && !(special && next.type === 'text_special'))) {
+      // Only the last token survives the installed join rule. Earlier tokens
+      // must not retain successively copied prefixes (or share a growing array).
+      tokenSources.set(token, { collector, runs })
+      runs = []
+    }
   }
 }
 wrapCaptureRule(md.inline.ruler2, 'fragments_join', (original, state) => {
@@ -638,20 +645,39 @@ wrapCaptureRule(md.core.ruler, 'text_join', (original, state) => {
   return original(state)
 })
 
+// Installed MarkdownParseState appends content, except addText may replace
+// the last text node with a merged immutable node. Closed frames are popped;
+// their completed node is appended to the parent. Account for each new child
+// once and re-read only the mutable tail, never the completed prefix.
+const frameSizes = new WeakMap<object, { content: PmNode[]; length: number; size: number; tailSize: number }>()
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function captureCursor(state: any): number {
+  if (!Array.isArray(state.stack) || !state.stack.length) throw new UnsupportedSourceCapture()
+  let pos = state.stack.length - 1
+  for (const frame of state.stack) {
+    if (!Array.isArray(frame.content) || !Array.isArray(frame.marks)) throw new UnsupportedSourceCapture()
+    const content: PmNode[] = frame.content
+    const previous = frameSizes.get(frame)
+    if (previous && (previous.content !== content || content.length < previous.length)) throw new UnsupportedSourceCapture()
+    let size = previous ? previous.size - previous.tailSize : 0
+    let tailSize = 0
+    for (let i = previous ? Math.max(0, previous.length - 1) : 0; i < content.length; i++) {
+      tailSize = content[i]!.nodeSize
+      size += tailSize
+    }
+    frameSizes.set(frame, { content, length: content.length, size, tailSize })
+    pos += size
+  }
+  return pos
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function captureText(state: any, token: any, delegate: () => void) {
   const provenance = tokenSources.get(token)
   if (!provenance) { delegate(); return }
   const { collector, runs } = provenance
-  if (!Array.isArray(state.stack) || !state.stack.length
-    || state.stack.some((frame: any) => !Array.isArray(frame.content) || !Array.isArray(frame.marks))) {
-    throw new UnsupportedSourceCapture()
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const cursor = () => state.stack.reduce((n: number, frame: any) =>
-    n + frame.content.reduce((sum: number, node: PmNode) => sum + node.nodeSize, 0), state.stack.length - 1)
   if (runs.map(run => run.text).join('') !== token.content) throw new UnsupportedSourceCapture()
-  let pos = cursor()
+  let pos = captureCursor(state)
   const supported = state.stack[state.stack.length - 1].marks.every((mark: Mark) => ['em', 'strong', 'link'].includes(mark.type.name))
   for (const run of runs) {
     const a = pos
@@ -671,7 +697,7 @@ function captureText(state: any, token: any, delegate: () => void) {
       pmFrom: a, pmTo: pos, kind: 'atomic' })
   }
   delegate()
-  if (cursor() !== pos) throw new UnsupportedSourceCapture()
+  if (captureCursor(state) !== pos) throw new UnsupportedSourceCapture()
 }
 
 // Patch md.parse to inject paired-tag pre-processing and blank-line preservation
@@ -1687,17 +1713,36 @@ export function parseDocumentWithSourceCapture(source: string, schema?: Schema):
     })
     const collector: Capture = { trace, runs: [] }
     const doc = getParserFor(schema).parse(work, { [captureKey]: collector })
-    let pmEnd = 0, sourceEnd = 0
+    // Build one independent PM index. Only actual top-level paragraph text
+    // children qualify; atoms leave gaps, and paragraph identity is retained.
+    const text: { node: PmNode; paragraph: PmNode; from: number; to: number }[] = []
+    doc.forEach((paragraph, offset) => {
+      if (paragraph.type.name !== 'paragraph') return
+      paragraph.forEach((node, inner) => {
+        if (node.isText) text.push({ node, paragraph, from: offset + 1 + inner, to: offset + 1 + inner + node.nodeSize })
+      })
+    })
+    let pmEnd = 0, sourceEnd = 0, textIndex = 0
     for (const run of collector.runs) {
       if (run.pmFrom < pmEnd || run.pmTo <= run.pmFrom || run.pmTo > doc.content.size
-        || run.sourceFrom < sourceEnd || run.sourceTo <= run.sourceFrom || run.sourceTo > source.length) {
+        || run.sourceFrom < sourceEnd || run.sourceTo <= run.sourceFrom || run.sourceTo > source.length
+        || (run.kind === 'linear' && run.sourceTo - run.sourceFrom !== run.pmTo - run.pmFrom)) {
         throw new UnsupportedSourceCapture()
       }
-      const from = doc.resolve(run.pmFrom), to = doc.resolve(run.pmTo)
-      if (from.depth !== 1 || from.parent.type.name !== 'paragraph' || !from.sameParent(to)
-        || doc.textBetween(run.pmFrom, run.pmTo).length !== run.pmTo - run.pmFrom
-        || (run.kind === 'linear' && source.slice(run.sourceFrom, run.sourceTo) !== doc.textBetween(run.pmFrom, run.pmTo))) {
-        throw new UnsupportedSourceCapture()
+      while (textIndex < text.length && text[textIndex]!.to <= run.pmFrom) textIndex++
+      const paragraph = text[textIndex]?.paragraph
+      let pos = run.pmFrom
+      while (pos < run.pmTo) {
+        const part = text[textIndex]
+        if (!part || part.paragraph !== paragraph || part.from > pos || part.to <= pos
+          || part.node.marks.some(mark => !['em', 'strong', 'link'].includes(mark.type.name))) {
+          throw new UnsupportedSourceCapture()
+        }
+        const end = Math.min(part.to, run.pmTo)
+        if (run.kind === 'linear' && source.slice(run.sourceFrom + pos - run.pmFrom, run.sourceFrom + end - run.pmFrom)
+          !== part.node.text!.slice(pos - part.from, end - part.from)) throw new UnsupportedSourceCapture()
+        pos = end
+        if (pos === part.to) textIndex++
       }
       pmEnd = run.pmTo
       sourceEnd = run.sourceTo

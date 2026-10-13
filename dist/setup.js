@@ -2497,9 +2497,20 @@ function projectLineEndings(source) {
 }
 
 // src/source-trace.ts
-function sliceTrace(t, from, to) {
+function firstPiece(t, from) {
+  let lo = 0, hi = t.pieces.length;
+  while (lo < hi) {
+    const mid = lo + hi >>> 1;
+    if (t.pieces[mid].to <= from) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+function slicePieces(t, from, to, start) {
   const pieces = [];
-  for (const p of t.pieces) {
+  for (let i = start; i < t.pieces.length; i++) {
+    const p = t.pieces[i];
+    if (p.from >= to) break;
     const a = Math.max(from, p.from), b = Math.min(to, p.to);
     if (a >= b) continue;
     const whole = a === p.from && b === p.to;
@@ -2511,22 +2522,31 @@ function sliceTrace(t, from, to) {
       kind: p.kind === "atomic" && !whole ? "generated" : p.kind
     });
   }
-  return { text: t.text.slice(from, to), pieces };
+  return pieces;
+}
+function sliceTrace(t, from, to) {
+  return { text: t.text.slice(from, to), pieces: slicePieces(t, from, to, firstPiece(t, from)) };
 }
 function editTrace(t, edits) {
-  let at = 0, text2 = "";
-  const pieces = [];
+  let at = 0, length = 0, pieceIndex = 0, anchorIndex = 0;
+  const chunks = [], pieces = [];
+  const slice = (from, to) => {
+    while (pieceIndex < t.pieces.length && t.pieces[pieceIndex].to <= from) pieceIndex++;
+    return { text: t.text.slice(from, to), pieces: slicePieces(t, from, to, pieceIndex) };
+  };
   const append = (part) => {
-    const shift = text2.length;
-    text2 += part.text;
-    pieces.push(...part.pieces.map((p) => ({ ...p, from: p.from + shift, to: p.to + shift })));
+    for (const p of part.pieces) pieces.push({ ...p, from: p.from + length, to: p.to + length });
+    chunks.push(part.text);
+    length += part.text.length;
   };
   for (const e of edits) {
     if (e.from < at || e.to < e.from || e.to > t.text.length) throw new RangeError("trace edit");
-    append(sliceTrace(t, at, e.from));
+    append(slice(at, e.from));
     if (e.text) {
-      const old = sliceTrace(t, e.from, e.to).pieces;
-      const anchor = t.pieces.find((p) => p.from <= e.from && p.to >= e.from);
+      const old = slice(e.from, e.to).pieces;
+      while (anchorIndex < t.pieces.length && t.pieces[anchorIndex].to < e.from) anchorIndex++;
+      const candidate = t.pieces[anchorIndex];
+      const anchor = candidate && candidate.from <= e.from ? candidate : void 0;
       const raw = anchor ? anchor.kind === "copy" ? anchor.sourceFrom + e.from - anchor.from : anchor.sourceFrom : 0;
       const contiguous = old.length > 0 && old.every((p, i) => p.kind !== "generated" && (!i || old[i - 1].sourceTo === p.sourceFrom));
       append({ text: e.text, pieces: [{
@@ -2539,8 +2559,8 @@ function editTrace(t, edits) {
     }
     at = e.to;
   }
-  append(sliceTrace(t, at, t.text.length));
-  return { text: text2, pieces };
+  append(slice(at, t.text.length));
+  return { text: chunks.join(""), pieces };
 }
 
 // src/markdown.ts
@@ -2996,13 +3016,15 @@ md.inline.ruler.push("source_capture_fallback", (state, silent) => {
 });
 function captureJoin(tokens, collector, special) {
   let runs = [];
-  for (const token of tokens) {
-    if (token.type !== "text" && !(special && token.type === "text_special")) {
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.type !== "text" && !(special && token.type === "text_special")) continue;
+    if (token.content) for (const run of tokenSources.get(token)?.runs ?? [{ text: token.content }]) runs.push(run);
+    const next = tokens[i + 1];
+    if (!next || next.type !== "text" && !(special && next.type === "text_special")) {
+      tokenSources.set(token, { collector, runs });
       runs = [];
-      continue;
     }
-    runs = runs.concat(token.content ? tokenSources.get(token)?.runs ?? [{ text: token.content }] : []);
-    tokenSources.set(token, { collector, runs });
   }
 }
 wrapCaptureRule(md.inline.ruler2, "fragments_join", (original, state) => {
@@ -3017,6 +3039,26 @@ wrapCaptureRule(md.core.ruler, "text_join", (original, state) => {
   }
   return original(state);
 });
+var frameSizes = /* @__PURE__ */ new WeakMap();
+function captureCursor(state) {
+  if (!Array.isArray(state.stack) || !state.stack.length) throw new UnsupportedSourceCapture();
+  let pos = state.stack.length - 1;
+  for (const frame of state.stack) {
+    if (!Array.isArray(frame.content) || !Array.isArray(frame.marks)) throw new UnsupportedSourceCapture();
+    const content = frame.content;
+    const previous = frameSizes.get(frame);
+    if (previous && (previous.content !== content || content.length < previous.length)) throw new UnsupportedSourceCapture();
+    let size = previous ? previous.size - previous.tailSize : 0;
+    let tailSize = 0;
+    for (let i = previous ? Math.max(0, previous.length - 1) : 0; i < content.length; i++) {
+      tailSize = content[i].nodeSize;
+      size += tailSize;
+    }
+    frameSizes.set(frame, { content, length: content.length, size, tailSize });
+    pos += size;
+  }
+  return pos;
+}
 function captureText(state, token, delegate) {
   const provenance = tokenSources.get(token);
   if (!provenance) {
@@ -3024,12 +3066,8 @@ function captureText(state, token, delegate) {
     return;
   }
   const { collector, runs } = provenance;
-  if (!Array.isArray(state.stack) || !state.stack.length || state.stack.some((frame) => !Array.isArray(frame.content) || !Array.isArray(frame.marks))) {
-    throw new UnsupportedSourceCapture();
-  }
-  const cursor = () => state.stack.reduce((n, frame) => n + frame.content.reduce((sum, node) => sum + node.nodeSize, 0), state.stack.length - 1);
   if (runs.map((run) => run.text).join("") !== token.content) throw new UnsupportedSourceCapture();
-  let pos = cursor();
+  let pos = captureCursor(state);
   const supported = state.stack[state.stack.length - 1].marks.every((mark) => ["em", "strong", "link"].includes(mark.type.name));
   for (const run of runs) {
     const a = pos;
@@ -3057,7 +3095,7 @@ function captureText(state, token, delegate) {
     });
   }
   delegate();
-  if (cursor() !== pos) throw new UnsupportedSourceCapture();
+  if (captureCursor(state) !== pos) throw new UnsupportedSourceCapture();
 }
 var _origMdParse = md.parse.bind(md);
 md.parse = function(src, env) {

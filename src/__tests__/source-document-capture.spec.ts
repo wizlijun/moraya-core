@@ -1,5 +1,7 @@
 import { expect, it, vi } from 'vitest'
-import { Schema } from 'prosemirror-model'
+import { Node as PmNode, Schema } from 'prosemirror-model'
+import { EditorState } from 'prosemirror-state'
+import { createSourceSession, applySourceTextTransaction } from '../source-fidelity'
 import { defaultSchema } from '../schema'
 import { parseMarkdown, parseDocumentWithSourceCapture, parseParagraphWithSourceCapture } from '../markdown'
 
@@ -19,6 +21,63 @@ function captured(source: string) {
   }
   return r.value
 }
+
+it('bounds PM traversal growth across many paragraphs and merged text', () => {
+  const counts: number[] = []
+  const original = Object.getOwnPropertyDescriptor(PmNode.prototype, 'nodeSize')!.get!
+  for (const size of [80, 160]) {
+    let reads = 0
+    const spy = vi.spyOn(PmNode.prototype, 'nodeSize', 'get').mockImplementation(function (this: PmNode) {
+      reads++
+      return original.call(this)
+    })
+    try {
+      const result = parseDocumentWithSourceCapture(Array(size).fill('甲 &amp; \\* _乙_ 末句').join('\n\n'))
+      expect(result.ok).toBe(true)
+      if (result.ok) expect(result.value.textRuns.length).toBeGreaterThan(size * 3)
+    } finally { spy.mockRestore() }
+    counts.push(reads)
+  }
+  expect(counts[1]).toBeLessThan(counts[0]! * 2.6)
+})
+
+it('retains sequential math/quote/NUL transformations and edits after containers', () => {
+  const unit = '> 引用\r\n\r\n首段\r\n$$\r\nx\r\n$$\r\n[甲](url “标题”) [乙](url ‘标题’)\0 \\* &amp; 目标甲。'
+  const source = Array(60).fill(unit).join('\r\n\r\n')
+  const opened = createSourceSession(source)
+  expect(opened.ok).toBe(true)
+  if (!opened.ok) throw new Error(opened.reason)
+  expect(opened.session.doc.eq(parseMarkdown(source))).toBe(true)
+  const raw = source.lastIndexOf('目标甲') + 2
+  const span = opened.session.textSpans.find(s => s.sourceFrom <= raw && s.sourceTo > raw)!
+  expect(span?.kind).toBe('linear')
+  const pos = span.pmFrom + raw - span.sourceFrom
+  const tr = EditorState.create({ doc: opened.session.doc }).tr.insertText('乙', pos, pos + 1)
+  const result = applySourceTextTransaction(opened.session, tr)
+  expect(result.ok).toBe(true)
+  if (!result.ok) throw new Error(result.reason)
+  expect(result.session.source).toBe(source.slice(0, raw) + '乙' + source.slice(raw + 1))
+  expect(result.session.doc.eq(tr.doc)).toBe(true)
+  expect(result.session.doc.eq(parseMarkdown(result.session.source))).toBe(true)
+  const reopened = createSourceSession(result.session.source)
+  expect(reopened.ok && reopened.session.textSpans).toEqual(result.session.textSpans)
+})
+
+it('joins long adjacent text-special runs once while preserving all surviving provenance', () => {
+  const source = '甲 &amp; \\* '.repeat(160) + '_乙_ 末句'
+  const result = captured(source)
+  expect(result.textRuns.filter(run => run.kind === 'atomic')).toHaveLength(320)
+  expect(result.textRuns[0]?.sourceFrom).toBe(0)
+  expect(result.textRuns.at(-1)?.sourceTo).toBe(source.length)
+  const opened = createSourceSession(source)
+  if (!opened.ok) throw new Error(opened.reason)
+  const raw = source.lastIndexOf('甲')
+  const span = opened.session.textSpans.find(s => s.sourceFrom <= raw && s.sourceTo > raw)!
+  const pos = span.pmFrom + raw - span.sourceFrom
+  const resultEdit = applySourceTextTransaction(opened.session,
+    EditorState.create({ doc: opened.session.doc }).tr.insertText('丙', pos, pos + 1))
+  expect(resultEdit.ok && resultEdit.session.source).toBe(source.slice(0, raw) + '丙' + source.slice(raw + 1))
+})
 it.each([
   '\uFEFF甲。\r\n\r\n乙 &amp; \\* 😀甲。\r末句。',
   '首段。\n$$\nx^2\n$$\n目标甲。',
