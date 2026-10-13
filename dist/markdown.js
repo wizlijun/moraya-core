@@ -1677,7 +1677,8 @@ md.inline.ruler.push("caret_highlight", (state, silent) => {
   }
   if (closeIdx < 0 || closeIdx === contentStart) return false;
   if (!silent) {
-    state.push("caret_highlight_open", "mark", 1).markup = "^^";
+    const opened = state.push("caret_highlight_open", "mark", 1);
+    opened.markup = "^^";
     const oldPos = state.pos;
     const oldMax = state.posMax;
     state.pos = contentStart;
@@ -1685,7 +1686,10 @@ md.inline.ruler.push("caret_highlight", (state, silent) => {
     state.md.inline.tokenize(state);
     state.pos = oldPos;
     state.posMax = oldMax;
-    state.push("caret_highlight_close", "mark", -1).markup = "^^";
+    const closed = state.push("caret_highlight_close", "mark", -1);
+    closed.markup = "^^";
+    const trace = inlineStateOwners.get(state);
+    if (trace) registerEdge(opened, closed, trace, start, contentStart, closeIdx, closeIdx + 2);
   }
   state.pos = closeIdx + 2;
   return true;
@@ -1702,6 +1706,8 @@ md.inline.ruler.push("critic_annotation", (state, silent) => {
     if (!silent) {
       const tok = state.push("critic_note", "", 0);
       tok.meta = { note: note2 };
+      const trace = inlineStateOwners.get(state);
+      if (trace) registerCritic(tok, trace, start, start + 3, close, close + 3);
     }
     state.pos = close + 3;
     return true;
@@ -1726,7 +1732,12 @@ md.inline.ruler.push("critic_annotation", (state, silent) => {
     state.md.inline.tokenize(state);
     state.pos = oldPos;
     state.posMax = oldMax;
-    state.push("critic_anno_close", "span", -1);
+    const close = state.push("critic_anno_close", "span", -1);
+    const trace = inlineStateOwners.get(state);
+    if (trace) {
+      registerEdge(open, close, trace, start, start + 3, hlClose, noteClose + 3);
+      registerCritic(close, trace, start, noteStart, noteClose, noteClose + 3, hlClose);
+    }
   }
   state.pos = noteClose + 3;
   return true;
@@ -1752,6 +1763,11 @@ function tagPairedHtmlInline(tokens) {
             const opener = children[entry.index];
             if (opener) {
               opener.meta = { ...opener.meta || {}, htmlPaired: true };
+              const open = htmlTokenRanges.get(opener), close = htmlTokenRanges.get(child);
+              if (open && close) {
+                edgeTokens.set(opener, { open, close, side: "open" });
+                edgeTokens.set(child, { open, close, side: "close" });
+              }
             }
             child.meta = { ...child.meta || {}, htmlPaired: true };
             stack.splice(j, 1);
@@ -1881,11 +1897,24 @@ var inlineCloseStates = /* @__PURE__ */ new WeakSet();
 var inlineFacts = /* @__PURE__ */ new WeakMap();
 var literalFacts = /* @__PURE__ */ new WeakMap();
 var capturedTextParents = ["paragraph", "heading", "code_block", "frontmatter", "html_block"];
-var capturedTextMarks = ["em", "strong", "link", "annotation", "html_mark", "highlight", "strike_through"];
+var capturedTextMarks = ["em", "strong", "link", "annotation", "html_mark", "highlight", "strike_through", "code"];
 var tokenArrays = /* @__PURE__ */ new WeakMap();
 var inlineStateOwners = /* @__PURE__ */ new WeakMap();
 var tokenSources = /* @__PURE__ */ new WeakMap();
 var pendingSources = /* @__PURE__ */ new WeakMap();
+var criticTokens = /* @__PURE__ */ new WeakMap();
+function registerCritic(token, trace, start, noteStart, noteEnd, end, middleStart) {
+  const syntax = rawRange(trace, start, end), note = rawRange(trace, noteStart, noteEnd), close = rawRange(trace, noteEnd, end);
+  const open = middleStart === void 0 ? void 0 : rawRange(trace, start, start + 3), middle = middleStart === void 0 ? void 0 : rawRange(trace, middleStart, noteStart);
+  const noteFrom = note?.from ?? rawPoint(trace, noteStart), noteTo = note?.to ?? rawPoint(trace, noteEnd);
+  if (syntax && close && noteFrom !== void 0 && noteTo !== void 0 && (middleStart === void 0 || open && middle)) criticTokens.set(token, { kind: middleStart === void 0 ? "note_anchor" : "annotation", syntaxFrom: syntax.from, syntaxTo: syntax.to, noteFrom, noteTo, close, ...open && middle ? { open, middle } : {} });
+}
+var atomTokenRanges = /* @__PURE__ */ new WeakMap();
+var htmlTokenRanges = /* @__PURE__ */ new WeakMap();
+var edgeTokens = /* @__PURE__ */ new WeakMap();
+var fenceTokens = /* @__PURE__ */ new WeakMap();
+var currentInlineCollector = /* @__PURE__ */ new WeakMap();
+var activeEdges = /* @__PURE__ */ new WeakMap();
 var capturedFenceClosed = /* @__PURE__ */ new WeakMap();
 var capturedRootFencesClosed = /* @__PURE__ */ new WeakMap();
 var capturedListLayouts = /* @__PURE__ */ new WeakMap();
@@ -1897,6 +1926,10 @@ function capturedSourceLists(source, doc2, roots, layout) {
 function capturedInlineBodies(source, doc2, roots, layout) {
   const bound = capturedListLayouts.get(layout);
   return bound && bound.source === source && bound.doc === doc2 && bound.roots === roots && bound.lists === layout.lists ? bound.bodies : void 0;
+}
+function capturedInlineRecipeFacts(base) {
+  const bound = capturedListLayouts.get(base.layout);
+  return bound && bound.source === base.source && bound.doc === base.doc && bound.roots === base.roots && bound.lists === base.layout.lists ? bound.recipe : void 0;
 }
 function capturedEmptyBodies(source, doc2, roots, layout) {
   const bound = capturedListLayouts.get(layout);
@@ -1947,6 +1980,7 @@ function wrapCaptureRule(ruler, name, wrapper, preserveAlternates = false) {
   }, { alt });
 }
 var collectorFor = (state) => state.env?.[captureKey];
+var separatorTokens = /* @__PURE__ */ new WeakMap();
 var nestedBlanks = /* @__PURE__ */ new WeakMap();
 var containerFrames = /* @__PURE__ */ new WeakMap();
 var containerEnds = /* @__PURE__ */ new WeakMap();
@@ -2141,11 +2175,23 @@ for (const name of ["list", "blockquote", "footnote_def"]) wrapCaptureRule(md.bl
       const touchesDefinition = firstInRun && (definitionLeft || definitionRight);
       const left = children.filter((child) => child.to <= blank.line).at(-1), right = children.find((child) => child.from > blank.line);
       if (touchesDefinition) {
+        const begin2 = blank.prefix[0];
+        const definition = definitionRight && !definitionLeft ? collector.protectedSources.find((p) => p.sourceFrom === end) : definitionLeft && !definitionRight && begin2 && "from" in begin2 ? collector.protectedSources.find((p) => p.sourceTo === begin2.from) : void 0;
+        const side = definitionRight ? "left" : "right", child = definitionRight ? left : right, target2 = child && state.tokens[child.index + 1];
+        if (definition && target2?.type === "inline" && blank.prefix.length === 1 && begin2 && "from" in begin2 && begin2.to === blank.range.from && blank.eol?.from === blank.range.to) {
+          const range = { from: begin2.from, to: blank.eol.to };
+          separatorTokens.set(target2, [...separatorTokens.get(target2) ?? [], { range, side, definition }]);
+        }
         priorRight = right?.index;
         continue;
       }
       if (name === "list" && place?.kind === "prepend" && !left && blank === blanks[0]) continue;
       if (left && right && priorRight !== right.index) {
+        const leftInline = state.tokens[left.index + 1], rightInline = state.tokens[right.index + 1], begin2 = blank.prefix[0];
+        if (leftInline?.type === "inline" && rightInline?.type === "inline" && blank.prefix.length === 1 && begin2 && "from" in begin2 && begin2.to === blank.range.from && blank.eol?.from === blank.range.to) {
+          const range = { from: begin2.from, to: blank.eol.to };
+          for (const [target2, side] of [[leftInline, "left"], [rightInline, "right"]]) separatorTokens.set(target2, [...separatorTokens.get(target2) ?? [], { range, side }]);
+        }
         priorRight = right.index;
         continue;
       }
@@ -2185,7 +2231,7 @@ wrapCaptureRule(md.block.ruler, "fence", (original, state, startLine, endLine, s
   const originalGetLines = state.getLines, descriptor = Object.getOwnPropertyDescriptor(state, "getLines");
   if (typeof originalGetLines !== "function" || descriptor?.configurable === false) throw new UnsupportedSourceCapture();
   const tokenStart = state.tokens.length;
-  let contentEnd, bodyTrace, empty;
+  let contentEnd, bodyTrace, empty, bodyUnstripped = false;
   Object.defineProperty(state, "getLines", {
     configurable: true,
     writable: true,
@@ -2199,6 +2245,7 @@ wrapCaptureRule(md.block.ruler, "fence", (original, state, startLine, endLine, s
       }) };
       const value = originalGetLines.call(this, begin, end, indent, keepLastLF);
       bodyTrace = traceConsumedLines(collectorFor(state).trace, read, value);
+      bodyUnstripped = !!bodyTrace && bodyTrace.pieces.length > 0 && bodyTrace.pieces[0].sourceFrom === rawPoint(collectorFor(state).trace, state.bMarks[begin]) && bodyTrace.pieces.every((p, i) => p.kind !== "generated" && (!i || bodyTrace.pieces[i - 1].sourceTo === p.sourceFrom));
       empty = emptyLiteral(state, startLine, end, indent, value);
       return value;
     }
@@ -2214,6 +2261,16 @@ wrapCaptureRule(md.block.ruler, "fence", (original, state, startLine, endLine, s
     const tokens = state.tokens.slice(tokenStart), token = tokens[0];
     if (tokens.length !== 1 || token?.type !== "fence" || contentEnd === void 0 || token.map?.[0] !== startLine || token.map?.[1] !== state.line || state.line !== contentEnd && state.line !== contentEnd + 1) throw new UnsupportedSourceCapture();
     capturedFenceClosed.set(token, state.line === contentEnd + 1);
+    if (state.line === contentEnd + 1) {
+      const collector = collectorFor(state), a = state.bMarks[startLine] + state.tShift[startLine], b = state.bMarks[contentEnd] + state.tShift[contentEnd];
+      const character = token.markup[0];
+      let end = b;
+      while (state.src[end] === character) end++;
+      const open = rawRange(collector.trace, a, a + token.markup.length), close = rawRange(collector.trace, b, end);
+      const whole = rawRange(collector.trace, collector.lineStarts[startLine], collector.lineStarts[state.line]), eol = actualEol(collector, state.eMarks[startLine]);
+      if (open && close && whole && eol && close.to - close.from >= token.markup.length)
+        fenceTokens.set(token, { sourceFrom: whole.from, sourceTo: whole.to, open, close, character, openLength: token.markup.length, closeLength: close.to - close.from, eol: collector.source.slice(eol.from, eol.to), contiguousTopLevel: token.level === 0 && bodyUnstripped });
+    }
     if (bodyTrace) literalFacts.set(token, { collector: collectorFor(state), trace: bodyTrace, kind: token.type, ...state.line === contentEnd + 1 && empty ? { empty } : {} });
   } else if (contentEnd !== void 0) throw new UnsupportedSourceCapture();
   return result;
@@ -2463,6 +2520,7 @@ wrapCaptureRule(md.inline.ruler, "newline", (original, state, silent) => {
   while (end > 0 && state.pending[end - 1] === " ") end--;
   const expected = state.pending.slice(0, end);
   let trim = state.pending.length - end;
+  const syntaxFrom = state.pos - trim, syntaxTo = state.pos + 1;
   const runs = pendingSources.get(state);
   while (trim > 0 && runs.length) {
     const run = runs.pop();
@@ -2478,6 +2536,11 @@ wrapCaptureRule(md.inline.ruler, "newline", (original, state, silent) => {
   const start = state.tokens.length;
   const result = original(state, silent);
   if (!result || state.pending !== "" || expected && (state.tokens[start]?.type !== "text" || state.tokens[start].content !== expected)) throw new UnsupportedSourceCapture();
+  const token = state.tokens.at(-1), owner = inlineStateOwners.get(state);
+  if (token?.type === "hardbreak" || token?.type === "softbreak") {
+    const raw = rawRange(owner, syntaxFrom, syntaxTo);
+    if (raw) atomTokenRanges.set(token, raw);
+  }
   return result;
 });
 wrapCaptureRule(md.inline.ruler, "backticks", (original, state, silent) => {
@@ -2498,6 +2561,22 @@ wrapCaptureRule(md.inline.ruler, "backticks", (original, state, silent) => {
     }
     pendingSources.get(state).push({ text: marker, kind: "linear", trace: sliceTrace(owner, from, end) });
   }
+  if (state.pos > end) {
+    const token = state.tokens.at(-1);
+    if (token?.type !== "code_inline") throw new UnsupportedSourceCapture();
+    let a = end, b = state.pos - marker.length;
+    const normalized = state.src.slice(a, b).replace(/\n/g, " ");
+    if (/^ (.+) $/.test(normalized)) {
+      a++;
+      b--;
+    }
+    const runs = [];
+    for (let i = a; i < b; i++) runs.push({ text: state.src[i] === "\n" ? " " : state.src[i], kind: state.src[i] === "\n" ? "atomic" : "linear", trace: sliceTrace(owner, i, i + 1) });
+    if (runs.map((r) => r.text).join("") !== token.content) throw new UnsupportedSourceCapture();
+    tokenSources.set(token, { collector: collectorFor(state), runs });
+    const open = rawRange(owner, from, a), close = rawRange(owner, b, state.pos);
+    if (open && close) edgeTokens.set(token, { open, close, side: "code" });
+  }
   return result;
 });
 wrapCaptureRule(md.inline.ruler, "text", (original, state, silent) => {
@@ -2517,6 +2596,10 @@ for (const name of ["entity", "escape"]) {
     const owner = inlineStateOwners.get(state);
     if (ok && !silent && collector && owner) {
       const token = state.tokens[state.tokens.length - 1];
+      if (name === "escape" && token.type === "hardbreak") {
+        const raw = rawRange(owner, from, from + 2);
+        if (raw) atomTokenRanges.set(token, raw);
+      }
       if (token.type === "text_special") tokenSources.set(token, {
         collector,
         runs: [{ trace: sliceTrace(owner, from, state.pos), text: token.content, kind: "atomic" }]
@@ -2538,6 +2621,89 @@ wrapCaptureRule(md.inline.ruler, "emphasis", (original, state, silent) => {
     }));
   }
   return ok;
+});
+function registerEdge(opened, closed, trace, a, b, c, d) {
+  const open = rawRange(trace, a, b), close = rawRange(trace, c, d);
+  if (open && close) {
+    edgeTokens.set(opened, { open, close, side: "open" });
+    edgeTokens.set(closed, { open, close, side: "close" });
+  }
+}
+for (const name of ["strikethrough", "mark"]) wrapCaptureRule(md.inline.ruler, name, (original, state, silent) => {
+  const from = state.pos, before = state.tokens.length, ok = original(state, silent), trace = inlineStateOwners.get(state), collector = collectorFor(state);
+  if (ok && !silent && trace && collector) {
+    let at = from;
+    for (const token of state.tokens.slice(before)) if (token.type === "text" && token.content && /^[~=]+$/.test(token.content)) {
+      tokenSources.set(token, { collector, runs: [{ text: token.content, kind: "linear", trace: sliceTrace(trace, at, at + token.content.length) }] });
+      at += token.content.length;
+    }
+  }
+  return ok;
+});
+for (const name of ["emphasis", "strikethrough", "mark"]) wrapCaptureRule(md.inline.ruler2, name, (original, state) => {
+  const collector = collectorFor(state);
+  if (!collector) return original(state);
+  const pairs = [];
+  for (const ds of [state.delimiters, ...state.tokens_meta.map((m) => m?.delimiters).filter(Boolean)]) for (const d of ds) {
+    if (d.end < 0) continue;
+    const o = state.tokens[d.token], c = state.tokens[ds[d.end].token];
+    const a = tokenSources.get(o)?.runs[0]?.trace, b = tokenSources.get(c)?.runs[0]?.trace;
+    const open = a && rawRange(a, 0, a.text.length), close = b && rawRange(b, 0, b.text.length);
+    if (open && close) pairs.push({ o, c, open, close });
+  }
+  const result = original(state);
+  for (const p of pairs) if (p.o.nesting === 1 && p.c.nesting === -1) {
+    let open = p.open, close = p.close;
+    if (p.o.type === "strong_open") {
+      const neighbor = pairs.find((q) => q.open.to === open.from && q.close.from === close.to && q.o.content === "");
+      if (!neighbor) continue;
+      open = { from: neighbor.open.from, to: open.to };
+      close = { from: close.from, to: neighbor.close.to };
+    }
+    edgeTokens.set(p.o, { open, close, side: "open" });
+    edgeTokens.set(p.c, { open, close, side: "close" });
+  }
+  return result;
+});
+for (const name of ["math_inline", "math_inline_double", "footnote_ref", "footnote_ref_orphan"]) wrapCaptureRule(md.inline.ruler, name, (original, state, silent) => {
+  const from = state.pos, result = original(state, silent), trace = inlineStateOwners.get(state);
+  if (result && !silent && trace) {
+    const token = state.tokens.at(-1), view = sliceTrace(trace, from, state.pos);
+    if (token?.type === (name === "footnote_ref_orphan" ? "footnote_ref" : name) && view.pieces.length && view.pieces.every((p, i) => p.kind !== "generated" && (!i || view.pieces[i - 1].sourceTo === p.sourceFrom))) {
+      const raw = rawRange(trace, from, state.pos);
+      if (raw) atomTokenRanges.set(token, raw);
+    }
+  }
+  return result;
+});
+wrapCaptureRule(md.inline.ruler, "html_inline", (original, state, silent) => {
+  const start = state.pos, result = original(state, silent), trace = inlineStateOwners.get(state);
+  if (result && !silent && trace) {
+    const token = state.tokens.at(-1), range = rawRange(trace, start, state.pos);
+    if (token?.type === "html_inline" && range) htmlTokenRanges.set(token, range);
+  }
+  return result;
+});
+wrapCaptureRule(md.inline.ruler, "link", (original, state, silent) => {
+  const trace = inlineStateOwners.get(state);
+  if (silent || !trace) return original(state, silent);
+  const start = state.pos, before = state.tokens.length, tokenize = state.md.inline.tokenize;
+  let label;
+  state.md.inline.tokenize = function(current) {
+    if (current === state && !label) label = { from: current.pos, to: current.posMax };
+    return tokenize.call(this, current);
+  };
+  let result;
+  try {
+    result = original(state, silent);
+  } finally {
+    state.md.inline.tokenize = tokenize;
+  }
+  if (result && label) {
+    const opened = state.tokens.slice(before).find((t) => t.type === "link_open"), closed = state.tokens.at(-1);
+    if (opened && closed?.type === "link_close") registerEdge(opened, closed, trace, start, label.from, label.to, state.pos);
+  }
+  return result;
 });
 md.inline.ruler.push("source_capture_fallback", (state, silent) => {
   const owner = inlineStateOwners.get(state);
@@ -2631,6 +2797,58 @@ function captureText(state, token, delegate) {
   delegate();
   if (captureCursor(state) !== pos) throw new UnsupportedSourceCapture();
 }
+function captureAtomEmission(state, token, delegate) {
+  const critic = criticTokens.get(token), raw = atomTokenRanges.get(token) ?? (critic?.kind === "note_anchor" ? { from: critic.syntaxFrom, to: critic.syntaxTo } : void 0), collector = currentInlineCollector.get(state);
+  if (!raw || !collector) {
+    delegate();
+    return;
+  }
+  const frame = state.stack.at(-1), slot = frame.content.length, pmFrom = captureCursor(state);
+  delegate();
+  const node = frame.content[slot], pmTo = captureCursor(state);
+  if (state.stack.at(-1) !== frame || frame.content.length !== slot + 1 || !node || !["math_inline", "note_anchor", "hardbreak", "footnote_ref"].includes(node.type.name) || !node.isAtom || node.nodeSize !== pmTo - pmFrom) return;
+  collector.atoms.push({ body: -1, pmFrom, pmTo, sourceFrom: raw.from, sourceTo: raw.to, node });
+  if (critic?.kind === "note_anchor" && node.type.name === "note_anchor") collector.critic.push({ ...critic, id: collector.critic.length, body: -1, pmFrom, pmTo, note: node.attrs.note });
+}
+function captureEdgeEmission(state, token, delegate) {
+  const edge = edgeTokens.get(token), collector = currentInlineCollector.get(state);
+  if (!edge) {
+    delegate();
+    return;
+  }
+  const position = captureCursor(state), frame = state.stack.at(-1);
+  let active = activeEdges.get(state);
+  if (!active) {
+    active = /* @__PURE__ */ new Map();
+    activeEdges.set(state, active);
+  }
+  if (edge.side === "code") {
+    if (!collector) {
+      delegate();
+      return;
+    }
+    captureText(state, token, delegate);
+    const mark = state.schema.marks.code.create(), marks2 = mark.addToSet(frame.marks);
+    collector.edges.push({ id: collector.edges.length, body: -1, family: "code", pmFrom: position, pmTo: captureCursor(state), open: edge.open, close: edge.close, marks: marks2 });
+    return;
+  }
+  if (edge.side === "close") {
+    const opened = active.get(edge.open.from);
+    delegate();
+    if (opened && collector) {
+      const mark = opened.marks.find((m) => !m.isInSet(frame.marks));
+      if (mark) {
+        collector.edges.push({ id: collector.edges.length, body: -1, family: mark.type.name, pmFrom: opened.pmFrom, pmTo: position, open: edge.open, close: edge.close, marks: opened.marks });
+        const critic = criticTokens.get(token);
+        if (critic?.kind === "annotation" && mark.type.name === "annotation") collector.critic.push({ ...critic, id: collector.critic.length, body: -1, pmFrom: opened.pmFrom, pmTo: position, note: mark.attrs.note });
+      }
+    }
+    active.delete(edge.open.from);
+    return;
+  }
+  delegate();
+  active.set(edge.open.from, { pmFrom: position, marks: frame.marks.slice() });
+}
 function emptyLiteral(state, start, end, indent, content) {
   const collector = collectorFor(state);
   if (content !== "" && content !== "\n") return void 0;
@@ -2671,7 +2889,19 @@ function captureLiteralEmission(state, token, delegate) {
     pmTo: from + p.to,
     kind: p.kind === "copy" ? "linear" : "atomic"
   });
-  fact.collector.emissions.push({ from, to: from + text2.length, kind, runFrom, runTo: fact.collector.runs.length, node, ...fact.empty ? { empty: fact.empty } : {} });
+  const fence = fenceTokens.get(token);
+  const contiguous = trace.pieces.length > 0 && trace.pieces.every((p, i) => p.kind !== "generated" && (!i || trace.pieces[i - 1].sourceTo === p.sourceFrom));
+  const raw = fence && trace.pieces.length ? { from: trace.pieces[0].sourceFrom, to: trace.pieces.at(-1).sourceTo } : void 0;
+  fact.collector.emissions.push({
+    from,
+    to: from + text2.length,
+    kind,
+    runFrom,
+    runTo: fact.collector.runs.length,
+    node,
+    ...fact.empty ? { empty: fact.empty } : {},
+    ...fence && raw ? { fence: { ...fence, contiguousTopLevel: fence.contiguousTopLevel && contiguous, pmFrom: from - 1, pmTo: from + text2.length + 1, contentFrom: raw.from, contentTo: raw.to } } : {}
+  });
 }
 function captureInlineEmission(state, token, delegate) {
   const fact = inlineFacts.get(token);
@@ -2692,17 +2922,19 @@ function captureInlineEmission(state, token, delegate) {
     inlineCloseStates.add(state);
   }
   const frame = state.stack[state.stack.length - 1], from = captureCursor(state), runFrom = fact.collector.runs.length;
+  currentInlineCollector.set(state, fact.collector);
+  const edgeFrom = fact.collector.edges.length, atomFrom = fact.collector.atoms.length, criticFrom = fact.collector.critic.length;
   delegate();
-  const to = captureCursor(state);
+  const edgeTo = fact.collector.edges.length, atomTo = fact.collector.atoms.length, criticTo = fact.collector.critic.length, to = captureCursor(state);
   if (state.stack[state.stack.length - 1] !== frame) throw new UnsupportedSourceCapture();
   if (!["paragraph", "heading"].includes(frame.type.name)) return;
-  const emission = { from, to, kind: frame.type.name, runFrom, runTo: fact.collector.runs.length, ...fact.empty ? { empty: fact.empty } : {} };
+  const emission = { from, to, edgeFrom, edgeTo, atomFrom, atomTo, criticFrom, criticTo, separators: separatorTokens.get(token) ?? [], kind: frame.type.name, runFrom, runTo: fact.collector.runs.length, ...fact.empty ? { empty: fact.empty } : {} };
   fact.collector.emissions.push(emission);
   inlineFrames.set(frame, emission);
   if (fact.trace && fact.kind) {
     const pieces = fact.trace.pieces;
-    const contiguous = pieces.length > 0 && pieces.every((p, i) => p.kind !== "generated" && (!i || pieces[i - 1].sourceTo === p.sourceFrom));
-    const raw = contiguous ? rawRange(fact.trace, 0, fact.trace.text.length) : void 0;
+    const actual = pieces.length > 0 && pieces.every((p) => p.kind !== "generated");
+    const raw = actual ? { from: pieces[0].sourceFrom, to: pieces.at(-1).sourceTo } : void 0;
     if (raw) emission.body = {
       pmFrom: from,
       pmTo: to,
@@ -3408,6 +3640,10 @@ var MorayaMarkdownParser = class extends MarkdownParser {
     h["inline"] = (state, tok, tokens, i) => captureInlineEmission(state, tok, () => defaultInline(state, tok, tokens, i));
     for (const key of Object.keys(h)) {
       const delegate = h[key];
+      h[key] = (state, tok, tokens, i) => captureAtomEmission(state, tok, () => captureEdgeEmission(state, tok, () => delegate(state, tok, tokens, i)));
+    }
+    for (const key of Object.keys(h)) {
+      const delegate = h[key];
       h[key] = (state, tok, tokens, i) => captureRootEmission(
         state,
         tok,
@@ -3680,13 +3916,16 @@ function writeSourceText(state, node, parent, index) {
     for (let i = end; i < text2.length; i++) state.text(text2[i] === "	" ? "&#9;" : "&#32;", false);
   }
 }
+function sourceFenceLength(text2, character, minimum) {
+  let length = Math.max(3, minimum);
+  for (const run of text2.match(character === "`" ? /`+/g : /~+/g) ?? []) length = Math.max(length, run.length + 1);
+  return length;
+}
 function sourceCodeNode(state, node) {
   const language = node.attrs.language;
   if (typeof language !== "string" || /[\r\n]/.test(language)) throw new UnsupportedSourceCapture();
   const info = language, character = info.includes("`") ? "~" : "`";
-  const runs = node.textContent.match(character === "`" ? /`+/g : /~+/g) || [];
-  let length = 3;
-  for (const run of runs) length = Math.max(length, run.length + 1);
+  const length = sourceFenceLength(node.textContent, character, 3);
   const fence = character.repeat(length);
   state.write(fence + info + "\n");
   state.text(node.textContent, false);
@@ -3809,13 +4048,13 @@ var sourceRootSerializer = new MarkdownSerializer({
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 }, sourceMarks, { hardBreakNodeName: "hardbreak", strict: false });
-function serializeSourceInlineBody(node) {
+function serializeSourceInlineBody(node, tableCell = false) {
   const inline = new MarkdownSerializer({
     ...sourceRootSerializer.nodes,
     [node.type.name](state, body) {
       state.renderInline(body);
     }
-  }, sourceRootSerializer.marks, sourceRootSerializer.options);
+  }, sourceRootSerializer.marks, tableCell ? { ...sourceRootSerializer.options, escapeExtraCharacters: /\|/g } : sourceRootSerializer.options);
   return inline.serialize(node.type.schema.topNodeType.create(null, [node]));
 }
 function renderSourceList(state, node, style, indent, firstDelim) {
@@ -4065,7 +4304,33 @@ function finalizeCapturedDocument(collector, doc2) {
         run.pmTo += delta;
       }
       if (emission.empty && parent.content.size === 0) collector.emptyBodies.push({ pmAt: from, parent, place: emission.empty, ...root && root.pmFrom < from && from < root.pmTo ? { rootId: root.id } : {} });
-      if (emission.body) collector.bodies.push({ ...emission.body, pmFrom: from, pmTo: from + parent.content.size });
+      if (emission.body) {
+        const body = collector.bodies.length;
+        collector.bodies.push({ ...emission.body, pmFrom: from, pmTo: from + parent.content.size });
+        for (let i = emission.atomFrom ?? 0; i < (emission.atomTo ?? 0); i++) {
+          const atom = collector.atoms[i], pmFrom = atom.pmFrom + delta, pmTo = atom.pmTo + delta;
+          if (pmFrom < from || pmTo > from + parent.content.size || doc2.nodeAt(pmFrom) !== atom.node || pmTo - pmFrom !== atom.node.nodeSize) throw new UnsupportedSourceCapture();
+          collector.atoms[i] = { ...atom, body, pmFrom, pmTo };
+        }
+        for (const separator of emission.separators ?? []) {
+          let entry = collector.separators.find((s) => s.range.from === separator.range.from && s.range.to === separator.range.to);
+          if (!entry) {
+            entry = { range: separator.range, ...separator.definition ? { definition: separator.definition } : {} };
+            collector.separators.push(entry);
+          }
+          if (entry[separator.side] !== void 0) throw new UnsupportedSourceCapture();
+          entry[separator.side] = body;
+        }
+        for (let i = emission.criticFrom ?? 0; i < (emission.criticTo ?? 0); i++) {
+          const critic = collector.critic[i];
+          collector.critic[i] = { ...critic, body, pmFrom: critic.pmFrom + delta, pmTo: critic.pmTo + delta };
+        }
+        for (let i = emission.edgeFrom ?? 0; i < (emission.edgeTo ?? 0); i++) {
+          const edge = collector.edges[i];
+          collector.edges[i] = { ...edge, body, pmFrom: edge.pmFrom + delta, pmTo: edge.pmTo + delta };
+        }
+      }
+      if (emission.fence) collector.fences.push({ ...emission.fence, pmFrom: offset, pmTo: offset + parent.nodeSize });
     }
     parent.forEach((node, inner) => {
       if (node.isText) text2.push({ node, parentFrom: from, from: from + inner, to: from + inner + node.nodeSize });
@@ -4104,7 +4369,7 @@ function finalizeCapturedDocument(collector, doc2) {
   };
   for (const u of layout.blankLines) if (u.role === "empty-paragraph") layoutBody(u.emission.pmFrom, { kind: "layout", origin: { kind: "blank", id: u.id } });
   if (layout.fallback) layoutBody(layout.fallback.emission.pmFrom, { kind: "layout", origin: { kind: "fallback" } });
-  capturedListLayouts.set(layout, { emptyBodies: Object.freeze(collector.emptyBodies.map((f) => Object.freeze(f))), source, doc: doc2, roots: collector.roots, lists, bodies: Object.freeze(collector.bodies.map((body) => Object.freeze(body))) });
+  capturedListLayouts.set(layout, { recipe: Object.freeze({ definitionSeparators: Object.freeze(collector.separators.filter((s) => s.definition && (s.left !== void 0 || s.right !== void 0) && collector.protectedSources.some((p) => p.kind === s.definition.kind && p.scope === s.definition.scope && p.sourceFrom === s.definition.sourceFrom && p.sourceTo === s.definition.sourceTo)).map((s) => Object.freeze({ body: s.left ?? s.right, side: s.left !== void 0 ? "after" : "before", definition: Object.freeze(s.definition), range: Object.freeze(s.range) }))), separators: Object.freeze(collector.separators.filter((s) => s.left !== void 0 && s.right !== void 0).map((s) => Object.freeze({ left: s.left, right: s.right, range: Object.freeze(s.range) }))), critic: Object.freeze(collector.critic.filter((c) => c.body >= 0).map((c) => Object.freeze(c))), atoms: Object.freeze(collector.atoms.filter((a) => a.body >= 0).map((a) => Object.freeze(a))), bodies: Object.freeze(collector.bodies.map((b, body) => Object.freeze({ ...b, body }))), edges: Object.freeze(collector.edges.filter((e) => e.body >= 0).map((e) => Object.freeze(e))), fences: Object.freeze(collector.fences.map((f) => Object.freeze(f))) }), emptyBodies: Object.freeze(collector.emptyBodies.map((f) => Object.freeze(f))), source, doc: doc2, roots: collector.roots, lists, bodies: Object.freeze(collector.bodies.map((body) => Object.freeze(body))) });
   return {
     doc: doc2,
     textRuns: collector.runs,
@@ -4170,6 +4435,11 @@ function newFileCollector(source, trace, work) {
   return {
     source,
     trace,
+    separators: [],
+    critic: [],
+    atoms: [],
+    edges: [],
+    fences: [],
     emptyBodies: [],
     bodies: [],
     emissions: [],
@@ -4245,6 +4515,19 @@ function cloneTokenBatch(tokens, collector, rawDelta = 0, lineDelta = 0) {
     if (container) containerEnds.set(copy, { collector, kind: container.kind, place: shiftEmpty(container.place, rawDelta, lineDelta) });
     const pending = nestedBlanks.get(token);
     if (pending) nestedBlanks.set(copy, pending.map((p) => ({ ...p, line: p.line + lineDelta, place: shiftEmpty(p.place, rawDelta, lineDelta) })));
+    const edge = edgeTokens.get(token);
+    const shift = (r) => ({ from: r.from + rawDelta, to: r.to + rawDelta });
+    const separators = separatorTokens.get(token);
+    if (separators) separatorTokens.set(copy, separators.map((s) => ({ ...s, range: shift(s.range), ...s.definition ? { definition: { ...s.definition, sourceFrom: s.definition.sourceFrom + rawDelta, sourceTo: s.definition.sourceTo + rawDelta } } : {} })));
+    const critic = criticTokens.get(token);
+    if (critic) criticTokens.set(copy, { ...critic, syntaxFrom: critic.syntaxFrom + rawDelta, syntaxTo: critic.syntaxTo + rawDelta, noteFrom: critic.noteFrom + rawDelta, noteTo: critic.noteTo + rawDelta, close: shift(critic.close), ...critic.open ? { open: shift(critic.open) } : {}, ...critic.middle ? { middle: shift(critic.middle) } : {} });
+    const atom = atomTokenRanges.get(token);
+    if (atom) atomTokenRanges.set(copy, shift(atom));
+    const html = htmlTokenRanges.get(token);
+    if (html) htmlTokenRanges.set(copy, shift(html));
+    if (edge) edgeTokens.set(copy, { ...edge, open: shift(edge.open), close: shift(edge.close) });
+    const fence = fenceTokens.get(token);
+    if (fence) fenceTokens.set(copy, { ...fence, sourceFrom: fence.sourceFrom + rawDelta, sourceTo: fence.sourceTo + rawDelta, open: shift(fence.open), close: shift(fence.close) });
     const closed = capturedFenceClosed.get(token);
     if (closed !== void 0) capturedFenceClosed.set(copy, closed);
     return copy;
@@ -4725,6 +5008,7 @@ export {
   captureFileWindow,
   capturedEmptyBodies,
   capturedInlineBodies,
+  capturedInlineRecipeFacts,
   capturedSourceLists,
   parseDocumentWithSourceCapture,
   parseMarkdown,
@@ -4735,6 +5019,9 @@ export {
   serializeMarkdown,
   serializeSourceInlineBody,
   serializeSourceRootMarkdown,
+  sourceCodeDelimiter,
+  sourceEmDelimiter,
+  sourceFenceLength,
   sourceRootHasClosedFences
 };
 //# sourceMappingURL=markdown.js.map

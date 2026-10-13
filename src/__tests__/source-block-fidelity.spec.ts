@@ -66,13 +66,12 @@ it.each([
 ])('renders only the changed natural root: %s',head=>{
  const raw=head+'\n\nUntouched *raw* tail\r\n',b=open(raw),p=pos(b.doc,'Alpha')
  const tr=transaction(b).addMark(p,p+5,b.doc.type.schema.marks.strong!.create())
- expect(tr.steps[0]!.getMap().ranges).toEqual([])
+ expect((tr.steps[0]!.getMap() as ReturnType<AddMarkStep['getMap']>&{readonly ranges:readonly number[]}).ranges).toEqual([])
  const r=accept(b,tr)
- const wholeBody=['| A | B |\n| :- | -: |\n| Alpha | Beta |','* Alpha\n  + nested\n* Beta','> Alpha\n>\n> Beta','[^a]: Alpha','Term\n: Alpha'].includes(head)
- expect(r.mode).toBe(wholeBody?'fragment-render':'root-render')
- if(wholeBody)expect(r.session.source).toBe(raw.replace('Alpha','**Alpha**'))
+ expect(r.mode).toBe('fragment-render')
+ expect(r.session.source).toBe(raw.replace('Alpha','**Alpha**'))
  expect(r.changedRoots).toEqual([b.roots[0]!.id])
- expect(r.edits).toHaveLength(1)
+ const at=raw.indexOf('Alpha');expect(r.edits).toEqual([{from:at,to:at,text:'**'},{from:at+5,to:at+5,text:'**'}])
  expect(r.session.source.endsWith(raw.slice(b.roots[0]!.sourceTo))).toBe(true)
 })
 it.each([12,24,48,80,160])('production addMark across %i roots produces per-root steps without per-step document scans',count=>{
@@ -81,7 +80,7 @@ it.each([12,24,48,80,160])('production addMark across %i roots produces per-root
  const tr=transaction(base).addMark(1,base.doc.content.size-1,base.doc.type.schema.marks.strong!.create())
  expect(tr.steps).toHaveLength(count)
  expect(tr.steps.every(step=>Object.getPrototypeOf(step)===AddMarkStep.prototype)).toBe(true)
- expect(tr.steps.every(step=>step.getMap().ranges.length===0)).toBe(true)
+ expect(tr.steps.every(step=>(step.getMap() as ReturnType<AddMarkStep['getMap']>&{readonly ranges:readonly number[]}).ranges.length===0)).toBe(true)
  const priorDocs=new Set(tr.docs)
  const originalForEach=PmNode.prototype.forEach,originalChild=PmNode.prototype.child,originalEq=Fragment.prototype.eq
  const priorContents=new Set(tr.docs.map(doc=>doc.content));let wholeDocumentComparisons=0
@@ -102,7 +101,8 @@ it.each([12,24,48,80,160])('production addMark across %i roots produces per-root
  try{result=applySourceBlockTransaction(base,tr)}finally{eachSpy.mockRestore();childSpy.mockRestore();eqSpy.mockRestore()}
  expect(result.ok).toBe(true);if(!result.ok)throw new Error(result.reason)
  expect(result.changedRoots).toEqual(Array.from({length:count},(_,i)=>i))
- expect(result.edits).toHaveLength(count)
+ expect(result.edits).toHaveLength(count*2)
+ expect(result.edits).toEqual(base.roots.flatMap(root=>[{from:root.sourceFrom,to:root.sourceFrom,text:'**'},{from:root.tailFrom,to:root.tailFrom,text:'**'}]))
  expect(result.session.source).toBe(Array.from({length:count},(_,i)=>'**P'+i+'**').join('\n\n'))
  // Count this adapter's old-doc child accesses, not wall time or PM's native findIndex loop.
  expect(inspectedTopChildren).toBeLessThanOrEqual(count*12+32)
@@ -132,7 +132,7 @@ it('rejects a custom step subclass even if its JSON says addMark',()=>{
 it('handles removeMark with an empty StepMap',()=>{
  const b=open('__Alpha__\n\nTail'),p=pos(b.doc,'Alpha')
  const tr=transaction(b).removeMark(p,p+5,b.doc.type.schema.marks.strong!)
- expect(tr.steps[0]!.getMap().ranges).toEqual([])
+ expect((tr.steps[0]!.getMap() as ReturnType<AddMarkStep['getMap']>&{readonly ranges:readonly number[]}).ranges).toEqual([])
  const r=accept(b,tr)
  expect(r.session.source).toBe('Alpha\n\nTail')
 })
@@ -149,7 +149,8 @@ it('does not gain syntax intent from exact semantic-mismatch',()=>{
  const b=open('甲\n\nTail'),p=pos(b.doc,'甲')
  const r=accept(b,transaction(b).insertText('*乙*',p,p+1))
  // Intended PM contains literal stars; local serializer must preserve that intent.
- expect(r.mode).toBe('root-render')
+ expect(r.mode).toBe('fragment-render')
+ expect(r.session.source).toBe('\\*乙\\*\n\nTail')
  expect(r.session.doc.firstChild!.textContent).toBe('*乙*')
  expect(r.session.doc.firstChild!.firstChild!.marks).toEqual([])
 })
@@ -158,7 +159,7 @@ it('maps each step in its actual doc and keeps nonadjacent edits separate',()=>{
  const tr=transaction(b).insertText('Long',pos(b.doc,'A'),pos(b.doc,'A')+1)
  const c=pos(tr.doc,'C');tr.addMark(c,c+1,b.doc.type.schema.marks.strong!.create())
  const r=accept(b,tr)
- expect(r.changedRoots).toEqual([0,2]);expect(r.edits).toHaveLength(2)
+ expect(r.changedRoots).toEqual([0,2]);const at=raw.lastIndexOf('C');expect(r.edits).toEqual([{from:0,to:1,text:'Long'},{from:at,to:at,text:'**'},{from:at+1,to:at+1,text:'**'}])
  expect(r.session.source).toBe('Long\r\n\r\n  Middle __raw__\r\n\r\n**C**\n')
  const middle=b.roots[1]!
  expect(r.edits.every(e=>e.to<=middle.sourceFrom||e.from>=middle.sourceTo)).toBe(true)
@@ -255,14 +256,11 @@ it.each([['strong'], ['em'], ['strong', 'em']])(
   const base=open(raw),from=pos(base.doc,'Alpha'),tr=transaction(base)
   for(const name of names)tr.addMark(from,from+5,base.doc.type.schema.marks[name]!.create())
   const result=accept(base,tr)
-  expect(result.mode).toBe('root-render')
+  expect(result.mode).toBe('fragment-render')
   expect(result.changedRoots).toEqual([0])
-  expect(result.edits).toHaveLength(1)
-  expect(result.edits[0]!.from).toBe(base.roots[0]!.sourceFrom)
-  expect(result.edits[0]!.to).toBe(base.roots[0]!.sourceTo)
-  expect(result.session.source).toContain(' beta==')
-  expect(Buffer.from(result.session.source.slice(result.edits[0]!.text.length)))
-   .toEqual(Buffer.from(raw.slice(base.roots[0]!.sourceTo)))
+  const at=raw.indexOf('Alpha'),marker=names.map(name=>name==='strong'?'**':'*').join('')
+  expect(result.edits).toEqual([{from:at,to:at,text:marker},{from:at+5,to:at+5,text:marker}])
+  expect(result.session.source).toBe(raw.replace('Alpha',marker+'Alpha'+marker))
   expect(result.session.doc.firstChild!.firstChild!.marks.map(mark=>mark.type.name)).toEqual(['strong'])
   expect(result.session.doc.firstChild!.lastChild!.marks.map(mark=>mark.type.name)).toEqual(['em'])
  })

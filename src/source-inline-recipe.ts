@@ -3,7 +3,7 @@ import type {Mark,Node as PmNode} from 'prosemirror-model'
 import type {Transaction} from 'prosemirror-state'
 import {AddMarkStep,RemoveMarkStep,ReplaceStep} from 'prosemirror-transform'
 import type {SourceSession,TextSourceSpan} from './source-fidelity'
-import type {SourceEdit} from './source-ownership'
+import type {SourceEdit,ProtectedSource} from './source-ownership'
 import type {EmptyBody} from './source-empty-body'
 import {capturedEmptyBodies,capturedInlineRecipeFacts,serializeSourceInlineBody,sourceFenceLength,sourceCodeDelimiter,sourceEmDelimiter} from './markdown'
 export type InlineRawRange=Readonly<{from:number;to:number}>
@@ -11,10 +11,15 @@ export type InlineEdge=Readonly<{id:number;body:number;family:string;pmFrom:numb
 export type InlineOccurrence=Readonly<{body:number;pmFrom:number;pmTo:number;sourceFrom:number;sourceTo:number;kind:'paragraph'|'heading'|'table-cell'}>
 export type ClosedFenceBody=Readonly<{pmFrom:number;pmTo:number;sourceFrom:number;sourceTo:number;open:InlineRawRange;close:InlineRawRange;character:'`'|'~';openLength:number;closeLength:number;contentFrom:number;contentTo:number;eol:'\n'|'\r\n'|'\r';contiguousTopLevel:boolean}>
 export type InlineAtomOccurrence=Readonly<{body:number;pmFrom:number;pmTo:number;sourceFrom:number;sourceTo:number;node:PmNode}>
-export type InlineRecipeFacts=Readonly<{atoms:readonly InlineAtomOccurrence[];bodies:readonly InlineOccurrence[];edges:readonly InlineEdge[];fences:readonly ClosedFenceBody[]}>
+export type CriticPayload=Readonly<{id:number;body:number;kind:'annotation'|'note_anchor';pmFrom:number;pmTo:number;syntaxFrom:number;syntaxTo:number;noteFrom:number;noteTo:number;note:string;open?:InlineRawRange;middle?:InlineRawRange;close:InlineRawRange}>
+export type InlineRecipeFacts=Readonly<{definitionSeparators:readonly Readonly<{body:number;side:'before'|'after';definition:ProtectedSource;range:InlineRawRange}>[];separators:readonly Readonly<{left:number;right:number;range:InlineRawRange}>[];critic:readonly CriticPayload[];atoms:readonly InlineAtomOccurrence[];bodies:readonly InlineOccurrence[];edges:readonly InlineEdge[];fences:readonly ClosedFenceBody[]}>
 export type InlineRecipeResult={ok:true;edits:readonly SourceEdit[];changedBodies:readonly number[]}|{ok:false;reason:'unsupported-step'|'unmapped-range'}
 export type EmptyInlineContent=Readonly<{kind:'ready';body:string}>|Readonly<{kind:'unsupported';reason:string}>
-const families=['em','strong','strike_through','highlight','code','link']
+const families=['em','strong','strike_through','highlight','code','link','annotation']
+function canonicalNote(node:PmNode):boolean {
+ return node.type===node.type.schema.nodes.note_anchor&&node.isLeaf&&node.nodeSize===1&&typeof node.attrs.note==='string'&&!/[\r\n]|<<}/.test(node.attrs.note)&&node.eq(node.type.create({note:node.attrs.note},null,node.marks))
+}
+function canonicalAnnotation(mark:Mark):boolean {return mark.type.name!=='annotation'||typeof mark.attrs.note==='string'&&!/[\r\n]|<<}/.test(mark.attrs.note)&&mark.eq(mark.type.create({note:mark.attrs.note}))}
 function textOnly(node:PmNode):boolean {let ok=true;node.forEach(n=>{if(!n.isText||n.marks.some(m=>!families.includes(m.type.name)))ok=false});return ok}
 function audit(base:SourceSession,tr:Transaction):boolean {
  if(!tr.before.eq(base.doc)||tr.docs.length!==tr.steps.length)return false
@@ -39,6 +44,7 @@ export function prepareEmptyInlineContent(base:SourceSession,tr:Transaction,fact
    if(!(mark instanceof AddMarkStep||mark instanceof RemoveMarkStep)||mark.from<step.from||mark.to>step.from+step.slice.size||!families.includes(mark.mark.type.name))return no()
   }
   const parent=tr.doc.resolve(step.from).parent
+  if(tr.steps.length===1&&step.slice.content.childCount===1&&canonicalNote(step.slice.content.firstChild!)&&!step.slice.content.firstChild!.marks.length&&parent.sameMarkup(fact.parent)&&parent.content.eq(step.slice.content))return {kind:'ready',body:'{>>'+parent.firstChild!.attrs.note+'<<}'}
   if(!parent.sameMarkup(fact.parent)||!textOnly(parent)||/[\r\n]/.test(parent.textContent))return no()
   const resolved=base.doc.resolve(fact.pmAt),cell=resolved.depth>0&&['table_cell','table_header'].includes(resolved.node(resolved.depth-1).type.name)
   const children:PmNode[]=[]
@@ -101,10 +107,54 @@ function editsFromOutput(base:SourceSession,body:InlineOccurrence,output:Output[
  if(cursor<body.sourceTo||pending)edits.push({from:cursor,to:body.sourceTo,text:pending})
  return edits.filter(e=>base.source.slice(e.from,e.to)!==e.text)
 }
+function noteEdit(base:SourceSession,fact:CriticPayload,note:string):SourceEdit {
+ const old=base.source.slice(fact.noteFrom,fact.noteTo);let left=0,right=0
+ while(left<old.length&&left<note.length&&old[left]===note[left])left++
+ if(left>0&&/[\uD800-\uDBFF]/.test(old[left-1]!)&&/[\uDC00-\uDFFF]/.test(old[left]??''))left--
+ while(right<old.length-left&&right<note.length-left&&old[old.length-1-right]===note[note.length-1-right])right++
+ if(right>0&&/[\uD800-\uDBFF]/.test(old[old.length-right-1]??'')&&/[\uDC00-\uDFFF]/.test(old[old.length-right]??''))right--
+ return {from:fact.noteFrom+left,to:fact.noteTo-right,text:note.slice(left,note.length-right)}
+}
+function preparePointRecipe(base:SourceSession,tr:Transaction,facts:InlineRecipeFacts):InlineRecipeResult|undefined {
+ const no={ok:false,reason:'unsupported-step'} as const
+ const touches=tr.steps.some(s=>s instanceof ReplaceStep&&(facts.critic.some(c=>c.kind==='note_anchor'&&s.from<c.pmTo&&s.to>c.pmFrom)||s.slice.content.firstChild?.type.name==='note_anchor'))
+ if(!touches)return
+ if(tr.steps.length!==1||Object.getPrototypeOf(tr.steps[0])!==ReplaceStep.prototype)return no
+ const step=tr.steps[0] as ReplaceStep,a=base.doc.resolve(step.from),b=base.doc.resolve(step.to)
+ if(!a.sameParent(b)||step.slice.openStart||step.slice.openEnd||(step as ReplaceStep&{structure:boolean}).structure)return no
+ const fact=facts.critic.find(c=>c.kind==='note_anchor'&&c.pmFrom===step.from&&c.pmTo===step.to)
+ const next=step.slice.content.firstChild
+ if(fact){
+  const old=base.doc.nodeAt(step.from)!
+  if(!canonicalNote(old))return no
+  if(!step.slice.size){
+   const body=facts.bodies.find(b=>b.body===fact.body)!,edits:SourceEdit[]=[{from:fact.syntaxFrom,to:fact.syntaxTo,text:''}]
+   if(body.pmFrom===fact.pmFrom&&body.pmTo===fact.pmTo&&a.parent.type.name==='paragraph'){
+    const separator=facts.separators.find(s=>s.right===fact.body)??facts.separators.find(s=>s.left===fact.body)
+    const definitionSeparator=facts.definitionSeparators.find(s=>s.body===fact.body&&s.side==='after')
+    if(separator)edits.push({...separator.range,text:''})
+    else if(definitionSeparator)edits.push({...definitionSeparator.range,text:''})
+    // A top-level paragraph owns this exact terminal EOL. Once its only
+    // leaf is gone, retaining that EOL would introduce another empty paragraph.
+    const root=base.roots.find(r=>r.tokenType==='paragraph_open'&&r.pmFrom+1===body.pmFrom&&r.pmTo-1===body.pmTo&&r.tailFrom===body.sourceTo&&fact.syntaxTo===r.tailFrom)
+    if(root&&/^(?:\r\n|\r|\n)$/.test(base.source.slice(root.tailFrom,root.sourceTo)))edits.push({from:root.tailFrom,to:root.sourceTo,text:''})
+   }
+   edits.sort((x,y)=>x.from-y.from);return {ok:true,edits,changedBodies:[fact.body]}
+  }
+  if(step.slice.content.childCount!==1||!next||!canonicalNote(next)||next.type!==old.type||!sameMarks(next.marks,old.marks))return no
+  return {ok:true,edits:[noteEdit(base,fact,next.attrs.note)],changedBodies:[fact.body]}
+ }
+ if(step.from!==step.to||step.slice.content.childCount!==1||!next||!canonicalNote(next)||next.marks.length)return no
+ const body=facts.bodies.find(f=>f.pmFrom<=step.from&&f.pmTo>=step.to),range=rawRange(base,step.from,step.to)
+ if(!body||!range||range.from<body.sourceFrom||range.to>body.sourceTo)return no
+ return {ok:true,edits:[{...range,text:'{>>'+next.attrs.note+'<<}'}],changedBodies:[body.body]}
+}
 export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:InlineRecipeFacts):InlineRecipeResult {
  const no={ok:false,reason:'unsupported-step'} as const,unmapped={ok:false,reason:'unmapped-range'} as const
  if(capturedInlineRecipeFacts(base)!==facts||!audit(base,tr))return no
  try{
+  const pointRecipe=preparePointRecipe(base,tr,facts)
+  if(pointRecipe)return pointRecipe
   const work:BodyWork[]=facts.bodies.map(b=>({body:b.body,beforeFrom:b.pmFrom,beforeTo:b.pmTo,afterFrom:b.pmFrom,afterTo:b.pmTo,pieces:[{kind:'retained',beforeFrom:b.pmFrom,beforeTo:b.pmTo,afterFrom:b.pmFrom,afterTo:b.pmTo}],dirtyEdges:[]}))
   const units=new Map<number,Unit[]>(),changed=new Set<number>()
   for(const b of facts.bodies){
@@ -120,7 +170,7 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
    });units.set(b.body,list)
   }
   for(let i=0;i<tr.steps.length;i++){
-   const step=tr.steps[i] as ReplaceStep|AddMarkStep|RemoveMarkStep,before=tr.docs[i]!,after=tr.docs[i+1]??tr.doc
+   const step=tr.steps[i] as ReplaceStep|AddMarkStep|RemoveMarkStep,before=tr.docs[i]!
    if(step instanceof ReplaceStep){
     const a=before.resolve(step.from),z=before.resolve(step.to)
     if(!a.sameParent(z)||!a.parent.inlineContent||step.slice.openStart||step.slice.openEnd||(step as ReplaceStep&{structure:boolean}).structure)return no
@@ -128,7 +178,7 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     if(!body)return no
     let inserted:Unit[]=[],valid=true
     step.slice.content.forEach(n=>{
-     if(n.type.name==='hardbreak'&&n.attrs.isInline===true&&!n.marks.length){inserted.push({text:'\n',leaf:n,marks:n.marks,step:i});return}
+     if(n.type===n.type.schema.nodes.hardbreak&&typeof n.attrs.isInline==='boolean'&&!n.marks.length&&n.eq(n.type.create({isInline:n.attrs.isInline}))){inserted.push({text:'\n',leaf:n,marks:n.marks,step:i});return}
      if(!n.isText||n.marks.some(m=>!families.includes(m.type.name)))valid=false
      for(const text of (n.text??'').split(''))inserted.push({text,marks:n.marks,step:i})
     })
@@ -144,7 +194,7 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
      w.pieces=units.get(w.body)!.map((u,k)=>u.before===undefined?{kind:'inserted',afterFrom:w.afterFrom+k,afterTo:w.afterFrom+k+1,step:u.step!}:{kind:'retained',beforeFrom:u.before,beforeTo:u.before+1,afterFrom:w.afterFrom+k,afterTo:w.afterFrom+k+1})
     }
    }else{
-    if(!families.includes(step.mark.type.name))return no
+    if(!families.includes(step.mark.type.name)||!canonicalAnnotation(step.mark))return no
     let valid=true
     before.nodesBetween(step.from,step.to,(n,pos)=>{
      if(!n.isInline)return
@@ -160,10 +210,13 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     })
     if(!valid)return no
    }
-   for(const w of work){
-    const node=after.resolve(w.afterFrom).parent,original=base.doc.resolve(w.beforeFrom).parent
-    if(!node.sameMarkup(original)||node.content.size!==w.afterTo-w.afterFrom)return no
-   }
+  }
+  // Native mark and closed same-parent Replace steps preserve ancestor markup.
+  // Their complete chains were audited above; verify each body once, before
+  // source generation, instead of rescanning every old body after every step.
+  for(const w of work){
+   const node=tr.doc.resolve(w.afterFrom).parent,original=base.doc.resolve(w.beforeFrom).parent
+   if(!node.sameMarkup(original)||node.content.size!==w.afterTo-w.afterFrom)return no
   }
   const edits:SourceEdit[]=[]
   for(const id of changed){
@@ -182,11 +235,13 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     }
     if(at>0&&mark.isInSet(list[at-1]!.marks))continue
     let end=at+1;while(end<list.length&&mark.isInSet(list[end]!.marks))end++
-    const candidates=old.filter(e=>e.family===mark.type.name&&e.marks.some(m=>m.eq(mark)))
+    const candidates=old.filter(e=>e.family===mark.type.name&&(mark.type.name==='annotation'||e.marks.some(m=>m.eq(mark))))
     const exact=candidates.find(e=>[-1,1].some(assoc=>tr.mapping.map(e.pmFrom,assoc)===w.afterFrom+at)&&[-1,1].some(assoc=>tr.mapping.map(e.pmTo,assoc)===w.afterFrom+end))
     const ancestor=exact??candidates.find(e=>list.slice(at,end).some(u=>u.before!==undefined&&e.pmFrom<=u.before&&u.before<e.pmTo))
     let open='',close='',keep=!!exact
     if(ancestor){open=base.source.slice(ancestor.open.from,ancestor.open.to);close=base.source.slice(ancestor.close.from,ancestor.close.to)}
+    if(mark.type.name==='annotation'&&!canonicalAnnotation(mark))return no
+    if(mark.type.name==='annotation'){open='{==';close='==}{>>'+mark.attrs.note+'<<}'}
     if(!open){
      switch(mark.type.name){
       case 'strong':open=close='**';break
@@ -209,10 +264,10 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
    // Preserve separate envelopes when a continuous final mark still contains
    // multiple original occurrences with their original attributes and bounds.
    for(let i=ranges.length-1;i>=0;i--){
-    const r=ranges[i]!,matches=old.filter(e=>e.family===r.mark.type.name&&e.marks.some(m=>m.eq(r.mark)))
+    const r=ranges[i]!,matches=old.filter(e=>e.family===r.mark.type.name&&(r.mark.type.name==='annotation'||e.marks.some(m=>m.eq(r.mark))))
     const parts=matches.map(e=>({e,from:list.findIndex(u=>u.before===e.pmFrom),last:list.findIndex(u=>u.before===e.pmTo-1)})).filter(p=>p.from>=r.from&&p.last<r.to&&p.last>=p.from).sort((a,b)=>a.from-b.from)
     if(parts.length>1&&parts[0]!.from===r.from&&parts.at(-1)!.last+1===r.to&&parts.every((p,j)=>!j||parts[j-1]!.last+1===p.from)){
-     ranges.splice(i,1,...parts.map(p=>({...r,from:p.from,to:p.last+1,old:p.e,keep:true,open:base.source.slice(p.e.open.from,p.e.open.to),close:base.source.slice(p.e.close.from,p.e.close.to)})))
+     ranges.splice(i,1,...parts.map(p=>({...r,from:p.from,to:p.last+1,old:p.e,keep:true,open:base.source.slice(p.e.open.from,p.e.open.to),close:r.mark.type.name==='annotation'?'==}{>>'+r.mark.attrs.note+'<<}':base.source.slice(p.e.close.from,p.e.close.to)})))
     }
    }
    // Code is lexically opaque: other marks must wrap each code segment,
@@ -254,7 +309,7 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
    w.dirtyEdges=old.filter(e=>!ranges.some(r=>r.keep&&r.old===e)).map(e=>e.id)
    const claimed=[...facts.atoms.filter(a=>a.body===id).map(a=>({from:a.sourceFrom,to:a.sourceTo})),...old.flatMap(e=>[e.open,e.close]),...list.flatMap(u=>u.raw?[u.raw]:[]),...base.textSpans.filter(s=>s.pmFrom>=body.pmFrom&&s.pmTo<=body.pmTo).map(s=>({from:s.sourceFrom,to:s.sourceTo}))].sort((a,b)=>a.from-b.from)
    const gaps:{raw:InlineRawRange;before:number}[]=[];let cursor=body.sourceFrom
-   for(const raw of claimed){if(raw.from>cursor){const next=base.textSpans.find(s=>s.sourceFrom>=raw.from&&s.pmFrom>=body.pmFrom&&s.pmTo<=body.pmTo);gaps.push({raw:{from:cursor,to:raw.from},before:next?.pmFrom??body.pmTo})}cursor=Math.max(cursor,raw.to)}
+   for(const raw of claimed){if(raw.from>cursor){const next=[...base.textSpans,...facts.atoms.filter(a=>a.body===id)].filter(s=>s.sourceFrom>=raw.from&&s.pmFrom>=body.pmFrom&&s.pmTo<=body.pmTo).sort((a,b)=>a.sourceFrom-b.sourceFrom)[0];gaps.push({raw:{from:cursor,to:raw.from},before:next?.pmFrom??body.pmTo})}cursor=Math.max(cursor,raw.to)}
    if(cursor<body.sourceTo)gaps.push({raw:{from:cursor,to:body.sourceTo},before:body.pmTo})
    const adjacentEntities=new Set<number>()
    for(const r of ranges)if(!r.keep&&['em','strong','strike_through','highlight'].includes(r.mark.type.name)){
@@ -268,10 +323,16 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     }
    }
    const output:Output[]=[],emittedGaps=new Set<number>()
-   const nesting=(a:Envelope,b:Envelope)=>a.from-b.from||b.to-a.to||(Number(a.mark.type.name==='code')-Number(b.mark.type.name==='code'))||(a.old&&b.old?a.old.open.from-b.old.open.from:Object.keys(target.type.schema.marks).indexOf(a.mark.type.name)-Object.keys(target.type.schema.marks).indexOf(b.mark.type.name))
+   const nesting=(a:Envelope,b:Envelope)=>a.from-b.from||b.to-a.to||(Number(a.mark.type.name==='code')-Number(b.mark.type.name==='code'))||Number(b.keep)-Number(a.keep)||(a.old&&b.old?a.old.open.from-b.old.open.from:Object.keys(target.type.schema.marks).indexOf(a.mark.type.name)-Object.keys(target.type.schema.marks).indexOf(b.mark.type.name))
    const ordered=ranges.slice().sort(nesting)
    for(let at=0;at<=list.length;at++){
-    for(const r of ordered.filter(r=>r.to===at).reverse())output.push(r.keep?{raw:r.old!.close}:{text:r.close})
+    for(const r of ordered.filter(r=>r.to===at).reverse()){
+     const critic=r.keep&&r.mark.type.name==='annotation'?facts.critic.find(c=>c.kind==='annotation'&&c.syntaxFrom===r.old!.open.from):undefined
+     if(critic&&critic.note!==r.mark.attrs.note){
+      const edit=noteEdit(base,critic,r.mark.attrs.note)
+      output.push({raw:{from:r.old!.close.from,to:edit.from}},{text:edit.text},{raw:{from:edit.to,to:r.old!.close.to}})
+     }else output.push(r.keep?{raw:r.old!.close}:{text:r.close})
+    }
     for(let g=0;g<gaps.length;g++)if(!emittedGaps.has(g)&&(at===list.length||list[at]!.before!==undefined&&gaps[g]!.before<=list[at]!.before!)){output.push({raw:gaps[g]!.raw});emittedGaps.add(g)}
     for(const r of ordered.filter(r=>r.from===at))output.push(r.keep?{raw:r.old!.open}:{text:r.open})
     if(at===list.length)break
@@ -299,6 +360,7 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
       output.push({raw:{from:span.sourceFrom,to:span.sourceTo}});at+=count-1
      }else output.push({raw:u.raw})
     }
+    else if(u.leaf)output.push({text:u.leaf.attrs.isInline?'\n':'\\\n'})
     else output.push({text:code?(body.kind==='table-cell'?u.text.replace(/\|/g,'\\|'):u.text):escapeText(u.text,body.kind==='table-cell')})
    }
    const bodyEdits=editsFromOutput(base,body,output)

@@ -1,4 +1,4 @@
-import type {InlineRecipeFacts,InlineEdge,ClosedFenceBody,InlineAtomOccurrence} from './source-inline-recipe'
+import type {InlineRecipeFacts,InlineEdge,ClosedFenceBody,InlineAtomOccurrence,CriticPayload} from './source-inline-recipe'
 import type {SourceSession} from './source-fidelity'
 /**
  * Markdown ↔ ProseMirror Doc roundtrip for `@moraya/core`.
@@ -181,6 +181,8 @@ md.inline.ruler.push('critic_annotation', (state, silent) => {
     if (!silent) {
       const tok = state.push('critic_note', '', 0)
       tok.meta = { note }
+      const trace=inlineStateOwners.get(state)
+      if(trace)registerCritic(tok,trace,start,start+3,close,close+3)
     }
     state.pos = close + 3
     return true
@@ -211,7 +213,7 @@ md.inline.ruler.push('critic_annotation', (state, silent) => {
     state.posMax = oldMax
     const close=state.push('critic_anno_close', 'span', -1)
     const trace=inlineStateOwners.get(state)
-    if(trace)registerEdge(open,close,trace,start,start+3,hlClose,noteClose+3)
+    if(trace){registerEdge(open,close,trace,start,start+3,hlClose,noteClose+3);registerCritic(close,trace,start,noteStart,noteClose,noteClose+3,hlClose)}
   }
   state.pos = noteClose + 3
   return true
@@ -444,7 +446,7 @@ type SourceRun = { text: string; kind?: undefined; trace?: undefined }
   | { text: string; kind: 'linear' | 'atomic'; trace: SourceTrace }
 type Capture = {
   file?: FileCaptureState
-  atoms:InlineAtomOccurrence[]; edges:InlineEdge[]; fences:ClosedFenceBody[]; emptyBodies: EmptyBody[]; bodies: InlineBody[]; emissions: InlineEmission[]
+  separators:{left?:number;right?:number;range:RawRange;definition?:ProtectedSource}[]; critic:CriticPayload[]; atoms:InlineAtomOccurrence[]; edges:InlineEdge[]; fences:ClosedFenceBody[]; emptyBodies: EmptyBody[]; bodies: InlineBody[]; emissions: InlineEmission[]
   source: string; blankLines: BlankDraft[]; fallback?: FallbackEmpty; lists: ListDraft[]
   trace: SourceTrace; lineStarts: number[]; protectedSources: ProtectedSource[]; runs: CapturedTextRun[]; roots: SourceRoot[]
   synthetic: { gapIndex: number; emission: SyntheticEmission }[]
@@ -455,7 +457,7 @@ type InlineBody = Readonly<{
   pmFrom:number; pmTo:number; sourceFrom:number; sourceTo:number
   kind:'paragraph'|'heading'|'table-cell'; singlePhysicalLine:boolean
 }>
-type InlineEmission = {from:number;to:number;kind:string;runFrom:number;runTo:number;node?:PmNode;body?:InlineBody;empty?:EmptyPlace;edgeFrom?:number;edgeTo?:number;atomFrom?:number;atomTo?:number;fence?:ClosedFenceBody}
+type InlineEmission = {from:number;to:number;kind:string;runFrom:number;runTo:number;node?:PmNode;body?:InlineBody;empty?:EmptyPlace;edgeFrom?:number;edgeTo?:number;atomFrom?:number;atomTo?:number;criticFrom?:number;criticTo?:number;separators?:readonly SeparatorToken[];fence?:ClosedFenceBody}
 const inlineFrames=new WeakMap<object,InlineEmission>()
 const inlineCloseStates=new WeakSet<object>()
 const inlineFacts = new WeakMap<object, {collector:Capture;trace?:SourceTrace;kind?:InlineBody['kind'];empty?:EmptyPlace;trimEnd?:number}>()
@@ -467,6 +469,15 @@ const inlineStateOwners = new WeakMap<object, SourceTrace>()
 const tokenSources = new WeakMap<object, { collector: Capture; runs: SourceRun[] }>()
 const pendingSources = new WeakMap<object, SourceRun[]>()
 type EdgeToken={open:{from:number;to:number};close:{from:number;to:number};side:'open'|'close'|'code'}
+type CriticToken=Omit<CriticPayload,'id'|'body'|'pmFrom'|'pmTo'|'note'>
+const criticTokens=new WeakMap<object,CriticToken>()
+function registerCritic(token:object,trace:SourceTrace,start:number,noteStart:number,noteEnd:number,end:number,middleStart?:number):void {
+ const syntax=rawRange(trace,start,end),note=rawRange(trace,noteStart,noteEnd),close=rawRange(trace,noteEnd,end)
+ const open=middleStart===undefined?undefined:rawRange(trace,start,start+3),middle=middleStart===undefined?undefined:rawRange(trace,middleStart,noteStart)
+ // Empty payload endpoints still come from the actual rule's consumed trace.
+ const noteFrom=note?.from??rawPoint(trace,noteStart),noteTo=note?.to??rawPoint(trace,noteEnd)
+ if(syntax&&close&&noteFrom!==undefined&&noteTo!==undefined&&(middleStart===undefined||open&&middle))criticTokens.set(token,{kind:middleStart===undefined?'note_anchor':'annotation',syntaxFrom:syntax.from,syntaxTo:syntax.to,noteFrom,noteTo,close,...(open&&middle?{open,middle}:{})})
+}
 const atomTokenRanges=new WeakMap<object,{from:number;to:number}>()
 const htmlTokenRanges=new WeakMap<object,{from:number;to:number}>()
 const edgeTokens=new WeakMap<object,EdgeToken>()
@@ -547,6 +558,8 @@ function wrapCaptureRule(ruler: any, name: string, wrapper: (original: any, ...a
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const collectorFor = (state: any): Capture | undefined => state.env?.[captureKey]
 type NestedBlankRead={line:number;b:number;e:number;t:number;s:number;bs:number;lineMax:number;insertBefore:number;prefix:SourcePrefix;range:RawRange;eol?:RawRange}
+type SeparatorToken={range:RawRange;side:'left'|'right';definition?:ProtectedSource}
+const separatorTokens=new WeakMap<object,readonly SeparatorToken[]>()
 const nestedBlanks=new WeakMap<object,readonly {place:EmptyPlace;level:number;line:number}[]>()
 type ContainerRead={tokenizing?:boolean;blanks?:NestedBlankRead[];token:any;index:number;line:number;b:number;t:number;e:number;body?:number;prefix?:SourcePrefix;first?:any}
 type ContainerFrame={kind:string;entryIndent:number;marker:number;prefix:SourcePrefix;reads:ContainerRead[];current?:ContainerRead}
@@ -706,9 +719,27 @@ for(const name of ['list','blockquote','footnote_def'])wrapCaptureRule(md.block.
    const left=children.filter(child=>child.to<=blank.line).at(-1),right=children.find(child=>child.from>blank.line)
    // First between-body blank is the separator; empty-only baseline is
    // emitted by the schema and already certified at the actual close token.
-   if(touchesDefinition){priorRight=right?.index;continue}
+   if(touchesDefinition){
+    const begin=blank.prefix[0]
+    const definition=definitionRight&&!definitionLeft?collector.protectedSources.find(p=>p.sourceFrom===end):definitionLeft&&!definitionRight&&begin&&'from' in begin?collector.protectedSources.find(p=>p.sourceTo===begin.from):undefined
+    const side=definitionRight?'left':'right',child=definitionRight?left:right,target=child&&state.tokens[child.index+1]
+    if(definition&&target?.type==='inline'&&blank.prefix.length===1&&begin&&'from' in begin&&begin.to===blank.range.from&&blank.eol?.from===blank.range.to){
+     const range={from:begin.from,to:blank.eol.to}
+     separatorTokens.set(target,[...(separatorTokens.get(target)??[]),{range,side,definition}])
+    }
+    priorRight=right?.index;continue
+   }
    if(name==='list'&&place?.kind==='prepend'&&!left&&blank===blanks[0])continue
-   if(left&&right&&priorRight!==right.index){priorRight=right.index;continue}
+   if(left&&right&&priorRight!==right.index){
+    const leftInline=state.tokens[left.index+1],rightInline=state.tokens[right.index+1],begin=blank.prefix[0]
+    // This exact consumed line has no PM paragraph: it separates two real
+    // bodies. Record both token relationships, never infer it from an empty fact.
+    if(leftInline?.type==='inline'&&rightInline?.type==='inline'&&blank.prefix.length===1&&begin&&'from' in begin&&begin.to===blank.range.from&&blank.eol?.from===blank.range.to){
+     const range={from:begin.from,to:blank.eol.to}
+     for(const [target,side] of [[leftInline,'left'],[rightInline,'right']] as const)separatorTokens.set(target,[...(separatorTokens.get(target)??[]),{range,side}])
+    }
+    priorRight=right.index;continue
+   }
    if(!children.length&&blank.line===read.line)continue
    const before=right?.index??close,target=state.tokens[before]
    const items=[...(nestedBlanks.get(target)??[])]
@@ -997,6 +1028,7 @@ wrapCaptureRule(md.inline.ruler, 'newline', (original, state, silent) => {
   while (end > 0 && state.pending[end - 1] === ' ') end--
   const expected = state.pending.slice(0, end)
   let trim = state.pending.length - end
+  const syntaxFrom=state.pos-trim,syntaxTo=state.pos+1
   const runs = pendingSources.get(state)!
   while (trim > 0 && runs.length) {
     const run = runs.pop()!
@@ -1012,6 +1044,8 @@ wrapCaptureRule(md.inline.ruler, 'newline', (original, state, silent) => {
   const result = original(state, silent)
   if (!result || state.pending !== '' || (expected && (state.tokens[start]?.type !== 'text'
     || state.tokens[start].content !== expected))) throw new UnsupportedSourceCapture()
+  const token=state.tokens.at(-1),owner=inlineStateOwners.get(state)!
+  if(token?.type==='hardbreak'||token?.type==='softbreak'){const raw=rawRange(owner,syntaxFrom,syntaxTo);if(raw)atomTokenRanges.set(token,raw)}
   return result
 })
 // Both unclosed-backtick paths append the literal marker to pending directly.
@@ -1066,6 +1100,7 @@ for (const name of ['entity', 'escape']) {
     const owner = inlineStateOwners.get(state)
     if (ok && !silent && collector && owner) {
       const token = state.tokens[state.tokens.length - 1]
+      if(name==='escape'&&token.type==='hardbreak'){const raw=rawRange(owner,from,from+2);if(raw)atomTokenRanges.set(token,raw)}
       if (token.type === 'text_special') tokenSources.set(token, { collector,
         runs: [{ trace: sliceTrace(owner, from, state.pos), text: token.content, kind: 'atomic' }] })
     }
@@ -1124,11 +1159,11 @@ for(const name of ['emphasis','strikethrough','mark'])wrapCaptureRule(md.inline.
 })
 // Read-only whole occurrence authority from the installed successful rule.
 // No math delimiters or payload are parsed again, and no text span is granted.
-for(const name of ['math_inline','math_inline_double'])wrapCaptureRule(md.inline.ruler,name,(original,state,silent)=>{
+for(const name of ['math_inline','math_inline_double','footnote_ref','footnote_ref_orphan'])wrapCaptureRule(md.inline.ruler,name,(original,state,silent)=>{
  const from=state.pos,result=original(state,silent),trace=inlineStateOwners.get(state)
  if(result&&!silent&&trace){
   const token=state.tokens.at(-1),view=sliceTrace(trace,from,state.pos)
-  if(token?.type===name&&view.pieces.length&&view.pieces.every((p,i)=>p.kind!=='generated'&&(!i||view.pieces[i-1]!.sourceTo===p.sourceFrom))){
+  if(token?.type===(name==='footnote_ref_orphan'?'footnote_ref':name)&&view.pieces.length&&view.pieces.every((p,i)=>p.kind!=='generated'&&(!i||view.pieces[i-1]!.sourceTo===p.sourceFrom))){
    const raw=rawRange(trace,from,state.pos);if(raw)atomTokenRanges.set(token,raw)
   }
  }
@@ -1247,13 +1282,14 @@ function captureText(state: any, token: any, delegate: () => void) {
 }
 
 function captureAtomEmission(state:any,token:any,delegate:()=>void):void {
- const raw=atomTokenRanges.get(token),collector=currentInlineCollector.get(state)
+ const critic=criticTokens.get(token),raw=atomTokenRanges.get(token)??(critic?.kind==='note_anchor'?{from:critic.syntaxFrom,to:critic.syntaxTo}:undefined),collector=currentInlineCollector.get(state)
  if(!raw||!collector){delegate();return}
  const frame=state.stack.at(-1),slot=frame.content.length,pmFrom=captureCursor(state)
  delegate()
  const node:PmNode|undefined=frame.content[slot],pmTo=captureCursor(state)
- if(state.stack.at(-1)!==frame||frame.content.length!==slot+1||!node||node.type.name!=='math_inline'||!node.isAtom||node.nodeSize!==pmTo-pmFrom)return
+ if(state.stack.at(-1)!==frame||frame.content.length!==slot+1||!node||!['math_inline','note_anchor','hardbreak','footnote_ref'].includes(node.type.name)||!node.isAtom||node.nodeSize!==pmTo-pmFrom)return
  collector.atoms.push({body:-1,pmFrom,pmTo,sourceFrom:raw.from,sourceTo:raw.to,node})
+ if(critic?.kind==='note_anchor'&&node.type.name==='note_anchor')collector.critic.push({...critic,id:collector.critic.length,body:-1,pmFrom,pmTo,note:node.attrs.note})
 }
 
 function captureEdgeEmission(state:any,token:any,delegate:()=>void):void {
@@ -1273,7 +1309,11 @@ function captureEdgeEmission(state:any,token:any,delegate:()=>void):void {
   delegate()
   if(opened&&collector){
    const mark=opened.marks.find(m=>!m.isInSet(frame.marks))
-   if(mark)collector.edges.push({id:collector.edges.length,body:-1,family:mark.type.name,pmFrom:opened.pmFrom,pmTo:position,open:edge.open,close:edge.close,marks:opened.marks})
+   if(mark){
+    collector.edges.push({id:collector.edges.length,body:-1,family:mark.type.name,pmFrom:opened.pmFrom,pmTo:position,open:edge.open,close:edge.close,marks:opened.marks})
+    const critic=criticTokens.get(token)
+    if(critic?.kind==='annotation'&&mark.type.name==='annotation')collector.critic.push({...critic,id:collector.critic.length,body:-1,pmFrom:opened.pmFrom,pmTo:position,note:mark.attrs.note})
+   }
   }
   active.delete(edge.open.from);return
  }
@@ -1335,17 +1375,19 @@ function captureInlineEmission(state:any,token:any,delegate:()=>void):void {
   }
   const frame=state.stack[state.stack.length-1],from=captureCursor(state),runFrom=fact.collector.runs.length
   currentInlineCollector.set(state,fact.collector)
-  const edgeFrom=fact.collector.edges.length,atomFrom=fact.collector.atoms.length
+  const edgeFrom=fact.collector.edges.length,atomFrom=fact.collector.atoms.length,criticFrom=fact.collector.critic.length
   delegate()
-  const edgeTo=fact.collector.edges.length,atomTo=fact.collector.atoms.length,to=captureCursor(state)
+  const edgeTo=fact.collector.edges.length,atomTo=fact.collector.atoms.length,criticTo=fact.collector.critic.length,to=captureCursor(state)
   if(state.stack[state.stack.length-1]!==frame)throw new UnsupportedSourceCapture()
   if(!['paragraph','heading'].includes(frame.type.name))return
-  const emission:InlineEmission={from,to,edgeFrom,edgeTo,atomFrom,atomTo,kind:frame.type.name,runFrom,runTo:fact.collector.runs.length,...(fact.empty?{empty:fact.empty}:{})}
+  const emission:InlineEmission={from,to,edgeFrom,edgeTo,atomFrom,atomTo,criticFrom,criticTo,separators:separatorTokens.get(token)??[],kind:frame.type.name,runFrom,runTo:fact.collector.runs.length,...(fact.empty?{empty:fact.empty}:{})}
   fact.collector.emissions.push(emission);inlineFrames.set(frame,emission)
   if(fact.trace&&fact.kind){
     const pieces=fact.trace.pieces
-    const contiguous=pieces.length>0&&pieces.every((p,i)=>p.kind!=='generated'&&(!i||pieces[i-1]!.sourceTo===p.sourceFrom))
-    const raw=contiguous?rawRange(fact.trace,0,fact.trace.text.length):undefined
+    const actual=pieces.length>0&&pieces.every(p=>p.kind!=='generated')
+    // getLines may omit container continuation prefixes between real pieces.
+    // They belong to this consumed envelope only as immutable recipe gaps.
+    const raw=actual?{from:pieces[0]!.sourceFrom,to:pieces.at(-1)!.sourceTo}:undefined
     if(raw)emission.body={pmFrom:from,pmTo:to,sourceFrom:raw.from,sourceTo:raw.to,kind:fact.kind,
       singlePhysicalLine:!/[\r\n]/.test(fact.collector.source.slice(raw.from,raw.to))}
   }
@@ -2880,6 +2922,16 @@ function finalizeCapturedDocument(collector: Capture, doc: PmNode): CapturedDocu
             if(pmFrom<from||pmTo>from+parent.content.size||doc.nodeAt(pmFrom)!==atom.node||pmTo-pmFrom!==atom.node.nodeSize)throw new UnsupportedSourceCapture()
             collector.atoms[i]={...atom,body,pmFrom,pmTo}
           }
+          for(const separator of emission.separators??[]){
+            let entry=collector.separators.find(s=>s.range.from===separator.range.from&&s.range.to===separator.range.to)
+            if(!entry){entry={range:separator.range,...(separator.definition?{definition:separator.definition}:{})};collector.separators.push(entry)}
+            if(entry[separator.side]!==undefined)throw new UnsupportedSourceCapture()
+            entry[separator.side]=body
+          }
+          for(let i=emission.criticFrom??0;i<(emission.criticTo??0);i++){
+            const critic=collector.critic[i]!
+            collector.critic[i]={...critic,body,pmFrom:critic.pmFrom+delta,pmTo:critic.pmTo+delta}
+          }
           for(let i=emission.edgeFrom??0;i<(emission.edgeTo??0);i++){
             const edge=collector.edges[i]!
             collector.edges[i]={...edge,body,pmFrom:edge.pmFrom+delta,pmTo:edge.pmTo+delta}
@@ -2926,7 +2978,7 @@ function finalizeCapturedDocument(collector: Capture, doc: PmNode): CapturedDocu
     }
     for(const u of layout.blankLines)if(u.role==='empty-paragraph')layoutBody(u.emission.pmFrom,{kind:'layout',origin:{kind:'blank',id:u.id}})
     if(layout.fallback)layoutBody(layout.fallback.emission.pmFrom,{kind:'layout',origin:{kind:'fallback'}})
-    capturedListLayouts.set(layout, { recipe:Object.freeze({atoms:Object.freeze(collector.atoms.filter(a=>a.body>=0).map(a=>Object.freeze(a))),bodies:Object.freeze(collector.bodies.map((b,body)=>Object.freeze({...b,body}))),edges:Object.freeze(collector.edges.filter(e=>e.body>=0).map(e=>Object.freeze(e))),fences:Object.freeze(collector.fences.map(f=>Object.freeze(f)))}),emptyBodies:Object.freeze(collector.emptyBodies.map(f=>Object.freeze(f))), source, doc, roots: collector.roots, lists, bodies:Object.freeze(collector.bodies.map(body=>Object.freeze(body))) })
+    capturedListLayouts.set(layout, { recipe:Object.freeze({definitionSeparators:Object.freeze(collector.separators.filter(s=>s.definition&&(s.left!==undefined||s.right!==undefined)&&collector.protectedSources.some(p=>p.kind===s.definition!.kind&&p.scope===s.definition!.scope&&p.sourceFrom===s.definition!.sourceFrom&&p.sourceTo===s.definition!.sourceTo)).map(s=>Object.freeze({body:s.left??s.right!,side:s.left!==undefined?'after' as const:'before' as const,definition:Object.freeze(s.definition!),range:Object.freeze(s.range)}))),separators:Object.freeze(collector.separators.filter(s=>s.left!==undefined&&s.right!==undefined).map(s=>Object.freeze({left:s.left!,right:s.right!,range:Object.freeze(s.range)}))),critic:Object.freeze(collector.critic.filter(c=>c.body>=0).map(c=>Object.freeze(c))),atoms:Object.freeze(collector.atoms.filter(a=>a.body>=0).map(a=>Object.freeze(a))),bodies:Object.freeze(collector.bodies.map((b,body)=>Object.freeze({...b,body}))),edges:Object.freeze(collector.edges.filter(e=>e.body>=0).map(e=>Object.freeze(e))),fences:Object.freeze(collector.fences.map(f=>Object.freeze(f)))}),emptyBodies:Object.freeze(collector.emptyBodies.map(f=>Object.freeze(f))), source, doc, roots: collector.roots, lists, bodies:Object.freeze(collector.bodies.map(body=>Object.freeze(body))) })
     return { doc, textRuns: collector.runs,
       protectedSources: Object.freeze(collector.protectedSources),
       layout,
@@ -3001,7 +3053,7 @@ export function preprocessFileSource(source: string): SourceTrace {
 }
 
 function newFileCollector(source: string, trace: SourceTrace, work: FileWorkAccumulator): Capture {
-  return { source, trace, atoms:[], edges:[], fences:[], emptyBodies:[], bodies: [], emissions: [], lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [], lists: [],
+  return { source, trace, separators:[], critic:[], atoms:[], edges:[], fences:[], emptyBodies:[], bodies: [], emissions: [], lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [], lists: [],
     file: { work, checkpoints: [], definitions: [], blockTokens: [], effects: [] } }
 }
 
@@ -3065,6 +3117,9 @@ function cloneTokenBatch(tokens: readonly ActualToken[], collector: Capture, raw
     if(pending)nestedBlanks.set(copy,pending.map(p=>({...p,line:p.line+lineDelta,place:shiftEmpty(p.place,rawDelta,lineDelta)})))
     const edge=edgeTokens.get(token)
     const shift=(r:{from:number;to:number})=>({from:r.from+rawDelta,to:r.to+rawDelta})
+    const separators=separatorTokens.get(token);if(separators)separatorTokens.set(copy,separators.map(s=>({...s,range:shift(s.range),...(s.definition?{definition:{...s.definition,sourceFrom:s.definition.sourceFrom+rawDelta,sourceTo:s.definition.sourceTo+rawDelta}}:{})})))
+    const critic=criticTokens.get(token)
+    if(critic)criticTokens.set(copy,{...critic,syntaxFrom:critic.syntaxFrom+rawDelta,syntaxTo:critic.syntaxTo+rawDelta,noteFrom:critic.noteFrom+rawDelta,noteTo:critic.noteTo+rawDelta,close:shift(critic.close),...(critic.open?{open:shift(critic.open)}:{}),...(critic.middle?{middle:shift(critic.middle)}:{})})
     const atom=atomTokenRanges.get(token);if(atom)atomTokenRanges.set(copy,shift(atom))
     const html=htmlTokenRanges.get(token);if(html)htmlTokenRanges.set(copy,shift(html))
     if(edge)edgeTokens.set(copy,{...edge,open:shift(edge.open),close:shift(edge.close)})

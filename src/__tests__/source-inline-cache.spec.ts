@@ -66,3 +66,51 @@ it('fix1 raw line deltas and foreign recapture preserve only the actual math occ
  const corrupt={...foreign,textSpans:foreign.textSpans.map((s,i)=>i?s:{...s,sourceFrom:s.sourceFrom+1})};expect(applySourceBlockTransaction(corrupt,tr).ok).toBe(false);
  expect(applySourceBlockTransaction(base,tr).ok).toBe(true);expect(base.source).toBe('Long\n\nPrefix\n\n> Alpha $x$ $$x$$\n');
 });
+
+it('Critic range and point payload occurrences replay for three generations including point-only bodies',()=>{
+ const raw='> {==A==}{>>同<<}{==B==}{>>同<<}\r\n\r\n{>>原注<<}\r\n',first=captureFilePipeline(raw);expect(first.ok).toBe(true);if(!first.ok)throw Error(first.reason);
+ const session=(v:typeof first.value):SourceSession=>({revision:0,source:raw,doc:v.doc,textSpans:v.textRuns,roots:v.roots,gaps:v.gaps,layout:v.layout,protectedSources:v.protectedSources});
+ const facts=capturedInlineRecipeFacts(session(first.value))!;expect(facts.critic).toHaveLength(3);expect(new Set(facts.critic.map(c=>c.id)).size).toBe(3);
+ expect(facts.critic.map(c=>raw.slice(c.noteFrom,c.noteTo))).toEqual(['同','同','原注']);let cached=first;
+ for(let i=0;i<3;i++){const next=replayFilePipeline(cached.cache);expect(next.ok).toBe(true);if(!next.ok)throw Error(next.reason);const base=session(next.value),current=capturedInlineRecipeFacts(base)!;expect(current.critic).toEqual(facts.critic);const at=current.critic[2]!.pmFrom,tr=EditorState.create({doc:base.doc}).tr.setNodeMarkup(at,undefined,{note:'新注'});expect(prepareInlineRecipe(base,tr,facts).ok).toBe(false);const r=applySourceBlockTransaction(base,tr);expect(r.ok).toBe(true);if(r.ok)expect(r.session.source).toBe('> {==A==}{>>同<<}{==B==}{>>同<<}\r\n\r\n{>>新注<<}\r\n');cached=next}
+});
+it('Critic cache rawDelta and foreign finalizer bind actual payload attrs',()=>{
+ const b=open('A\n\n> {==Alpha==}{>>原注<<} {>>原注<<}\n'),moved=prepareFileSourceEdits(b,{expectedRevision:b.revision,edits:[{from:0,to:1,removed:'A',text:'Long\n\nPrefix'}]});expect(moved.ok).toBe(true);if(!moved.ok)throw Error(moved.reason);
+ const base=moved.session,facts=capturedInlineRecipeFacts(base)!,old=capturedInlineRecipeFacts(b)!;
+ for(const [i,c] of facts.critic.entries()){expect(c.noteFrom-old.critic[i]!.noteFrom).toBe(11);expect(base.source.slice(c.noteFrom,c.noteTo)).toBe(c.note)}
+ const clone={...base,layout:JSON.parse(JSON.stringify(base.layout)) as typeof base.layout},at=facts.critic[1]!.pmFrom,tr=EditorState.create({doc:base.doc}).tr.setNodeMarkup(at,undefined,{note:'新注'}),r=applySourceBlockTransaction(clone,tr);
+ expect(r.ok).toBe(true);if(r.ok)expect(r.session.source).toBe('Long\n\nPrefix\n\n> {==Alpha==}{>>原注<<} {>>新注<<}\n');
+});
+it('reserved nested separators replay and shift only with their actual body pair',()=>{
+ const raw='> A\r\n>\r\n>\r\n>{>>原注<<}',first=captureFilePipeline(raw);expect(first.ok).toBe(true);if(!first.ok)throw Error(first.reason);
+ const session=(v:typeof first.value):SourceSession=>({revision:0,source:raw,doc:v.doc,textSpans:v.textRuns,roots:v.roots,gaps:v.gaps,layout:v.layout,protectedSources:v.protectedSources});
+ const original=session(first.value),facts=capturedInlineRecipeFacts(original)!;expect(facts.separators).toHaveLength(1);let cache=first;
+ for(let i=0;i<3;i++){const next=replayFilePipeline(cache.cache);expect(next.ok).toBe(true);if(!next.ok)throw Error(next.reason);const b=session(next.value),current=capturedInlineRecipeFacts(b)!,point=current.critic[0]!,tr=EditorState.create({doc:b.doc}).tr.delete(point.pmFrom,point.pmTo);expect(current.separators).toEqual(facts.separators);expect(prepareInlineRecipe(b,tr,facts).ok).toBe(false);expect(prepareInlineRecipe(b,tr,{...current,separators:current.separators.map(s=>({...s,range:{from:0,to:5}}))}).ok).toBe(false);const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(true);if(r.ok)expect(r.session.source).toBe('> A\r\n>\r\n>');cache=next}
+ const prefix=open('P\n\n'+raw),moved=prepareFileSourceEdits(prefix,{expectedRevision:prefix.revision,edits:[{from:0,to:1,removed:'P',text:'Long\n\nPrefix'}]});expect(moved.ok).toBe(true);if(!moved.ok)throw Error(moved.reason);
+ const b=moved.session,point=capturedInlineRecipeFacts(b)!.critic[0]!,foreign={...b,layout:JSON.parse(JSON.stringify(b.layout)) as typeof b.layout},r=applySourceBlockTransaction(foreign,EditorState.create({doc:b.doc}).tr.delete(point.pmFrom,point.pmTo));expect(r.ok).toBe(true);if(r.ok)expect(r.session.source).toBe('Long\n\nPrefix\n\n> A\r\n>\r\n>');
+});
+it.each([
+ ['>{>>原注<<}\n>\n> [r]: /u\n','>\n> [r]: /u\n','after'],
+ ['> [r]: /u\n>\n>{>>原注<<}\n','> [r]: /u\n>\n>\n','before'],
+] as const)('definition separator relationship survives replay and raw delta: %s',(raw,expected,side)=>{
+ const first=captureFilePipeline(raw);expect(first.ok).toBe(true);if(!first.ok)throw Error(first.reason);let cache=first;
+ const session=(v:typeof first.value):SourceSession=>({revision:0,source:raw,doc:v.doc,textSpans:v.textRuns,roots:v.roots,gaps:v.gaps,layout:v.layout,protectedSources:v.protectedSources});
+ const facts=capturedInlineRecipeFacts(session(first.value))!;expect(facts.definitionSeparators.map(s=>s.side)).toEqual([side]);
+ for(let i=0;i<3;i++){const next=replayFilePipeline(cache.cache);expect(next.ok).toBe(true);if(!next.ok)throw Error(next.reason);const b=session(next.value),current=capturedInlineRecipeFacts(b)!,p=current.critic[0]!;expect(current.definitionSeparators).toEqual(facts.definitionSeparators);const tr=EditorState.create({doc:b.doc}).tr.delete(p.pmFrom,p.pmTo);expect(prepareInlineRecipe(b,tr,facts).ok).toBe(false);const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(true);if(r.ok)expect(r.session.source).toBe(expected);cache=next}
+ const prefix=open('P\n\n'+raw),moved=prepareFileSourceEdits(prefix,{expectedRevision:prefix.revision,edits:[{from:0,to:1,removed:'P',text:'Long\n\nPrefix'}]});expect(moved.ok).toBe(true);if(!moved.ok)throw Error(moved.reason);const b=moved.session,p=capturedInlineRecipeFacts(b)!.critic[0]!,foreign={...b,layout:JSON.parse(JSON.stringify(b.layout)) as typeof b.layout},r=applySourceBlockTransaction(foreign,EditorState.create({doc:b.doc}).tr.delete(p.pmFrom,p.pmTo));expect(r.ok).toBe(true);if(r.ok)expect(r.session.source).toBe('Long\n\nPrefix\n\n'+expected);
+});
+it('empty point lifecycle uses fresh Critic facts after each replayed insertion',()=>{
+ const raw='>\n',first=captureFilePipeline(raw);expect(first.ok).toBe(true);if(!first.ok)throw Error(first.reason);let cached=first;
+ for(let i=0;i<3;i++){const next=replayFilePipeline(cached.cache);expect(next.ok).toBe(true);if(!next.ok)throw Error(next.reason);const v=next.value;let b:SourceSession={revision:0,source:raw,doc:v.doc,textSpans:v.textRuns,roots:v.roots,gaps:v.gaps,layout:v.layout,protectedSources:v.protectedSources};
+ const point=b.doc.type.schema.nodes.note_anchor!.create({note:'?'}),insert=applySourceBlockTransaction(b,EditorState.create({doc:b.doc}).tr.insert(2,point));expect(insert.ok).toBe(true);if(!insert.ok)throw Error(insert.reason);b=insert.session;expect(b.source).toBe('>{>>?<<}\n');expect(capturedInlineRecipeFacts(b)!.critic).toHaveLength(1);
+ const save=applySourceBlockTransaction(b,EditorState.create({doc:b.doc}).tr.setNodeMarkup(2,undefined,{note:'新注'}));expect(save.ok).toBe(true);if(!save.ok)throw Error(save.reason);b=save.session;expect(b.source).toBe('>{>>新注<<}\n');const remove=applySourceBlockTransaction(b,EditorState.create({doc:b.doc}).tr.delete(2,3));expect(remove.ok).toBe(true);if(remove.ok)expect(remove.session.source).toBe(raw);cached=next;
+ }
+});
+it('actual newline escape and footnote atoms remain read-only through repeated replay',()=>{
+ const raw='\uFEFF> A  \r\n> B[^x]\r\n\r\n[^x]: body\r\n',first=captureFilePipeline(raw);expect(first.ok).toBe(true);if(!first.ok)throw Error(first.reason);let cache=first;
+ for(let i=0;i<3;i++){const next=replayFilePipeline(cache.cache);expect(next.ok).toBe(true);if(!next.ok)throw Error(next.reason);const v=next.value,b:SourceSession={revision:0,source:raw,doc:v.doc,textSpans:v.textRuns,roots:v.roots,gaps:v.gaps,layout:v.layout,protectedSources:v.protectedSources},facts=capturedInlineRecipeFacts(b)!;
+ expect(facts.atoms.map(a=>raw.slice(a.sourceFrom,a.sourceTo))).toEqual(['  \r\n','[^x]']);for(const a of facts.atoms)expect(b.doc.nodeAt(a.pmFrom)).toBe(a.node);
+ const tr=EditorState.create({doc:b.doc}).tr.addMark(2,3,b.doc.type.schema.marks.strong!.create()),r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(true);if(r.ok)expect(r.session.source).toBe('\uFEFF> **A**  \r\n> B[^x]\r\n\r\n[^x]: body\r\n');
+ for(const atom of facts.atoms){expect(applySourceBlockTransaction(b,EditorState.create({doc:b.doc}).tr.addMark(atom.pmFrom,atom.pmTo,b.doc.type.schema.marks.strong!.create())).ok).toBe(false);expect(applySourceBlockTransaction(b,EditorState.create({doc:b.doc}).tr.delete(atom.pmFrom,atom.pmTo)).ok).toBe(false)}cache=next;
+ }
+});

@@ -4,6 +4,8 @@ All notable changes to `@moraya/core` are documented here. SemVer.
 
 ## Unreleased
 
+- Source-preserving CriticMarkup edits update only actual annotation payloads, retain separate source wrappers and inner formatting, and support range-note addition/removal plus point-note insert/edit/remove in certified empty paragraphs and table cells. Point-only deletion consumes only certified redundant separators or its own terminal EOL. Aggregate inline/annotation artifacts and installed consumer validation accompany this change; full file UI/history and formula editing remain separate.
+
 - Source inline formatting splits crossing mark envelopes into valid nesting, keeps code spans inside other marks, and preserves certified untouched math occurrences in the same body without granting formula editing permission.
 
 - Source transactions preserve original inline syntax during partial and cross-body mark commands, actual inline InputRules, editable code spans, and marked/link first input in certified empty bodies. Closed top-level code fences grow only the necessary markers on collisions. Source and consumer tests are committed; compiled artifacts and installed-host acceptance follow in the annotation integration task.

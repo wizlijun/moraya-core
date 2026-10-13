@@ -511,7 +511,7 @@ export function prepareEmptyParagraphEdits(base:SourceSession,tr:Transaction,
  const ledger=createLedger(base),first=tr.steps[0];
  if(!first||Object.getPrototypeOf(first)!==ReplaceStep.prototype||tr.steps.length!==tr.docs.length||!tr.before.eq(base.doc))fail()
  const initial=first as ReplaceStep,parent=base.doc.resolve(initial.from).parent
- initial.slice.content.forEach(node=>{if(!node.isText)fail()})
+ initial.slice.content.forEach(node=>{if(!node.isText&&(tr.steps.length!==1||initial.slice.content.childCount!==1||node.type!==base.doc.type.schema.nodes.note_anchor||!node.isLeaf||node.nodeSize!==1||node.marks.length||typeof node.attrs.note!=='string'||/[\r\n]|<<}/.test(node.attrs.note)||!node.eq(node.type.create({note:node.attrs.note}))))fail()})
  if(initial.from!==initial.to||initial.slice.openStart||initial.slice.openEnd||!initial.slice.size||(initial as ReplaceStep&{structure:boolean}).structure||parent.type.name!=='paragraph'||parent.content.size)fail()
  for(let i=0;i<tr.steps.length;i++){
   const step=tr.steps[i]!,before=tr.docs[i]!,after=tr.docs[i+1]??tr.doc

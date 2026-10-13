@@ -116,16 +116,19 @@ it('keeps repeated paragraph ownership and subsequent captures separate', () => 
     { sourceFrom: 0, sourceTo: 1, pmFrom: 1, pmTo: 2, kind: 'linear' },
   ])
 })
-it('maps actual text marks while keeping inline code opaque', () => {
+it('maps actual text marks and code bodies without mapping their delimiters', () => {
   for (const source of [
     '甲 `code` 目标乙', '甲 ~~删除~~ 目标乙', '甲 <u>下划线</u> 目标乙',
     '甲 [标签][ref] 目标乙\n\n[ref]: /path “标题”',
   ]) {
     const r = captured(source)
     expect(r.textRuns.some(s => s.sourceFrom <= source.indexOf('目标乙') && s.sourceTo > source.indexOf('目标乙'))).toBe(true)
-    if(source.includes('`code`'))expect(r.textRuns.some(span=>span.sourceFrom<source.indexOf('code')+4&&span.sourceTo>source.indexOf('code'))).toBe(false)
+    if(source.includes('`code`')){
+      const at=source.indexOf('code');expect(r.textRuns.filter(span=>span.sourceFrom>=at&&span.sourceTo<=at+4).map(span=>source.slice(span.sourceFrom,span.sourceTo)).join('')).toBe('code')
+      expect(r.textRuns.some(span=>span.sourceFrom<=at-1&&span.sourceTo>at-1||span.sourceFrom<=at+4&&span.sourceTo>at+4)).toBe(false)
+    }
     for (const span of r.textRuns) r.doc.nodesBetween(span.pmFrom, span.pmTo, node => {
-      if (node.isText) expect(node.marks.every(mark => ['em', 'strong', 'link', 'strike_through', 'html_mark'].includes(mark.type.name))).toBe(true)
+      if (node.isText) expect(node.marks.every(mark => ['em', 'strong', 'link', 'strike_through', 'html_mark', 'code'].includes(mark.type.name))).toBe(true)
     })
   }
 })

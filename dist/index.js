@@ -2832,7 +2832,8 @@ md.inline.ruler.push("caret_highlight", (state, silent) => {
   }
   if (closeIdx < 0 || closeIdx === contentStart) return false;
   if (!silent) {
-    state.push("caret_highlight_open", "mark", 1).markup = "^^";
+    const opened = state.push("caret_highlight_open", "mark", 1);
+    opened.markup = "^^";
     const oldPos = state.pos;
     const oldMax = state.posMax;
     state.pos = contentStart;
@@ -2840,7 +2841,10 @@ md.inline.ruler.push("caret_highlight", (state, silent) => {
     state.md.inline.tokenize(state);
     state.pos = oldPos;
     state.posMax = oldMax;
-    state.push("caret_highlight_close", "mark", -1).markup = "^^";
+    const closed = state.push("caret_highlight_close", "mark", -1);
+    closed.markup = "^^";
+    const trace = inlineStateOwners.get(state);
+    if (trace) registerEdge(opened, closed, trace, start, contentStart, closeIdx, closeIdx + 2);
   }
   state.pos = closeIdx + 2;
   return true;
@@ -2857,6 +2861,8 @@ md.inline.ruler.push("critic_annotation", (state, silent) => {
     if (!silent) {
       const tok = state.push("critic_note", "", 0);
       tok.meta = { note: note2 };
+      const trace = inlineStateOwners.get(state);
+      if (trace) registerCritic(tok, trace, start, start + 3, close, close + 3);
     }
     state.pos = close + 3;
     return true;
@@ -2881,7 +2887,12 @@ md.inline.ruler.push("critic_annotation", (state, silent) => {
     state.md.inline.tokenize(state);
     state.pos = oldPos;
     state.posMax = oldMax;
-    state.push("critic_anno_close", "span", -1);
+    const close = state.push("critic_anno_close", "span", -1);
+    const trace = inlineStateOwners.get(state);
+    if (trace) {
+      registerEdge(open, close, trace, start, start + 3, hlClose, noteClose + 3);
+      registerCritic(close, trace, start, noteStart, noteClose, noteClose + 3, hlClose);
+    }
   }
   state.pos = noteClose + 3;
   return true;
@@ -2907,6 +2918,11 @@ function tagPairedHtmlInline(tokens) {
             const opener = children2[entry.index];
             if (opener) {
               opener.meta = { ...opener.meta || {}, htmlPaired: true };
+              const open = htmlTokenRanges.get(opener), close = htmlTokenRanges.get(child);
+              if (open && close) {
+                edgeTokens.set(opener, { open, close, side: "open" });
+                edgeTokens.set(child, { open, close, side: "close" });
+              }
             }
             child.meta = { ...child.meta || {}, htmlPaired: true };
             stack.splice(j, 1);
@@ -3036,11 +3052,24 @@ var inlineCloseStates = /* @__PURE__ */ new WeakSet();
 var inlineFacts = /* @__PURE__ */ new WeakMap();
 var literalFacts = /* @__PURE__ */ new WeakMap();
 var capturedTextParents = ["paragraph", "heading", "code_block", "frontmatter", "html_block"];
-var capturedTextMarks = ["em", "strong", "link", "annotation", "html_mark", "highlight", "strike_through"];
+var capturedTextMarks = ["em", "strong", "link", "annotation", "html_mark", "highlight", "strike_through", "code"];
 var tokenArrays = /* @__PURE__ */ new WeakMap();
 var inlineStateOwners = /* @__PURE__ */ new WeakMap();
 var tokenSources = /* @__PURE__ */ new WeakMap();
 var pendingSources = /* @__PURE__ */ new WeakMap();
+var criticTokens = /* @__PURE__ */ new WeakMap();
+function registerCritic(token, trace, start, noteStart, noteEnd, end, middleStart) {
+  const syntax = rawRange(trace, start, end), note = rawRange(trace, noteStart, noteEnd), close = rawRange(trace, noteEnd, end);
+  const open = middleStart === void 0 ? void 0 : rawRange(trace, start, start + 3), middle = middleStart === void 0 ? void 0 : rawRange(trace, middleStart, noteStart);
+  const noteFrom = note?.from ?? rawPoint(trace, noteStart), noteTo = note?.to ?? rawPoint(trace, noteEnd);
+  if (syntax && close && noteFrom !== void 0 && noteTo !== void 0 && (middleStart === void 0 || open && middle)) criticTokens.set(token, { kind: middleStart === void 0 ? "note_anchor" : "annotation", syntaxFrom: syntax.from, syntaxTo: syntax.to, noteFrom, noteTo, close, ...open && middle ? { open, middle } : {} });
+}
+var atomTokenRanges = /* @__PURE__ */ new WeakMap();
+var htmlTokenRanges = /* @__PURE__ */ new WeakMap();
+var edgeTokens = /* @__PURE__ */ new WeakMap();
+var fenceTokens = /* @__PURE__ */ new WeakMap();
+var currentInlineCollector = /* @__PURE__ */ new WeakMap();
+var activeEdges = /* @__PURE__ */ new WeakMap();
 var capturedFenceClosed = /* @__PURE__ */ new WeakMap();
 var capturedRootFencesClosed = /* @__PURE__ */ new WeakMap();
 var capturedListLayouts = /* @__PURE__ */ new WeakMap();
@@ -3052,6 +3081,10 @@ function capturedSourceLists(source, doc2, roots, layout) {
 function capturedInlineBodies(source, doc2, roots, layout) {
   const bound = capturedListLayouts.get(layout);
   return bound && bound.source === source && bound.doc === doc2 && bound.roots === roots && bound.lists === layout.lists ? bound.bodies : void 0;
+}
+function capturedInlineRecipeFacts(base) {
+  const bound = capturedListLayouts.get(base.layout);
+  return bound && bound.source === base.source && bound.doc === base.doc && bound.roots === base.roots && bound.lists === base.layout.lists ? bound.recipe : void 0;
 }
 function capturedEmptyBodies(source, doc2, roots, layout) {
   const bound = capturedListLayouts.get(layout);
@@ -3102,6 +3135,7 @@ function wrapCaptureRule(ruler, name, wrapper, preserveAlternates = false) {
   }, { alt });
 }
 var collectorFor = (state) => state.env?.[captureKey];
+var separatorTokens = /* @__PURE__ */ new WeakMap();
 var nestedBlanks = /* @__PURE__ */ new WeakMap();
 var containerFrames = /* @__PURE__ */ new WeakMap();
 var containerEnds = /* @__PURE__ */ new WeakMap();
@@ -3296,11 +3330,23 @@ for (const name of ["list", "blockquote", "footnote_def"]) wrapCaptureRule(md.bl
       const touchesDefinition = firstInRun && (definitionLeft || definitionRight);
       const left = children2.filter((child) => child.to <= blank.line).at(-1), right = children2.find((child) => child.from > blank.line);
       if (touchesDefinition) {
+        const begin2 = blank.prefix[0];
+        const definition = definitionRight && !definitionLeft ? collector.protectedSources.find((p) => p.sourceFrom === end) : definitionLeft && !definitionRight && begin2 && "from" in begin2 ? collector.protectedSources.find((p) => p.sourceTo === begin2.from) : void 0;
+        const side = definitionRight ? "left" : "right", child = definitionRight ? left : right, target2 = child && state.tokens[child.index + 1];
+        if (definition && target2?.type === "inline" && blank.prefix.length === 1 && begin2 && "from" in begin2 && begin2.to === blank.range.from && blank.eol?.from === blank.range.to) {
+          const range = { from: begin2.from, to: blank.eol.to };
+          separatorTokens.set(target2, [...separatorTokens.get(target2) ?? [], { range, side, definition }]);
+        }
         priorRight = right?.index;
         continue;
       }
       if (name === "list" && place?.kind === "prepend" && !left && blank === blanks[0]) continue;
       if (left && right && priorRight !== right.index) {
+        const leftInline = state.tokens[left.index + 1], rightInline = state.tokens[right.index + 1], begin2 = blank.prefix[0];
+        if (leftInline?.type === "inline" && rightInline?.type === "inline" && blank.prefix.length === 1 && begin2 && "from" in begin2 && begin2.to === blank.range.from && blank.eol?.from === blank.range.to) {
+          const range = { from: begin2.from, to: blank.eol.to };
+          for (const [target2, side] of [[leftInline, "left"], [rightInline, "right"]]) separatorTokens.set(target2, [...separatorTokens.get(target2) ?? [], { range, side }]);
+        }
         priorRight = right.index;
         continue;
       }
@@ -3340,7 +3386,7 @@ wrapCaptureRule(md.block.ruler, "fence", (original, state, startLine, endLine, s
   const originalGetLines = state.getLines, descriptor = Object.getOwnPropertyDescriptor(state, "getLines");
   if (typeof originalGetLines !== "function" || descriptor?.configurable === false) throw new UnsupportedSourceCapture();
   const tokenStart = state.tokens.length;
-  let contentEnd, bodyTrace, empty2;
+  let contentEnd, bodyTrace, empty2, bodyUnstripped = false;
   Object.defineProperty(state, "getLines", {
     configurable: true,
     writable: true,
@@ -3354,6 +3400,7 @@ wrapCaptureRule(md.block.ruler, "fence", (original, state, startLine, endLine, s
       }) };
       const value = originalGetLines.call(this, begin, end, indent, keepLastLF);
       bodyTrace = traceConsumedLines(collectorFor(state).trace, read, value);
+      bodyUnstripped = !!bodyTrace && bodyTrace.pieces.length > 0 && bodyTrace.pieces[0].sourceFrom === rawPoint(collectorFor(state).trace, state.bMarks[begin]) && bodyTrace.pieces.every((p, i) => p.kind !== "generated" && (!i || bodyTrace.pieces[i - 1].sourceTo === p.sourceFrom));
       empty2 = emptyLiteral(state, startLine, end, indent, value);
       return value;
     }
@@ -3369,6 +3416,16 @@ wrapCaptureRule(md.block.ruler, "fence", (original, state, startLine, endLine, s
     const tokens = state.tokens.slice(tokenStart), token = tokens[0];
     if (tokens.length !== 1 || token?.type !== "fence" || contentEnd === void 0 || token.map?.[0] !== startLine || token.map?.[1] !== state.line || state.line !== contentEnd && state.line !== contentEnd + 1) throw new UnsupportedSourceCapture();
     capturedFenceClosed.set(token, state.line === contentEnd + 1);
+    if (state.line === contentEnd + 1) {
+      const collector = collectorFor(state), a = state.bMarks[startLine] + state.tShift[startLine], b = state.bMarks[contentEnd] + state.tShift[contentEnd];
+      const character = token.markup[0];
+      let end = b;
+      while (state.src[end] === character) end++;
+      const open = rawRange(collector.trace, a, a + token.markup.length), close = rawRange(collector.trace, b, end);
+      const whole = rawRange(collector.trace, collector.lineStarts[startLine], collector.lineStarts[state.line]), eol = actualEol(collector, state.eMarks[startLine]);
+      if (open && close && whole && eol && close.to - close.from >= token.markup.length)
+        fenceTokens.set(token, { sourceFrom: whole.from, sourceTo: whole.to, open, close, character, openLength: token.markup.length, closeLength: close.to - close.from, eol: collector.source.slice(eol.from, eol.to), contiguousTopLevel: token.level === 0 && bodyUnstripped });
+    }
     if (bodyTrace) literalFacts.set(token, { collector: collectorFor(state), trace: bodyTrace, kind: token.type, ...state.line === contentEnd + 1 && empty2 ? { empty: empty2 } : {} });
   } else if (contentEnd !== void 0) throw new UnsupportedSourceCapture();
   return result;
@@ -3618,6 +3675,7 @@ wrapCaptureRule(md.inline.ruler, "newline", (original, state, silent) => {
   while (end > 0 && state.pending[end - 1] === " ") end--;
   const expected = state.pending.slice(0, end);
   let trim = state.pending.length - end;
+  const syntaxFrom = state.pos - trim, syntaxTo = state.pos + 1;
   const runs = pendingSources.get(state);
   while (trim > 0 && runs.length) {
     const run = runs.pop();
@@ -3633,6 +3691,11 @@ wrapCaptureRule(md.inline.ruler, "newline", (original, state, silent) => {
   const start = state.tokens.length;
   const result = original(state, silent);
   if (!result || state.pending !== "" || expected && (state.tokens[start]?.type !== "text" || state.tokens[start].content !== expected)) throw new UnsupportedSourceCapture();
+  const token = state.tokens.at(-1), owner = inlineStateOwners.get(state);
+  if (token?.type === "hardbreak" || token?.type === "softbreak") {
+    const raw = rawRange(owner, syntaxFrom, syntaxTo);
+    if (raw) atomTokenRanges.set(token, raw);
+  }
   return result;
 });
 wrapCaptureRule(md.inline.ruler, "backticks", (original, state, silent) => {
@@ -3653,6 +3716,22 @@ wrapCaptureRule(md.inline.ruler, "backticks", (original, state, silent) => {
     }
     pendingSources.get(state).push({ text: marker, kind: "linear", trace: sliceTrace(owner, from, end) });
   }
+  if (state.pos > end) {
+    const token = state.tokens.at(-1);
+    if (token?.type !== "code_inline") throw new UnsupportedSourceCapture();
+    let a = end, b = state.pos - marker.length;
+    const normalized = state.src.slice(a, b).replace(/\n/g, " ");
+    if (/^ (.+) $/.test(normalized)) {
+      a++;
+      b--;
+    }
+    const runs = [];
+    for (let i = a; i < b; i++) runs.push({ text: state.src[i] === "\n" ? " " : state.src[i], kind: state.src[i] === "\n" ? "atomic" : "linear", trace: sliceTrace(owner, i, i + 1) });
+    if (runs.map((r2) => r2.text).join("") !== token.content) throw new UnsupportedSourceCapture();
+    tokenSources.set(token, { collector: collectorFor(state), runs });
+    const open = rawRange(owner, from, a), close = rawRange(owner, b, state.pos);
+    if (open && close) edgeTokens.set(token, { open, close, side: "code" });
+  }
   return result;
 });
 wrapCaptureRule(md.inline.ruler, "text", (original, state, silent) => {
@@ -3672,6 +3751,10 @@ for (const name of ["entity", "escape"]) {
     const owner = inlineStateOwners.get(state);
     if (ok && !silent && collector && owner) {
       const token = state.tokens[state.tokens.length - 1];
+      if (name === "escape" && token.type === "hardbreak") {
+        const raw = rawRange(owner, from, from + 2);
+        if (raw) atomTokenRanges.set(token, raw);
+      }
       if (token.type === "text_special") tokenSources.set(token, {
         collector,
         runs: [{ trace: sliceTrace(owner, from, state.pos), text: token.content, kind: "atomic" }]
@@ -3693,6 +3776,89 @@ wrapCaptureRule(md.inline.ruler, "emphasis", (original, state, silent) => {
     }));
   }
   return ok;
+});
+function registerEdge(opened, closed, trace, a, b, c2, d) {
+  const open = rawRange(trace, a, b), close = rawRange(trace, c2, d);
+  if (open && close) {
+    edgeTokens.set(opened, { open, close, side: "open" });
+    edgeTokens.set(closed, { open, close, side: "close" });
+  }
+}
+for (const name of ["strikethrough", "mark"]) wrapCaptureRule(md.inline.ruler, name, (original, state, silent) => {
+  const from = state.pos, before = state.tokens.length, ok = original(state, silent), trace = inlineStateOwners.get(state), collector = collectorFor(state);
+  if (ok && !silent && trace && collector) {
+    let at = from;
+    for (const token of state.tokens.slice(before)) if (token.type === "text" && token.content && /^[~=]+$/.test(token.content)) {
+      tokenSources.set(token, { collector, runs: [{ text: token.content, kind: "linear", trace: sliceTrace(trace, at, at + token.content.length) }] });
+      at += token.content.length;
+    }
+  }
+  return ok;
+});
+for (const name of ["emphasis", "strikethrough", "mark"]) wrapCaptureRule(md.inline.ruler2, name, (original, state) => {
+  const collector = collectorFor(state);
+  if (!collector) return original(state);
+  const pairs = [];
+  for (const ds of [state.delimiters, ...state.tokens_meta.map((m) => m?.delimiters).filter(Boolean)]) for (const d of ds) {
+    if (d.end < 0) continue;
+    const o = state.tokens[d.token], c2 = state.tokens[ds[d.end].token];
+    const a = tokenSources.get(o)?.runs[0]?.trace, b = tokenSources.get(c2)?.runs[0]?.trace;
+    const open = a && rawRange(a, 0, a.text.length), close = b && rawRange(b, 0, b.text.length);
+    if (open && close) pairs.push({ o, c: c2, open, close });
+  }
+  const result = original(state);
+  for (const p of pairs) if (p.o.nesting === 1 && p.c.nesting === -1) {
+    let open = p.open, close = p.close;
+    if (p.o.type === "strong_open") {
+      const neighbor = pairs.find((q) => q.open.to === open.from && q.close.from === close.to && q.o.content === "");
+      if (!neighbor) continue;
+      open = { from: neighbor.open.from, to: open.to };
+      close = { from: close.from, to: neighbor.close.to };
+    }
+    edgeTokens.set(p.o, { open, close, side: "open" });
+    edgeTokens.set(p.c, { open, close, side: "close" });
+  }
+  return result;
+});
+for (const name of ["math_inline", "math_inline_double", "footnote_ref", "footnote_ref_orphan"]) wrapCaptureRule(md.inline.ruler, name, (original, state, silent) => {
+  const from = state.pos, result = original(state, silent), trace = inlineStateOwners.get(state);
+  if (result && !silent && trace) {
+    const token = state.tokens.at(-1), view = sliceTrace(trace, from, state.pos);
+    if (token?.type === (name === "footnote_ref_orphan" ? "footnote_ref" : name) && view.pieces.length && view.pieces.every((p, i) => p.kind !== "generated" && (!i || view.pieces[i - 1].sourceTo === p.sourceFrom))) {
+      const raw = rawRange(trace, from, state.pos);
+      if (raw) atomTokenRanges.set(token, raw);
+    }
+  }
+  return result;
+});
+wrapCaptureRule(md.inline.ruler, "html_inline", (original, state, silent) => {
+  const start = state.pos, result = original(state, silent), trace = inlineStateOwners.get(state);
+  if (result && !silent && trace) {
+    const token = state.tokens.at(-1), range = rawRange(trace, start, state.pos);
+    if (token?.type === "html_inline" && range) htmlTokenRanges.set(token, range);
+  }
+  return result;
+});
+wrapCaptureRule(md.inline.ruler, "link", (original, state, silent) => {
+  const trace = inlineStateOwners.get(state);
+  if (silent || !trace) return original(state, silent);
+  const start = state.pos, before = state.tokens.length, tokenize = state.md.inline.tokenize;
+  let label;
+  state.md.inline.tokenize = function(current) {
+    if (current === state && !label) label = { from: current.pos, to: current.posMax };
+    return tokenize.call(this, current);
+  };
+  let result;
+  try {
+    result = original(state, silent);
+  } finally {
+    state.md.inline.tokenize = tokenize;
+  }
+  if (result && label) {
+    const opened = state.tokens.slice(before).find((t) => t.type === "link_open"), closed = state.tokens.at(-1);
+    if (opened && closed?.type === "link_close") registerEdge(opened, closed, trace, start, label.from, label.to, state.pos);
+  }
+  return result;
 });
 md.inline.ruler.push("source_capture_fallback", (state, silent) => {
   const owner = inlineStateOwners.get(state);
@@ -3786,6 +3952,58 @@ function captureText(state, token, delegate) {
   delegate();
   if (captureCursor(state) !== pos) throw new UnsupportedSourceCapture();
 }
+function captureAtomEmission(state, token, delegate) {
+  const critic = criticTokens.get(token), raw = atomTokenRanges.get(token) ?? (critic?.kind === "note_anchor" ? { from: critic.syntaxFrom, to: critic.syntaxTo } : void 0), collector = currentInlineCollector.get(state);
+  if (!raw || !collector) {
+    delegate();
+    return;
+  }
+  const frame = state.stack.at(-1), slot = frame.content.length, pmFrom = captureCursor(state);
+  delegate();
+  const node = frame.content[slot], pmTo = captureCursor(state);
+  if (state.stack.at(-1) !== frame || frame.content.length !== slot + 1 || !node || !["math_inline", "note_anchor", "hardbreak", "footnote_ref"].includes(node.type.name) || !node.isAtom || node.nodeSize !== pmTo - pmFrom) return;
+  collector.atoms.push({ body: -1, pmFrom, pmTo, sourceFrom: raw.from, sourceTo: raw.to, node });
+  if (critic?.kind === "note_anchor" && node.type.name === "note_anchor") collector.critic.push({ ...critic, id: collector.critic.length, body: -1, pmFrom, pmTo, note: node.attrs.note });
+}
+function captureEdgeEmission(state, token, delegate) {
+  const edge = edgeTokens.get(token), collector = currentInlineCollector.get(state);
+  if (!edge) {
+    delegate();
+    return;
+  }
+  const position = captureCursor(state), frame = state.stack.at(-1);
+  let active = activeEdges.get(state);
+  if (!active) {
+    active = /* @__PURE__ */ new Map();
+    activeEdges.set(state, active);
+  }
+  if (edge.side === "code") {
+    if (!collector) {
+      delegate();
+      return;
+    }
+    captureText(state, token, delegate);
+    const mark = state.schema.marks.code.create(), marks2 = mark.addToSet(frame.marks);
+    collector.edges.push({ id: collector.edges.length, body: -1, family: "code", pmFrom: position, pmTo: captureCursor(state), open: edge.open, close: edge.close, marks: marks2 });
+    return;
+  }
+  if (edge.side === "close") {
+    const opened = active.get(edge.open.from);
+    delegate();
+    if (opened && collector) {
+      const mark = opened.marks.find((m) => !m.isInSet(frame.marks));
+      if (mark) {
+        collector.edges.push({ id: collector.edges.length, body: -1, family: mark.type.name, pmFrom: opened.pmFrom, pmTo: position, open: edge.open, close: edge.close, marks: opened.marks });
+        const critic = criticTokens.get(token);
+        if (critic?.kind === "annotation" && mark.type.name === "annotation") collector.critic.push({ ...critic, id: collector.critic.length, body: -1, pmFrom: opened.pmFrom, pmTo: position, note: mark.attrs.note });
+      }
+    }
+    active.delete(edge.open.from);
+    return;
+  }
+  delegate();
+  active.set(edge.open.from, { pmFrom: position, marks: frame.marks.slice() });
+}
 function emptyLiteral(state, start, end, indent, content) {
   const collector = collectorFor(state);
   if (content !== "" && content !== "\n") return void 0;
@@ -3826,7 +4044,19 @@ function captureLiteralEmission(state, token, delegate) {
     pmTo: from + p.to,
     kind: p.kind === "copy" ? "linear" : "atomic"
   });
-  fact.collector.emissions.push({ from, to: from + text2.length, kind, runFrom, runTo: fact.collector.runs.length, node, ...fact.empty ? { empty: fact.empty } : {} });
+  const fence = fenceTokens.get(token);
+  const contiguous = trace.pieces.length > 0 && trace.pieces.every((p, i) => p.kind !== "generated" && (!i || trace.pieces[i - 1].sourceTo === p.sourceFrom));
+  const raw = fence && trace.pieces.length ? { from: trace.pieces[0].sourceFrom, to: trace.pieces.at(-1).sourceTo } : void 0;
+  fact.collector.emissions.push({
+    from,
+    to: from + text2.length,
+    kind,
+    runFrom,
+    runTo: fact.collector.runs.length,
+    node,
+    ...fact.empty ? { empty: fact.empty } : {},
+    ...fence && raw ? { fence: { ...fence, contiguousTopLevel: fence.contiguousTopLevel && contiguous, pmFrom: from - 1, pmTo: from + text2.length + 1, contentFrom: raw.from, contentTo: raw.to } } : {}
+  });
 }
 function captureInlineEmission(state, token, delegate) {
   const fact = inlineFacts.get(token);
@@ -3847,17 +4077,19 @@ function captureInlineEmission(state, token, delegate) {
     inlineCloseStates.add(state);
   }
   const frame = state.stack[state.stack.length - 1], from = captureCursor(state), runFrom = fact.collector.runs.length;
+  currentInlineCollector.set(state, fact.collector);
+  const edgeFrom = fact.collector.edges.length, atomFrom = fact.collector.atoms.length, criticFrom = fact.collector.critic.length;
   delegate();
-  const to = captureCursor(state);
+  const edgeTo = fact.collector.edges.length, atomTo = fact.collector.atoms.length, criticTo = fact.collector.critic.length, to = captureCursor(state);
   if (state.stack[state.stack.length - 1] !== frame) throw new UnsupportedSourceCapture();
   if (!["paragraph", "heading"].includes(frame.type.name)) return;
-  const emission = { from, to, kind: frame.type.name, runFrom, runTo: fact.collector.runs.length, ...fact.empty ? { empty: fact.empty } : {} };
+  const emission = { from, to, edgeFrom, edgeTo, atomFrom, atomTo, criticFrom, criticTo, separators: separatorTokens.get(token) ?? [], kind: frame.type.name, runFrom, runTo: fact.collector.runs.length, ...fact.empty ? { empty: fact.empty } : {} };
   fact.collector.emissions.push(emission);
   inlineFrames.set(frame, emission);
   if (fact.trace && fact.kind) {
     const pieces = fact.trace.pieces;
-    const contiguous = pieces.length > 0 && pieces.every((p, i) => p.kind !== "generated" && (!i || pieces[i - 1].sourceTo === p.sourceFrom));
-    const raw = contiguous ? rawRange(fact.trace, 0, fact.trace.text.length) : void 0;
+    const actual = pieces.length > 0 && pieces.every((p) => p.kind !== "generated");
+    const raw = actual ? { from: pieces[0].sourceFrom, to: pieces.at(-1).sourceTo } : void 0;
     if (raw) emission.body = {
       pmFrom: from,
       pmTo: to,
@@ -4563,6 +4795,10 @@ var MorayaMarkdownParser = class extends MarkdownParser {
     h["inline"] = (state, tok, tokens, i) => captureInlineEmission(state, tok, () => defaultInline(state, tok, tokens, i));
     for (const key of Object.keys(h)) {
       const delegate = h[key];
+      h[key] = (state, tok, tokens, i) => captureAtomEmission(state, tok, () => captureEdgeEmission(state, tok, () => delegate(state, tok, tokens, i)));
+    }
+    for (const key of Object.keys(h)) {
+      const delegate = h[key];
       h[key] = (state, tok, tokens, i) => captureRootEmission(
         state,
         tok,
@@ -4835,13 +5071,16 @@ function writeSourceText(state, node, parent, index) {
     for (let i = end; i < text2.length; i++) state.text(text2[i] === "	" ? "&#9;" : "&#32;", false);
   }
 }
+function sourceFenceLength(text2, character, minimum) {
+  let length = Math.max(3, minimum);
+  for (const run of text2.match(character === "`" ? /`+/g : /~+/g) ?? []) length = Math.max(length, run.length + 1);
+  return length;
+}
 function sourceCodeNode(state, node) {
   const language = node.attrs.language;
   if (typeof language !== "string" || /[\r\n]/.test(language)) throw new UnsupportedSourceCapture();
   const info = language, character = info.includes("`") ? "~" : "`";
-  const runs = node.textContent.match(character === "`" ? /`+/g : /~+/g) || [];
-  let length = 3;
-  for (const run of runs) length = Math.max(length, run.length + 1);
+  const length = sourceFenceLength(node.textContent, character, 3);
   const fence = character.repeat(length);
   state.write(fence + info + "\n");
   state.text(node.textContent, false);
@@ -4964,13 +5203,13 @@ var sourceRootSerializer = new MarkdownSerializer({
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 }, sourceMarks, { hardBreakNodeName: "hardbreak", strict: false });
-function serializeSourceInlineBody(node) {
+function serializeSourceInlineBody(node, tableCell = false) {
   const inline = new MarkdownSerializer({
     ...sourceRootSerializer.nodes,
     [node.type.name](state, body) {
       state.renderInline(body);
     }
-  }, sourceRootSerializer.marks, sourceRootSerializer.options);
+  }, sourceRootSerializer.marks, tableCell ? { ...sourceRootSerializer.options, escapeExtraCharacters: /\|/g } : sourceRootSerializer.options);
   return inline.serialize(node.type.schema.topNodeType.create(null, [node]));
 }
 function renderSourceList(state, node, style, indent, firstDelim) {
@@ -5217,7 +5456,33 @@ function finalizeCapturedDocument(collector, doc2) {
         run.pmTo += delta;
       }
       if (emission.empty && parent.content.size === 0) collector.emptyBodies.push({ pmAt: from, parent, place: emission.empty, ...root && root.pmFrom < from && from < root.pmTo ? { rootId: root.id } : {} });
-      if (emission.body) collector.bodies.push({ ...emission.body, pmFrom: from, pmTo: from + parent.content.size });
+      if (emission.body) {
+        const body = collector.bodies.length;
+        collector.bodies.push({ ...emission.body, pmFrom: from, pmTo: from + parent.content.size });
+        for (let i = emission.atomFrom ?? 0; i < (emission.atomTo ?? 0); i++) {
+          const atom = collector.atoms[i], pmFrom = atom.pmFrom + delta, pmTo = atom.pmTo + delta;
+          if (pmFrom < from || pmTo > from + parent.content.size || doc2.nodeAt(pmFrom) !== atom.node || pmTo - pmFrom !== atom.node.nodeSize) throw new UnsupportedSourceCapture();
+          collector.atoms[i] = { ...atom, body, pmFrom, pmTo };
+        }
+        for (const separator of emission.separators ?? []) {
+          let entry = collector.separators.find((s) => s.range.from === separator.range.from && s.range.to === separator.range.to);
+          if (!entry) {
+            entry = { range: separator.range, ...separator.definition ? { definition: separator.definition } : {} };
+            collector.separators.push(entry);
+          }
+          if (entry[separator.side] !== void 0) throw new UnsupportedSourceCapture();
+          entry[separator.side] = body;
+        }
+        for (let i = emission.criticFrom ?? 0; i < (emission.criticTo ?? 0); i++) {
+          const critic = collector.critic[i];
+          collector.critic[i] = { ...critic, body, pmFrom: critic.pmFrom + delta, pmTo: critic.pmTo + delta };
+        }
+        for (let i = emission.edgeFrom ?? 0; i < (emission.edgeTo ?? 0); i++) {
+          const edge = collector.edges[i];
+          collector.edges[i] = { ...edge, body, pmFrom: edge.pmFrom + delta, pmTo: edge.pmTo + delta };
+        }
+      }
+      if (emission.fence) collector.fences.push({ ...emission.fence, pmFrom: offset, pmTo: offset + parent.nodeSize });
     }
     parent.forEach((node, inner) => {
       if (node.isText) text2.push({ node, parentFrom: from, from: from + inner, to: from + inner + node.nodeSize });
@@ -5256,7 +5521,7 @@ function finalizeCapturedDocument(collector, doc2) {
   };
   for (const u of layout.blankLines) if (u.role === "empty-paragraph") layoutBody(u.emission.pmFrom, { kind: "layout", origin: { kind: "blank", id: u.id } });
   if (layout.fallback) layoutBody(layout.fallback.emission.pmFrom, { kind: "layout", origin: { kind: "fallback" } });
-  capturedListLayouts.set(layout, { emptyBodies: Object.freeze(collector.emptyBodies.map((f) => Object.freeze(f))), source, doc: doc2, roots: collector.roots, lists, bodies: Object.freeze(collector.bodies.map((body) => Object.freeze(body))) });
+  capturedListLayouts.set(layout, { recipe: Object.freeze({ definitionSeparators: Object.freeze(collector.separators.filter((s) => s.definition && (s.left !== void 0 || s.right !== void 0) && collector.protectedSources.some((p) => p.kind === s.definition.kind && p.scope === s.definition.scope && p.sourceFrom === s.definition.sourceFrom && p.sourceTo === s.definition.sourceTo)).map((s) => Object.freeze({ body: s.left ?? s.right, side: s.left !== void 0 ? "after" : "before", definition: Object.freeze(s.definition), range: Object.freeze(s.range) }))), separators: Object.freeze(collector.separators.filter((s) => s.left !== void 0 && s.right !== void 0).map((s) => Object.freeze({ left: s.left, right: s.right, range: Object.freeze(s.range) }))), critic: Object.freeze(collector.critic.filter((c2) => c2.body >= 0).map((c2) => Object.freeze(c2))), atoms: Object.freeze(collector.atoms.filter((a) => a.body >= 0).map((a) => Object.freeze(a))), bodies: Object.freeze(collector.bodies.map((b, body) => Object.freeze({ ...b, body }))), edges: Object.freeze(collector.edges.filter((e) => e.body >= 0).map((e) => Object.freeze(e))), fences: Object.freeze(collector.fences.map((f) => Object.freeze(f))) }), emptyBodies: Object.freeze(collector.emptyBodies.map((f) => Object.freeze(f))), source, doc: doc2, roots: collector.roots, lists, bodies: Object.freeze(collector.bodies.map((body) => Object.freeze(body))) });
   return {
     doc: doc2,
     textRuns: collector.runs,
@@ -5307,6 +5572,11 @@ function newFileCollector(source, trace, work) {
   return {
     source,
     trace,
+    separators: [],
+    critic: [],
+    atoms: [],
+    edges: [],
+    fences: [],
     emptyBodies: [],
     bodies: [],
     emissions: [],
@@ -5382,6 +5652,19 @@ function cloneTokenBatch(tokens, collector, rawDelta = 0, lineDelta = 0) {
     if (container) containerEnds.set(copy, { collector, kind: container.kind, place: shiftEmpty(container.place, rawDelta, lineDelta) });
     const pending = nestedBlanks.get(token);
     if (pending) nestedBlanks.set(copy, pending.map((p) => ({ ...p, line: p.line + lineDelta, place: shiftEmpty(p.place, rawDelta, lineDelta) })));
+    const edge = edgeTokens.get(token);
+    const shift = (r2) => ({ from: r2.from + rawDelta, to: r2.to + rawDelta });
+    const separators = separatorTokens.get(token);
+    if (separators) separatorTokens.set(copy, separators.map((s) => ({ ...s, range: shift(s.range), ...s.definition ? { definition: { ...s.definition, sourceFrom: s.definition.sourceFrom + rawDelta, sourceTo: s.definition.sourceTo + rawDelta } } : {} })));
+    const critic = criticTokens.get(token);
+    if (critic) criticTokens.set(copy, { ...critic, syntaxFrom: critic.syntaxFrom + rawDelta, syntaxTo: critic.syntaxTo + rawDelta, noteFrom: critic.noteFrom + rawDelta, noteTo: critic.noteTo + rawDelta, close: shift(critic.close), ...critic.open ? { open: shift(critic.open) } : {}, ...critic.middle ? { middle: shift(critic.middle) } : {} });
+    const atom = atomTokenRanges.get(token);
+    if (atom) atomTokenRanges.set(copy, shift(atom));
+    const html = htmlTokenRanges.get(token);
+    if (html) htmlTokenRanges.set(copy, shift(html));
+    if (edge) edgeTokens.set(copy, { ...edge, open: shift(edge.open), close: shift(edge.close) });
+    const fence = fenceTokens.get(token);
+    if (fence) fenceTokens.set(copy, { ...fence, sourceFrom: fence.sourceFrom + rawDelta, sourceTo: fence.sourceTo + rawDelta, open: shift(fence.open), close: shift(fence.close) });
     const closed = capturedFenceClosed.get(token);
     if (closed !== void 0) capturedFenceClosed.set(copy, closed);
     return copy;
@@ -8120,11 +8403,451 @@ async function createEditor(opts) {
   };
 }
 
+// src/source-inline-recipe.ts
+import { Fragment as Fragment3 } from "prosemirror-model";
+import { AddMarkStep, RemoveMarkStep, ReplaceStep } from "prosemirror-transform";
+var families = ["em", "strong", "strike_through", "highlight", "code", "link", "annotation"];
+function canonicalNote(node) {
+  return node.type === node.type.schema.nodes.note_anchor && node.isLeaf && node.nodeSize === 1 && typeof node.attrs.note === "string" && !/[\r\n]|<<}/.test(node.attrs.note) && node.eq(node.type.create({ note: node.attrs.note }, null, node.marks));
+}
+function canonicalAnnotation(mark) {
+  return mark.type.name !== "annotation" || typeof mark.attrs.note === "string" && !/[\r\n]|<<}/.test(mark.attrs.note) && mark.eq(mark.type.create({ note: mark.attrs.note }));
+}
+function textOnly(node) {
+  let ok = true;
+  node.forEach((n) => {
+    if (!n.isText || n.marks.some((m) => !families.includes(m.type.name))) ok = false;
+  });
+  return ok;
+}
+function audit(base, tr) {
+  if (!tr.before.eq(base.doc) || tr.docs.length !== tr.steps.length) return false;
+  for (let i = 0; i < tr.steps.length; i++) {
+    const step = tr.steps[i], before = tr.docs[i], after = tr.docs[i + 1] ?? tr.doc, p = Object.getPrototypeOf(step);
+    if (p !== ReplaceStep.prototype && p !== AddMarkStep.prototype && p !== RemoveMarkStep.prototype) return false;
+    if (i === 0 && !before.eq(base.doc)) return false;
+    const result = step.apply(before);
+    if (result.failed || !result.doc?.eq(after)) return false;
+  }
+  return true;
+}
+function prepareEmptyInlineContent(base, tr, fact) {
+  const no = () => ({ kind: "unsupported", reason: "empty-inline-chain" });
+  try {
+    if (!capturedEmptyBodies(base.source, base.doc, base.roots, base.layout)?.includes(fact) || !audit(base, tr)) return no();
+    const first = tr.steps[0];
+    if (!first || Object.getPrototypeOf(first) !== ReplaceStep.prototype) return no();
+    const step = first;
+    if (step.structure || step.from !== fact.pmAt || step.to !== step.from || step.slice.openStart || step.slice.openEnd || !step.slice.size || fact.parent.content.size || !["paragraph", "heading"].includes(fact.parent.type.name) || fact.parent !== base.doc.resolve(step.from).parent) return no();
+    for (let i = 1; i < tr.steps.length; i++) {
+      const mark = tr.steps[i];
+      if (!(mark instanceof AddMarkStep || mark instanceof RemoveMarkStep) || mark.from < step.from || mark.to > step.from + step.slice.size || !families.includes(mark.mark.type.name)) return no();
+    }
+    const parent = tr.doc.resolve(step.from).parent;
+    if (tr.steps.length === 1 && step.slice.content.childCount === 1 && canonicalNote(step.slice.content.firstChild) && !step.slice.content.firstChild.marks.length && parent.sameMarkup(fact.parent) && parent.content.eq(step.slice.content)) return { kind: "ready", body: "{>>" + parent.firstChild.attrs.note + "<<}" };
+    if (!parent.sameMarkup(fact.parent) || !textOnly(parent) || /[\r\n]/.test(parent.textContent)) return no();
+    const resolved = base.doc.resolve(fact.pmAt), cell = resolved.depth > 0 && ["table_cell", "table_header"].includes(resolved.node(resolved.depth - 1).type.name);
+    const children2 = [];
+    parent.forEach((node) => children2.push(cell && node.marks.some((m) => m.type.name === "code") ? node.type.schema.text(node.text.replace(/\|/g, "\\|"), node.marks) : node));
+    return { kind: "ready", body: serializeSourceInlineBody(parent.copy(Fragment3.fromArray(children2)), cell) };
+  } catch {
+    return no();
+  }
+}
+function point(span, pos) {
+  return pos === span.pmFrom ? span.sourceFrom : pos === span.pmTo ? span.sourceTo : span.kind === "linear" ? span.sourceFrom + pos - span.pmFrom : void 0;
+}
+function rawRange2(base, from, to) {
+  const spans = base.textSpans.filter((s) => from === to ? s.pmFrom <= from && s.pmTo >= to : s.pmFrom < to && s.pmTo > from);
+  if (!spans.length) return;
+  const a = point(spans[0], from), b = point(spans.at(-1), to);
+  if (a === void 0 || b === void 0 || spans.some((s, i) => i > 0 && (spans[i - 1].pmTo !== s.pmFrom || spans[i - 1].sourceTo !== s.sourceFrom))) return;
+  if (from === to && spans.some((s) => point(s, from) !== a)) return;
+  return { from: a, to: b };
+}
+function prepareClosedFenceRecipe(base, tr, facts) {
+  const no = { ok: false, reason: "unsupported-step" };
+  if (capturedInlineRecipeFacts(base) !== facts || !audit(base, tr) || tr.steps.length !== 1 || Object.getPrototypeOf(tr.steps[0]) !== ReplaceStep.prototype) return no;
+  const step = tr.steps[0], a = base.doc.resolve(step.from), b = base.doc.resolve(step.to);
+  if (!a.sameParent(b) || a.parent.type.name !== "code_block" || step.structure || step.slice.openStart || step.slice.openEnd) return no;
+  const target = tr.doc.resolve(step.from).parent;
+  if (!a.parent.sameMarkup(target) || !a.parent.content.size || !textOnly(a.parent) || !textOnly(target) || target.firstChild?.marks.length) return no;
+  const fact = facts.fences.find((f) => f.pmFrom === a.before() && f.pmTo === a.after());
+  if (!fact) return no;
+  const conflict = target.textContent.split("\n").some((line) => {
+    const m = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
+    return m?.[1]?.[0] === fact.character && m[1].length >= fact.openLength;
+  });
+  if (!conflict) return { ok: true, edits: [] };
+  if (!fact.contiguousTopLevel) return no;
+  const raw = rawRange2(base, step.from, step.to);
+  if (!raw || raw.from < fact.contentFrom || raw.to > fact.contentTo) return { ok: false, reason: "unmapped-range" };
+  let text2 = "";
+  step.slice.content.forEach((n) => {
+    text2 += n.text ?? "";
+  });
+  const length = sourceFenceLength(target.textContent, fact.character, fact.openLength), edits = [];
+  if (length > fact.openLength) edits.push({ ...fact.open, text: fact.character.repeat(length) });
+  edits.push({ ...raw, text: text2.replace(/\n/g, fact.eol) });
+  if (length > fact.closeLength) edits.push({ ...fact.close, text: fact.character.repeat(length) });
+  return { ok: true, edits };
+}
+var sameMarks = (a, b) => a.length === b.length && a.every((m, i) => m.eq(b[i]));
+function escapeText2(text2, cell) {
+  return text2.replace(/[\\`*_[\]{}<>~^=&|]/g, (c2) => c2 === "&" ? "&amp;" : c2 === "|" ? cell ? "&#124;" : "\\|" : "\\" + c2);
+}
+function editsFromOutput(base, body, output) {
+  let cursor = body.sourceFrom, pending = "", edits = [];
+  for (const part of output) {
+    if ("text" in part) {
+      pending += part.text;
+      continue;
+    }
+    const { from, to } = part.raw;
+    if (from < cursor || to < from || to > body.sourceTo) return;
+    if (from > cursor || pending) {
+      edits.push({ from: cursor, to: from, text: pending });
+      pending = "";
+    }
+    cursor = to;
+  }
+  if (cursor < body.sourceTo || pending) edits.push({ from: cursor, to: body.sourceTo, text: pending });
+  return edits.filter((e) => base.source.slice(e.from, e.to) !== e.text);
+}
+function noteEdit(base, fact, note) {
+  const old = base.source.slice(fact.noteFrom, fact.noteTo);
+  let left = 0, right = 0;
+  while (left < old.length && left < note.length && old[left] === note[left]) left++;
+  if (left > 0 && /[\uD800-\uDBFF]/.test(old[left - 1]) && /[\uDC00-\uDFFF]/.test(old[left] ?? "")) left--;
+  while (right < old.length - left && right < note.length - left && old[old.length - 1 - right] === note[note.length - 1 - right]) right++;
+  if (right > 0 && /[\uD800-\uDBFF]/.test(old[old.length - right - 1] ?? "") && /[\uDC00-\uDFFF]/.test(old[old.length - right] ?? "")) right--;
+  return { from: fact.noteFrom + left, to: fact.noteTo - right, text: note.slice(left, note.length - right) };
+}
+function preparePointRecipe(base, tr, facts) {
+  const no = { ok: false, reason: "unsupported-step" };
+  const touches = tr.steps.some((s) => s instanceof ReplaceStep && (facts.critic.some((c2) => c2.kind === "note_anchor" && s.from < c2.pmTo && s.to > c2.pmFrom) || s.slice.content.firstChild?.type.name === "note_anchor"));
+  if (!touches) return;
+  if (tr.steps.length !== 1 || Object.getPrototypeOf(tr.steps[0]) !== ReplaceStep.prototype) return no;
+  const step = tr.steps[0], a = base.doc.resolve(step.from), b = base.doc.resolve(step.to);
+  if (!a.sameParent(b) || step.slice.openStart || step.slice.openEnd || step.structure) return no;
+  const fact = facts.critic.find((c2) => c2.kind === "note_anchor" && c2.pmFrom === step.from && c2.pmTo === step.to);
+  const next = step.slice.content.firstChild;
+  if (fact) {
+    const old = base.doc.nodeAt(step.from);
+    if (!canonicalNote(old)) return no;
+    if (!step.slice.size) {
+      const body2 = facts.bodies.find((b2) => b2.body === fact.body), edits = [{ from: fact.syntaxFrom, to: fact.syntaxTo, text: "" }];
+      if (body2.pmFrom === fact.pmFrom && body2.pmTo === fact.pmTo && a.parent.type.name === "paragraph") {
+        const separator = facts.separators.find((s) => s.right === fact.body) ?? facts.separators.find((s) => s.left === fact.body);
+        const definitionSeparator = facts.definitionSeparators.find((s) => s.body === fact.body && s.side === "after");
+        if (separator) edits.push({ ...separator.range, text: "" });
+        else if (definitionSeparator) edits.push({ ...definitionSeparator.range, text: "" });
+        const root = base.roots.find((r2) => r2.tokenType === "paragraph_open" && r2.pmFrom + 1 === body2.pmFrom && r2.pmTo - 1 === body2.pmTo && r2.tailFrom === body2.sourceTo && fact.syntaxTo === r2.tailFrom);
+        if (root && /^(?:\r\n|\r|\n)$/.test(base.source.slice(root.tailFrom, root.sourceTo))) edits.push({ from: root.tailFrom, to: root.sourceTo, text: "" });
+      }
+      edits.sort((x, y) => x.from - y.from);
+      return { ok: true, edits, changedBodies: [fact.body] };
+    }
+    if (step.slice.content.childCount !== 1 || !next || !canonicalNote(next) || next.type !== old.type || !sameMarks(next.marks, old.marks)) return no;
+    return { ok: true, edits: [noteEdit(base, fact, next.attrs.note)], changedBodies: [fact.body] };
+  }
+  if (step.from !== step.to || step.slice.content.childCount !== 1 || !next || !canonicalNote(next) || next.marks.length) return no;
+  const body = facts.bodies.find((f) => f.pmFrom <= step.from && f.pmTo >= step.to), range = rawRange2(base, step.from, step.to);
+  if (!body || !range || range.from < body.sourceFrom || range.to > body.sourceTo) return no;
+  return { ok: true, edits: [{ ...range, text: "{>>" + next.attrs.note + "<<}" }], changedBodies: [body.body] };
+}
+function prepareInlineRecipe(base, tr, facts) {
+  const no = { ok: false, reason: "unsupported-step" }, unmapped = { ok: false, reason: "unmapped-range" };
+  if (capturedInlineRecipeFacts(base) !== facts || !audit(base, tr)) return no;
+  try {
+    const pointRecipe = preparePointRecipe(base, tr, facts);
+    if (pointRecipe) return pointRecipe;
+    const work = facts.bodies.map((b) => ({ body: b.body, beforeFrom: b.pmFrom, beforeTo: b.pmTo, afterFrom: b.pmFrom, afterTo: b.pmTo, pieces: [{ kind: "retained", beforeFrom: b.pmFrom, beforeTo: b.pmTo, afterFrom: b.pmFrom, afterTo: b.pmTo }], dirtyEdges: [] }));
+    const units = /* @__PURE__ */ new Map(), changed = /* @__PURE__ */ new Set();
+    for (const b of facts.bodies) {
+      const list = [];
+      base.doc.resolve(b.pmFrom).parent.forEach((node, offset) => {
+        const atom = facts.atoms.find((a) => a.body === b.body && a.pmFrom === b.pmFrom + offset && a.pmTo === b.pmFrom + offset + node.nodeSize && a.node === node);
+        for (let i = 0; i < node.nodeSize; i++) {
+          const before = b.pmFrom + offset + i;
+          const span = base.textSpans.find((s) => s.pmFrom <= before && s.pmTo > before);
+          const from = span && point(span, before), to = span && point(span, before + 1);
+          list.push({ text: node.isText ? node.text[i] : "", before, marks: node.marks, ...atom ? { atom } : {}, ...from !== void 0 && to !== void 0 ? { raw: { from, to } } : {} });
+        }
+      });
+      units.set(b.body, list);
+    }
+    for (let i = 0; i < tr.steps.length; i++) {
+      const step = tr.steps[i], before = tr.docs[i];
+      if (step instanceof ReplaceStep) {
+        const a = before.resolve(step.from), z = before.resolve(step.to);
+        if (!a.sameParent(z) || !a.parent.inlineContent || step.slice.openStart || step.slice.openEnd || step.structure) return no;
+        const body = work.find((w) => w.afterFrom <= step.from && w.afterTo >= step.to);
+        if (!body) return no;
+        let inserted = [], valid = true;
+        step.slice.content.forEach((n) => {
+          if (n.type === n.type.schema.nodes.hardbreak && typeof n.attrs.isInline === "boolean" && !n.marks.length && n.eq(n.type.create({ isInline: n.attrs.isInline }))) {
+            inserted.push({ text: "\n", leaf: n, marks: n.marks, step: i });
+            return;
+          }
+          if (!n.isText || n.marks.some((m) => !families.includes(m.type.name))) valid = false;
+          for (const text2 of (n.text ?? "").split("")) inserted.push({ text: text2, marks: n.marks, step: i });
+        });
+        if (!valid) return no;
+        const list = units.get(body.body), start = step.from - body.afterFrom, end = step.to - body.afterFrom;
+        if (list.slice(start, end).some((u) => !u.text) || start === end && list[start]?.atom && list[start]?.atom === list[start - 1]?.atom) return no;
+        list.splice(start, end - start, ...inserted);
+        changed.add(body.body);
+        const map = step.getMap();
+        for (const w of work) {
+          w.afterFrom = map.map(w.afterFrom, -1);
+          w.afterTo = map.map(w.afterTo, 1);
+          w.pieces = units.get(w.body).map((u, k) => u.before === void 0 ? { kind: "inserted", afterFrom: w.afterFrom + k, afterTo: w.afterFrom + k + 1, step: u.step } : { kind: "retained", beforeFrom: u.before, beforeTo: u.before + 1, afterFrom: w.afterFrom + k, afterTo: w.afterFrom + k + 1 });
+        }
+      } else {
+        if (!families.includes(step.mark.type.name) || !canonicalAnnotation(step.mark)) return no;
+        let valid = true;
+        before.nodesBetween(step.from, step.to, (n, pos) => {
+          if (!n.isInline) return;
+          if (!n.isText) {
+            valid = false;
+            return false;
+          }
+          const lo = Math.max(pos, step.from), hi = Math.min(pos + n.nodeSize, step.to);
+          const w = work.find((w2) => w2.afterFrom <= lo && w2.afterTo >= hi);
+          if (!w) {
+            valid = false;
+            return false;
+          }
+          const list = units.get(w.body);
+          for (let k = lo; k < hi; k++) {
+            const u = list[k - w.afterFrom], next = step instanceof AddMarkStep ? step.mark.addToSet(u.marks) : step.mark.removeFromSet(u.marks);
+            if (!sameMarks(u.marks, next)) {
+              u.marks = next;
+              changed.add(w.body);
+            }
+          }
+        });
+        if (!valid) return no;
+      }
+    }
+    for (const w of work) {
+      const node = tr.doc.resolve(w.afterFrom).parent, original = base.doc.resolve(w.beforeFrom).parent;
+      if (!node.sameMarkup(original) || node.content.size !== w.afterTo - w.afterFrom) return no;
+    }
+    const edits = [];
+    for (const id of changed) {
+      const body = facts.bodies.find((b) => b.body === id), w = work.find((b) => b.body === id), list = units.get(id), old = facts.edges.filter((e) => e.body === id);
+      const target = tr.doc.resolve(w.afterFrom).parent;
+      let offset = 0, valid = true;
+      target.forEach((n) => {
+        for (let j = 0; j < n.nodeSize; j++, offset++) {
+          const u = list[offset];
+          if (!u || u.atom && !u.atom.node.eq(n) || u.text !== (n.isText ? n.text[j] : u.leaf?.eq(n) ? "\n" : "") || !sameMarks(u.marks, n.marks)) valid = false;
+        }
+      });
+      if (!valid) return no;
+      const ranges = [];
+      for (let at = 0; at < list.length; at++) for (const mark of list[at].marks) {
+        if (!families.includes(mark.type.name)) {
+          if (list[at].before === void 0) return no;
+          continue;
+        }
+        if (at > 0 && mark.isInSet(list[at - 1].marks)) continue;
+        let end = at + 1;
+        while (end < list.length && mark.isInSet(list[end].marks)) end++;
+        const candidates = old.filter((e) => e.family === mark.type.name && (mark.type.name === "annotation" || e.marks.some((m) => m.eq(mark))));
+        const exact = candidates.find((e) => [-1, 1].some((assoc) => tr.mapping.map(e.pmFrom, assoc) === w.afterFrom + at) && [-1, 1].some((assoc) => tr.mapping.map(e.pmTo, assoc) === w.afterFrom + end));
+        const ancestor = exact ?? candidates.find((e) => list.slice(at, end).some((u) => u.before !== void 0 && e.pmFrom <= u.before && u.before < e.pmTo));
+        let open = "", close = "", keep = !!exact;
+        if (ancestor) {
+          open = base.source.slice(ancestor.open.from, ancestor.open.to);
+          close = base.source.slice(ancestor.close.from, ancestor.close.to);
+        }
+        if (mark.type.name === "annotation" && !canonicalAnnotation(mark)) return no;
+        if (mark.type.name === "annotation") {
+          open = "{==";
+          close = "==}{>>" + mark.attrs.note + "<<}";
+        }
+        if (!open) {
+          switch (mark.type.name) {
+            case "strong":
+              open = close = "**";
+              break;
+            case "em": {
+              let index = 0, size = 0;
+              target.forEach((n, _off, i) => {
+                if (size <= at) index = i;
+                size += n.nodeSize;
+              });
+              open = close = sourceEmDelimiter(mark, target, index, true);
+              break;
+            }
+            case "strike_through":
+              open = close = "~~";
+              break;
+            case "highlight":
+              open = close = mark.attrs.delimiter === "equals" ? "==" : "^^";
+              break;
+            case "link":
+              open = "[";
+              close = "](" + String(mark.attrs.href).replace(/[\\()]/g, "\\$&") + (mark.attrs.title ? ' "' + String(mark.attrs.title).replace(/[\\"]/g, "\\$&") + '"' : "") + ")";
+              break;
+            case "code":
+              break;
+          }
+        }
+        if (!keep && /^_+$/.test(open) && (!/^[ \t]/.test(list[at].text) && at > 0 && /[\p{L}\p{N}]/u.test(list[at - 1].text) || !/[ \t]$/.test(list[end - 1].text) && end < list.length && /[\p{L}\p{N}]/u.test(list[end].text))) {
+          open = close = "*".repeat(open.length);
+        }
+        ranges.push({ from: at, to: end, mark, ...ancestor ? { old: ancestor } : {}, open, close, keep, index: ranges.length });
+      }
+      for (const edge of old) if (!families.includes(edge.family)) {
+        const mark = edge.marks.find((m) => m.type.name === edge.family), from = tr.mapping.map(edge.pmFrom, -1) - w.afterFrom, to = tr.mapping.map(edge.pmTo, 1) - w.afterFrom;
+        if (!mark || from < 0 || to > list.length || list.slice(from, to).some((u) => !mark.isInSet(u.marks))) return no;
+        ranges.push({ from, to, mark, old: edge, open: "", close: "", keep: true, index: ranges.length });
+      }
+      for (let i = ranges.length - 1; i >= 0; i--) {
+        const r2 = ranges[i], matches = old.filter((e) => e.family === r2.mark.type.name && (r2.mark.type.name === "annotation" || e.marks.some((m) => m.eq(r2.mark))));
+        const parts = matches.map((e) => ({ e, from: list.findIndex((u) => u.before === e.pmFrom), last: list.findIndex((u) => u.before === e.pmTo - 1) })).filter((p) => p.from >= r2.from && p.last < r2.to && p.last >= p.from).sort((a, b) => a.from - b.from);
+        if (parts.length > 1 && parts[0].from === r2.from && parts.at(-1).last + 1 === r2.to && parts.every((p, j) => !j || parts[j - 1].last + 1 === p.from)) {
+          ranges.splice(i, 1, ...parts.map((p) => ({ ...r2, from: p.from, to: p.last + 1, old: p.e, keep: true, open: base.source.slice(p.e.open.from, p.e.open.to), close: r2.mark.type.name === "annotation" ? "==}{>>" + r2.mark.attrs.note + "<<}" : base.source.slice(p.e.close.from, p.e.close.to) })));
+        }
+      }
+      for (let i = ranges.length - 1; i >= 0; i--) {
+        const r2 = ranges[i];
+        if (r2.mark.type.name !== "code") continue;
+        const cuts = [...new Set(ranges.filter((other) => other !== r2).flatMap((other) => [other.from, other.to]).filter((at) => r2.from < at && at < r2.to))].sort((a, b) => a - b);
+        if (cuts.length) {
+          const points = [r2.from, ...cuts, r2.to];
+          ranges.splice(i, 1, ...points.slice(0, -1).map((from, j) => ({ ...r2, from, to: points[j + 1], keep: false })));
+        }
+      }
+      let crossing = true;
+      while (crossing) {
+        crossing = false;
+        ranges.sort((a, b) => a.from - b.from || b.to - a.to);
+        outer: for (let i = 0; i < ranges.length; i++) for (let j = i + 1; j < ranges.length; j++) {
+          const a = ranges[i], b = ranges[j];
+          if (!(a.from < b.from && b.from < a.to && a.to < b.to)) continue;
+          if (a.keep && b.keep) return no;
+          const split = b.keep ? a : b, cut = b.keep ? b.from : a.to, index = ranges.indexOf(split);
+          if (!families.includes(split.mark.type.name)) return no;
+          ranges.splice(index, 1, { ...split, to: cut, keep: false }, { ...split, from: cut, keep: false });
+          crossing = true;
+          break outer;
+        }
+      }
+      for (const r2 of ranges) if (r2.mark.type.name === "code") {
+        let { open, close, keep } = r2;
+        const { mark } = r2;
+        const text2 = list.slice(r2.from, r2.to).map((u) => u.text).join(""), node = target.type.schema.text(text2, [mark]);
+        const generatedOpen = sourceCodeDelimiter(node, true), generatedClose = sourceCodeDelimiter(node, false);
+        const currentLength = /^`+/.exec(open)?.[0].length ?? 0, max = Math.max(0, ...(text2.match(/`+/g) ?? []).map((r3) => r3.length));
+        if (!currentLength || max >= currentLength) {
+          open = generatedOpen;
+          close = generatedClose;
+          keep = false;
+        } else {
+          const left = open.slice(currentLength), right = close.slice(0, close.length - currentLength);
+          const decoded = (left + text2 + right).replace(/\n/g, " ").replace(/^ (.+) $/, "$1");
+          if (decoded !== text2) {
+            const padding = generatedOpen.endsWith(" ") ? " " : "";
+            open = "`".repeat(currentLength) + padding;
+            close = padding + "`".repeat(currentLength);
+            keep = false;
+          }
+        }
+        r2.open = open;
+        r2.close = close;
+        r2.keep = keep;
+      }
+      w.dirtyEdges = old.filter((e) => !ranges.some((r2) => r2.keep && r2.old === e)).map((e) => e.id);
+      const claimed = [...facts.atoms.filter((a) => a.body === id).map((a) => ({ from: a.sourceFrom, to: a.sourceTo })), ...old.flatMap((e) => [e.open, e.close]), ...list.flatMap((u) => u.raw ? [u.raw] : []), ...base.textSpans.filter((s) => s.pmFrom >= body.pmFrom && s.pmTo <= body.pmTo).map((s) => ({ from: s.sourceFrom, to: s.sourceTo }))].sort((a, b) => a.from - b.from);
+      const gaps = [];
+      let cursor = body.sourceFrom;
+      for (const raw of claimed) {
+        if (raw.from > cursor) {
+          const next = [...base.textSpans, ...facts.atoms.filter((a) => a.body === id)].filter((s) => s.sourceFrom >= raw.from && s.pmFrom >= body.pmFrom && s.pmTo <= body.pmTo).sort((a, b) => a.sourceFrom - b.sourceFrom)[0];
+          gaps.push({ raw: { from: cursor, to: raw.from }, before: next?.pmFrom ?? body.pmTo });
+        }
+        cursor = Math.max(cursor, raw.to);
+      }
+      if (cursor < body.sourceTo) gaps.push({ raw: { from: cursor, to: body.sourceTo }, before: body.pmTo });
+      const adjacentEntities = /* @__PURE__ */ new Set();
+      for (const r2 of ranges) if (!r2.keep && ["em", "strong", "strike_through", "highlight"].includes(r2.mark.type.name)) {
+        if (!ranges.some((other) => other !== r2 && other.from === r2.to) && /^[ \t]$/.test(list[r2.to - 1].text) && r2.to < list.length && !/[\s\p{P}\p{S}]/u.test(list[r2.to].text)) adjacentEntities.add(r2.to);
+        if (!ranges.some((other) => other !== r2 && other.to === r2.from) && /^[ \t]$/.test(list[r2.from].text) && r2.from > 0 && !/[\s\p{P}\p{S}]/u.test(list[r2.from - 1].text)) {
+          let at = r2.from - 1;
+          if (/[\uDC00-\uDFFF]/.test(list[at].text) && at > 0 && /[\uD800-\uDBFF]/.test(list[at - 1].text)) at--;
+          adjacentEntities.add(at);
+        }
+      }
+      const output = [], emittedGaps = /* @__PURE__ */ new Set();
+      const nesting = (a, b) => a.from - b.from || b.to - a.to || Number(a.mark.type.name === "code") - Number(b.mark.type.name === "code") || Number(b.keep) - Number(a.keep) || (a.old && b.old ? a.old.open.from - b.old.open.from : Object.keys(target.type.schema.marks).indexOf(a.mark.type.name) - Object.keys(target.type.schema.marks).indexOf(b.mark.type.name));
+      const ordered = ranges.slice().sort(nesting);
+      for (let at = 0; at <= list.length; at++) {
+        for (const r2 of ordered.filter((r3) => r3.to === at).reverse()) {
+          const critic = r2.keep && r2.mark.type.name === "annotation" ? facts.critic.find((c2) => c2.kind === "annotation" && c2.syntaxFrom === r2.old.open.from) : void 0;
+          if (critic && critic.note !== r2.mark.attrs.note) {
+            const edit = noteEdit(base, critic, r2.mark.attrs.note);
+            output.push({ raw: { from: r2.old.close.from, to: edit.from } }, { text: edit.text }, { raw: { from: edit.to, to: r2.old.close.to } });
+          } else output.push(r2.keep ? { raw: r2.old.close } : { text: r2.close });
+        }
+        for (let g = 0; g < gaps.length; g++) if (!emittedGaps.has(g) && (at === list.length || list[at].before !== void 0 && gaps[g].before <= list[at].before)) {
+          output.push({ raw: gaps[g].raw });
+          emittedGaps.add(g);
+        }
+        for (const r2 of ordered.filter((r3) => r3.from === at)) output.push(r2.keep ? { raw: r2.old.open } : { text: r2.open });
+        if (at === list.length) break;
+        const u = list[at], code2 = u.marks.some((m) => m.type.name === "code");
+        const edgeSpace = !code2 && /^[ \t]$/.test(u.text) && (u.before === void 0 && (list.slice(list.slice(0, at).map((x) => x.text).lastIndexOf("\n") + 1, at + 1).every((x) => /^[ \t]$/.test(x.text)) || list.slice(at, list.findIndex((x, i) => i > at && x.text === "\n") < 0 ? void 0 : list.findIndex((x, i) => i > at && x.text === "\n")).every((x) => /^[ \t]$/.test(x.text))) || ranges.some((r2) => !r2.keep && ["em", "strong", "strike_through", "highlight"].includes(r2.mark.type.name) && r2.from <= at && at < r2.to && (list.slice(r2.from, at + 1).every((x) => /^[ \t]$/.test(x.text)) || list.slice(at, r2.to).every((x) => /^[ \t]$/.test(x.text)))));
+        if (adjacentEntities.has(at)) {
+          const scalar = (u.text + (list[at + 1]?.text ?? "")).codePointAt(0);
+          output.push({ text: "&#" + scalar + ";" });
+          if (scalar > 65535) at++;
+          continue;
+        }
+        if (edgeSpace) {
+          output.push({ text: u.text === " " ? "&#32;" : "&#9;" });
+          continue;
+        }
+        if (u.before !== void 0) {
+          if (u.atom) {
+            const atom = u.atom, count = atom.pmTo - atom.pmFrom, group = list.slice(at, at + count);
+            if (u.before !== atom.pmFrom || group.length !== count || group.some((x, i) => x.atom !== atom || x.before !== atom.pmFrom + i || !sameMarks(x.marks, atom.node.marks)) || ranges.some((r2) => r2.from > at && r2.from < at + count || r2.to > at && r2.to < at + count)) return unmapped;
+            output.push({ raw: { from: atom.sourceFrom, to: atom.sourceTo } });
+            at += count - 1;
+            continue;
+          }
+          if (!u.raw) {
+            const span = base.textSpans.find((s) => s.kind === "atomic" && s.pmFrom === u.before);
+            if (!span) return unmapped;
+            const count = span.pmTo - span.pmFrom, group = list.slice(at, at + count);
+            if (group.length !== count || group.some((x, i) => x.before !== span.pmFrom + i || !sameMarks(x.marks, u.marks)) || ranges.some((r2) => r2.from > at && r2.from < at + count || r2.to > at && r2.to < at + count)) return unmapped;
+            output.push({ raw: { from: span.sourceFrom, to: span.sourceTo } });
+            at += count - 1;
+          } else output.push({ raw: u.raw });
+        } else if (u.leaf) output.push({ text: u.leaf.attrs.isInline ? "\n" : "\\\n" });
+        else output.push({ text: code2 ? body.kind === "table-cell" ? u.text.replace(/\|/g, "\\|") : u.text : escapeText2(u.text, body.kind === "table-cell") });
+      }
+      const bodyEdits = editsFromOutput(base, body, output);
+      if (!bodyEdits) return unmapped;
+      edits.push(...bodyEdits);
+    }
+    edits.sort((a, b) => a.from - b.from || a.to - b.to);
+    if (edits.some((e, i) => i > 0 && edits[i - 1].to > e.from)) return no;
+    return { ok: true, edits, changedBodies: [...changed] };
+  } catch {
+    return no;
+  }
+}
+
 // src/source-empty-body.ts
-import { ReplaceStep as ReplaceStep2 } from "prosemirror-transform";
+import { ReplaceStep as ReplaceStep3 } from "prosemirror-transform";
 
 // src/source-structure.ts
-import { AddMarkStep, RemoveMarkStep, ReplaceStep, ReplaceAroundStep, AttrStep, AddNodeMarkStep, RemoveNodeMarkStep } from "prosemirror-transform";
+import { AddMarkStep as AddMarkStep2, RemoveMarkStep as RemoveMarkStep2, ReplaceStep as ReplaceStep2, ReplaceAroundStep, AttrStep, AddNodeMarkStep, RemoveNodeMarkStep } from "prosemirror-transform";
 var UnsupportedSourceStructure = class extends Error {
 };
 function isSourceListBoundary(node) {
@@ -8166,7 +8889,7 @@ function classifyTransaction(base, tr) {
   for (let i = 0; i < tr.steps.length; i++) {
     const step = tr.steps[i], proto = Object.getPrototypeOf(step), before = tr.docs[i];
     if (!before || before.type.schema !== base.doc.type.schema) fail();
-    if (proto !== ReplaceStep.prototype && proto !== AddMarkStep.prototype && proto !== RemoveMarkStep.prototype && proto !== ReplaceAroundStep.prototype && proto !== AttrStep.prototype && proto !== AddNodeMarkStep.prototype && proto !== RemoveNodeMarkStep.prototype) fail();
+    if (proto !== ReplaceStep2.prototype && proto !== AddMarkStep2.prototype && proto !== RemoveMarkStep2.prototype && proto !== ReplaceAroundStep.prototype && proto !== AttrStep.prototype && proto !== AddNodeMarkStep.prototype && proto !== RemoveNodeMarkStep.prototype) fail();
     const { from, to } = stepRange(before, step);
     childWindow(before, from, to);
     if (splitsText(before, from) || splitsText(before, to)) fail();
@@ -8175,7 +8898,7 @@ function classifyTransaction(base, tr) {
       if (!Number.isInteger(around.gapFrom) || !Number.isInteger(around.gapTo) || around.gapFrom < from || around.gapTo < around.gapFrom || around.gapTo > to || !Number.isInteger(around.insert) || around.insert < 0 || around.insert > around.slice.size || splitsText(before, around.gapFrom) || splitsText(before, around.gapTo)) fail();
       structural = true;
     } else if (proto === AttrStep.prototype || proto === AddNodeMarkStep.prototype || proto === RemoveNodeMarkStep.prototype) structural = true;
-    else if (proto === ReplaceStep.prototype) {
+    else if (proto === ReplaceStep2.prototype) {
       const s = step, a = before.resolve(from), b = before.resolve(to);
       let inline = true;
       s.slice.content.forEach((n) => {
@@ -8268,8 +8991,8 @@ function stepWindow(before, after, step, ledger) {
 }
 function advanceLedger(ledger, before, after, step, index) {
   const w = stepWindow(before, after, step, ledger), range = stepRange(before, step);
-  const isLocal = !(step instanceof ReplaceStep || step instanceof ReplaceAroundStep);
-  const kind = step instanceof ReplaceAroundStep ? "around" : step instanceof ReplaceStep ? "replace" : step instanceof AttrStep ? "attr" : step instanceof AddNodeMarkStep || step instanceof RemoveNodeMarkStep ? "node-mark" : "mark";
+  const isLocal = !(step instanceof ReplaceStep2 || step instanceof ReplaceAroundStep);
+  const kind = step instanceof ReplaceAroundStep ? "around" : step instanceof ReplaceStep2 ? "replace" : step instanceof AttrStep ? "attr" : step instanceof AddNodeMarkStep || step instanceof RemoveNodeMarkStep ? "node-mark" : "mark";
   const witness = {
     step: index,
     kind,
@@ -8695,9 +9418,26 @@ function applyStructuralTransaction(base, tr, render, rootHasClosedFences) {
   return { source: applyRecipe(base, recipe), edits: recipe.edits, changedRoots: recipe.changedRoots, unchanged: false };
 }
 function prepareEmptyParagraphEdits(base, tr, origin, body) {
-  const ledger = createLedger(base), step = tr.steps[0];
-  if (tr.steps.length !== 1 || Object.getPrototypeOf(step) !== ReplaceStep.prototype) fail();
-  advanceLedger(ledger, base.doc, tr.doc, step, 0);
+  const ledger = createLedger(base), first = tr.steps[0];
+  if (!first || Object.getPrototypeOf(first) !== ReplaceStep2.prototype || tr.steps.length !== tr.docs.length || !tr.before.eq(base.doc)) fail();
+  const initial = first, parent = base.doc.resolve(initial.from).parent;
+  initial.slice.content.forEach((node) => {
+    if (!node.isText && (tr.steps.length !== 1 || initial.slice.content.childCount !== 1 || node.type !== base.doc.type.schema.nodes.note_anchor || !node.isLeaf || node.nodeSize !== 1 || node.marks.length || typeof node.attrs.note !== "string" || /[\r\n]|<<}/.test(node.attrs.note) || !node.eq(node.type.create({ note: node.attrs.note })))) fail();
+  });
+  if (initial.from !== initial.to || initial.slice.openStart || initial.slice.openEnd || !initial.slice.size || initial.structure || parent.type.name !== "paragraph" || parent.content.size) fail();
+  for (let i = 0; i < tr.steps.length; i++) {
+    const step = tr.steps[i], before = tr.docs[i], after = tr.docs[i + 1] ?? tr.doc;
+    if (i === 0 && !before.eq(base.doc)) fail();
+    if (i > 0) {
+      const prototype = Object.getPrototypeOf(step);
+      if (prototype !== AddMarkStep2.prototype && prototype !== RemoveMarkStep2.prototype) fail();
+      const mark = step;
+      if (mark.from < initial.from || mark.to > initial.from + initial.slice.size) fail();
+    }
+    const result = step.apply(before);
+    if (result.failed || !result.doc?.eq(after)) fail();
+    advanceLedger(ledger, before, after, step, i);
+  }
   finishLedger(base, tr, ledger);
   const components = ledger.components.filter((c3) => c3.parent === c3.id), c2 = components[0];
   if (components.length !== 1 || !c2 || c2.origins.length !== 1 || !sameOrigin(c2.origins[0], origin) || c2.births.length || c2.finalRuns.length !== 1 || c2.finalRuns[0].to - c2.finalRuns[0].from !== 1) fail();
@@ -8746,7 +9486,7 @@ function prepareEmptyBodyTransaction(base, tr, facts) {
   let emptyInput = false;
   for (let i = 0; i < tr.steps.length; i++) {
     const step = tr.steps[i];
-    if (!(step instanceof ReplaceStep2)) continue;
+    if (!(step instanceof ReplaceStep3)) continue;
     let blocks = false;
     step.slice.content.forEach((n) => {
       if (n.isBlock) blocks = true;
@@ -8762,12 +9502,11 @@ function prepareEmptyBodyTransaction(base, tr, facts) {
     }
   }
   if (!emptyInput) return { kind: "not-empty" };
-  if (tr.steps.length !== 1) return reject("empty-multistep");
   const first = tr.steps[0];
   try {
-    if (tr.steps.length !== 1 || tr.docs.length !== 1 || Object.getPrototypeOf(first) !== ReplaceStep2.prototype || !tr.before.eq(base.doc) || !tr.docs[0].eq(base.doc) || first.structure || first.from !== first.to || first.slice.openStart || first.slice.openEnd || !first.slice.size) return reject("empty-step");
+    if (tr.docs.length !== tr.steps.length || Object.getPrototypeOf(first) !== ReplaceStep3.prototype || !tr.before.eq(base.doc) || !tr.docs[0].eq(base.doc) || first.structure || first.from !== first.to || first.slice.openStart || first.slice.openEnd || !first.slice.size) return reject("empty-step");
     const applied = first.apply(tr.docs[0]);
-    if (applied.failed || !applied.doc?.eq(tr.doc)) return reject("empty-chain");
+    if (applied.failed || !applied.doc?.eq(tr.docs[1] ?? tr.doc)) return reject("empty-chain");
     tr.doc.check();
     const certified = capturedEmptyBodies(base.source, base.doc, base.roots, base.layout);
     if (certified !== facts) return reject("empty-binding");
@@ -8779,7 +9518,8 @@ function prepareEmptyBodyTransaction(base, tr, facts) {
     first.slice.content.forEach((n) => {
       if (!n.isText || n.marks.length) plain = false;
     });
-    if (!plain) return reject("empty-content");
+    const generated = prepareEmptyInlineContent(base, tr, fact);
+    if ((!plain || tr.steps.length !== 1) && generated.kind !== "ready") return reject("empty-content");
     const place = fact.place, literal = place.kind === "literal", text2 = after.textContent;
     if (!literal && /[\r\n]/.test(text2)) return reject("empty-newline");
     const root = fact.rootId === void 0 ? void 0 : base.roots[fact.rootId];
@@ -8789,7 +9529,7 @@ function prepareEmptyBodyTransaction(base, tr, facts) {
       if (range.from < root.sourceFrom || range.to > root.sourceTo) return reject("empty-owner-range");
       if (base.protectedSources.some((p) => range.from === range.to ? p.sourceFrom < range.from && range.from < p.sourceTo : p.sourceFrom < range.to && p.sourceTo > range.from)) return reject("empty-protected");
     }
-    const body = literal ? text2 : escapeEmptyText(after);
+    const body = literal ? text2 : generated.kind === "ready" ? generated.body : escapeEmptyText(after);
     let edits;
     switch (place.kind) {
       case "inline":
@@ -9135,9 +9875,9 @@ function prepareRawFileSourceEdits(base, input) {
 }
 
 // src/source-fidelity.ts
-import { Fragment as Fragment3 } from "prosemirror-model";
+import { Fragment as Fragment4 } from "prosemirror-model";
 import { EditorState as EditorState2 } from "prosemirror-state";
-import { AddMarkStep as AddMarkStep2, RemoveMarkStep as RemoveMarkStep2, ReplaceStep as ReplaceStep3, Mapping } from "prosemirror-transform";
+import { AddMarkStep as AddMarkStep3, RemoveMarkStep as RemoveMarkStep3, ReplaceStep as ReplaceStep4, Mapping } from "prosemirror-transform";
 function prepareFileSourceEdits(base, input) {
   return prepareRawFileSourceEdits(base, input);
 }
@@ -9179,7 +9919,7 @@ function applySourceTextTransactionWithEdit(base, tr, context) {
   if (tr.steps.length !== 1) return { ok: false, reason: "unsupported-step" };
   if (tr.storedMarksSet) return { ok: false, reason: "unsupported-step" };
   const actual = tr.steps[0];
-  if (Object.getPrototypeOf(actual) !== ReplaceStep3.prototype || tr.docs.length !== 1 || !tr.docs[0].eq(base.doc)) return { ok: false, reason: "unsupported-step" };
+  if (Object.getPrototypeOf(actual) !== ReplaceStep4.prototype || tr.docs.length !== 1 || !tr.docs[0].eq(base.doc)) return { ok: false, reason: "unsupported-step" };
   const applied = actual.apply(base.doc);
   if (applied.failed || !applied.doc?.eq(tr.doc)) return { ok: false, reason: "unsupported-step" };
   const step = actual;
@@ -9189,14 +9929,14 @@ function applySourceTextTransactionWithEdit(base, tr, context) {
   if ("ok" in verified) return verified;
   base = verified.verifiedBase;
   let { from, to } = step;
-  let textOnly = true;
+  let textOnly2 = true;
   step.slice.content.forEach((node) => {
-    if (!node.isText) textOnly = false;
+    if (!node.isText) textOnly2 = false;
   });
   const owner = base.roots.find((root) => root.pmFrom <= from && root.pmTo >= to);
   if (!owner || !sourceRootHasClosedFences(owner)) return { ok: false, reason: "unsupported-step" };
   const $from = base.doc.resolve(from), $to = base.doc.resolve(to);
-  if (!$from.sameParent($to) || !["paragraph", "heading", "code_block", "frontmatter", "html_block"].includes($from.parent.type.name) || to < from || step.slice.openStart || step.slice.openEnd || !textOnly) {
+  if (!$from.sameParent($to) || !["paragraph", "heading", "code_block", "frontmatter", "html_block"].includes($from.parent.type.name) || to < from || step.slice.openStart || step.slice.openEnd || !textOnly2) {
     return { ok: false, reason: "unsupported-step" };
   }
   if (splitsTextAt(base.doc, from) || splitsTextAt(base.doc, to)) {
@@ -9352,7 +10092,7 @@ function authorizeStepRoots(before, step, ownership, authorized) {
     throw new UnsupportedBlockTransaction();
   const a = before.resolve(from), b = before.resolve(to);
   if (splitsInlineText(a) || splitsInlineText(b)) throw new UnsupportedBlockTransaction();
-  if (step instanceof ReplaceStep3) {
+  if (step instanceof ReplaceStep4) {
     if (step.structure || !a.sameParent(b) || !a.parent.inlineContent || step.slice.openStart || step.slice.openEnd)
       throw new UnsupportedBlockTransaction();
     let inline = true;
@@ -9374,7 +10114,7 @@ function changedNaturalRoots(base, tr, ownership) {
   const authorized = /* @__PURE__ */ new Set();
   for (let i = 0; i < tr.steps.length; i++) {
     const step = tr.steps[i], prototype = Object.getPrototypeOf(step);
-    if (prototype !== ReplaceStep3.prototype && prototype !== AddMarkStep2.prototype && prototype !== RemoveMarkStep2.prototype)
+    if (prototype !== ReplaceStep4.prototype && prototype !== AddMarkStep3.prototype && prototype !== RemoveMarkStep3.prototype)
       throw new UnsupportedBlockTransaction();
     const before = tr.docs[i];
     if (before.childCount !== base.doc.childCount) throw new UnsupportedBlockTransaction();
@@ -9413,7 +10153,7 @@ var renderableRoots = /* @__PURE__ */ new Set([
 function rootRenderNode(node, pos, styles, bindings) {
   const children2 = [];
   node.forEach((child, offset) => children2.push(rootRenderNode(child, pos + 1 + offset, styles, bindings)));
-  const rendered = node.isLeaf ? node : isList(node) ? node.type.create(node.attrs, Fragment3.fromArray(children2), node.marks) : node.copy(Fragment3.fromArray(children2));
+  const rendered = node.isLeaf ? node : isList(node) ? node.type.create(node.attrs, Fragment4.fromArray(children2), node.marks) : node.copy(Fragment4.fromArray(children2));
   if (isList(node)) {
     const style = styles.get(pos);
     if (!style) throw new UnsupportedBlockTransaction();
@@ -9444,7 +10184,7 @@ function renderChangedRoot(base, doc2, root, styles) {
   doc2.forEach((node, pos, index) => {
     if (index >= root.childFrom && index < root.childTo) nodes.push(rootRenderNode(node, pos, styles, lists));
   });
-  let generated = serializeSourceRootMarkdown(doc2.type.create(doc2.attrs, Fragment3.fromArray(nodes)), { lists });
+  let generated = serializeSourceRootMarkdown(doc2.type.create(doc2.attrs, Fragment4.fromArray(nodes)), { lists });
   const last = nodes[nodes.length - 1], tail = base.source.slice(root.tailFrom, root.sourceTo);
   if (last.type.name === "table") {
     if (!generated.endsWith("\n") || generated.endsWith("\n\n")) throw new UnsupportedBlockTransaction();
@@ -9473,7 +10213,7 @@ function applySourceEdits(base, edits, ids, ownership) {
 function plainMarkBody(base, tr) {
   if (tr.steps.length !== 1) return void 0;
   const step = tr.steps[0];
-  if (!(step instanceof AddMarkStep2 || step instanceof RemoveMarkStep2) || !["strong", "em"].includes(step.mark.type.name)) return void 0;
+  if (!(step instanceof AddMarkStep3 || step instanceof RemoveMarkStep3) || !["strong", "em"].includes(step.mark.type.name)) return void 0;
   const from = base.doc.resolve(step.from), to = base.doc.resolve(step.to);
   if (!from.sameParent(to) || !["paragraph", "heading"].includes(from.parent.type.name)) return void 0;
   const plain = (node) => {
@@ -9521,7 +10261,7 @@ function applySourceBlockTransaction(base, tr) {
     }
     if (classification === "structural") {
       const render = (nodes, positions) => {
-        const lists = [], styles2 = transactionListStyles(tr, authority.facts, nodes.map((node, i) => ({ node, pos: positions[i] }))), rendered = nodes.map((node, i) => rootRenderNode(node, positions[i], styles2, lists)), doc2 = tr.doc.type.create(tr.doc.attrs, Fragment3.fromArray(rendered));
+        const lists = [], styles2 = transactionListStyles(tr, authority.facts, nodes.map((node, i) => ({ node, pos: positions[i] }))), rendered = nodes.map((node, i) => rootRenderNode(node, positions[i], styles2, lists)), doc2 = tr.doc.type.create(tr.doc.attrs, Fragment4.fromArray(rendered));
         let ownedBlank = false, blankTerminal = false, continuationIndent;
         const text2 = serializeSourceRootMarkdown(doc2, { lists, onContinuationIndent: (indent) => {
           continuationIndent = indent;
@@ -9551,7 +10291,36 @@ function applySourceBlockTransaction(base, tr) {
       return { ...finishUnchangedFile(verified, work), mode: "unchanged", edits: [], changedRoots: [] };
     }
     if (changedRoots.some((id) => !sourceRootHasClosedFences(ownership.rootById[id]))) throw new UnsupportedBlockTransaction();
-    if (tr.steps.length === 1 && tr.steps[0] instanceof ReplaceStep3) {
+    const inlineFacts2 = capturedInlineRecipeFacts(base);
+    const preserving = (edits2) => {
+      applySourceEdits(base, edits2, changedRoots, ownership);
+      const parsed2 = preparePreservingSourceCandidate(verified, edits2.map((edit) => ({ ...edit, removed: base.source.slice(edit.from, edit.to) })), work, tr.doc);
+      return parsed2.ok ? { ok: true, session: parsed2.session, file: parsed2.file, mode: "fragment-render", edits: edits2, changedRoots } : { ok: false, reason: parsed2.reason };
+    };
+    if (inlineFacts2 && tr.steps.length === 1 && tr.steps[0] instanceof ReplaceStep4 && base.doc.resolve(tr.steps[0].from).parent.type.name === "code_block") {
+      const fence = prepareClosedFenceRecipe(base, tr, inlineFacts2);
+      if (fence.ok && fence.edits.length) return preserving(fence.edits);
+      if (!fence.ok && inlineFacts2.fences.some((f) => f.pmFrom === base.doc.resolve(tr.steps[0].from).before())) return fence;
+    }
+    let needsInline = tr.steps.length !== 1 || !(tr.steps[0] instanceof ReplaceStep4);
+    if (!needsInline) {
+      const step = tr.steps[0], from = base.doc.resolve(step.from);
+      if (["paragraph", "heading"].includes(from.parent.type.name)) {
+        if (inlineFacts2?.critic.some((c2) => c2.kind === "note_anchor" && step.from < c2.pmTo && step.to > c2.pmFrom)) needsInline = true;
+        step.slice.content.forEach((n) => {
+          if (!n.isText || !n.hasMarkup(n.type, null, step.from < step.to ? from.nodeAfter?.marks ?? from.marks() : from.marks())) needsInline = true;
+        });
+        if (from.marks().some((m) => m.type.name === "code") && step.slice.content.textBetween(0, step.slice.content.size).includes("`")) needsInline = true;
+        const inserted = step.slice.content.textBetween(0, step.slice.content.size), to = base.doc.resolve(step.to);
+        if (step.from < step.to && /[\\`*_[\]{}<>~^=&|]/.test(inserted)) needsInline = true;
+        if (from.parentOffset === 0 && /^[ \t]/.test(inserted) || to.parentOffset === to.parent.content.size && /[ \t]$/.test(inserted)) needsInline = true;
+      }
+    }
+    if (needsInline && inlineFacts2) {
+      const inline = prepareInlineRecipe(base, tr, inlineFacts2);
+      return inline.ok ? preserving(inline.edits) : inline;
+    }
+    if (tr.steps.length === 1 && tr.steps[0] instanceof ReplaceStep4) {
       const replay = EditorState2.create({ doc: base.doc }).tr.step(tr.steps[0]);
       if (!replay.doc.eq(tr.doc)) return { ok: false, reason: "unsupported-step" };
       const exact = applySourceTextTransactionWithEdit(base, replay, { verified, work, verifyEdit: (edit) => {
@@ -9561,6 +10330,7 @@ function applySourceBlockTransaction(base, tr) {
         const edits2 = [exact.edit];
         return { ok: true, session: exact.session, file: exact.file, mode: "exact-text", edits: edits2, changedRoots };
       }
+      if (exact.reason !== "unmapped-range" && exact.reason !== "unsupported-step") return exact;
       const step = tr.steps[0], from = base.doc.resolve(step.from), to = base.doc.resolve(step.to);
       let ordinary = true;
       step.slice.content.forEach((node) => {
@@ -9568,6 +10338,11 @@ function applySourceBlockTransaction(base, tr) {
       });
       const supportedMarks = from.marks().every((mark) => ["strong", "em", "link", "annotation", "html_mark", "highlight", "strike_through"].includes(mark.type.name));
       if (from.sameParent(to) && ["paragraph", "heading", "code_block", "frontmatter", "html_block"].includes(from.parent.type.name) && ordinary && supportedMarks && (["code_block", "frontmatter", "html_block"].includes(from.parent.type.name) || exact.reason === "unmapped-range" || step.to - step.from <= 1 && step.slice.size <= 1)) return exact;
+    }
+    if (inlineFacts2) {
+      const inline = prepareInlineRecipe(base, tr, inlineFacts2);
+      if (inline.ok) return preserving(inline.edits);
+      return inline;
     }
     const fragment = plainMarkBody(base, tr);
     if (fragment) {

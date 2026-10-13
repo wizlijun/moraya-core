@@ -1,7 +1,7 @@
+import { Node, Schema, Mark } from 'prosemirror-model';
+import { Transaction } from 'prosemirror-state';
 import MarkdownIt from 'markdown-it';
 import StateBlock from 'markdown-it/lib/rules_block/state_block.mjs';
-import { Node, Schema } from 'prosemirror-model';
-import { Transaction } from 'prosemirror-state';
 
 type TracePiece = Readonly<{
     from: number;
@@ -238,27 +238,84 @@ type EmptyBody = Readonly<{
     place: EmptyPlace;
 }>;
 
-/**
- * Markdown ↔ ProseMirror Doc roundtrip for `@moraya/core`.
- *
- * Faithful 1:1 migration from Moraya desktop `src/lib/editor/markdown.ts`.
- * Uses `prosemirror-markdown` with `markdown-it` as the tokenizer.
- *
- * Supports: CommonMark + GFM (tables, strikethrough, task lists) +
- *           math (via markdown-it-texmath) + definition lists +
- *           paired raw-HTML marks + frontmatter / footnote pass-through.
- *
- * Configuration matches Milkdown output conventions:
- *   - bullet: '-'
- *   - horizontal rule: '---'
- *   - strong: '**'
- *   - emphasis: '*'
- *
- * Serializer wraps `defaultSchema` (host-agnostic NullMediaResolver). The
- * schema's structural shape is identical to consumer-injected schemas
- * (same NodeSpec/MarkSpec ids), so a doc parsed against `defaultSchema`
- * round-trips through any consumer schema without rebuilding.
- */
+type InlineRawRange = Readonly<{
+    from: number;
+    to: number;
+}>;
+type InlineEdge = Readonly<{
+    id: number;
+    body: number;
+    family: string;
+    pmFrom: number;
+    pmTo: number;
+    open: InlineRawRange;
+    close: InlineRawRange;
+    marks: readonly Mark[];
+}>;
+type InlineOccurrence = Readonly<{
+    body: number;
+    pmFrom: number;
+    pmTo: number;
+    sourceFrom: number;
+    sourceTo: number;
+    kind: 'paragraph' | 'heading' | 'table-cell';
+}>;
+type ClosedFenceBody = Readonly<{
+    pmFrom: number;
+    pmTo: number;
+    sourceFrom: number;
+    sourceTo: number;
+    open: InlineRawRange;
+    close: InlineRawRange;
+    character: '`' | '~';
+    openLength: number;
+    closeLength: number;
+    contentFrom: number;
+    contentTo: number;
+    eol: '\n' | '\r\n' | '\r';
+    contiguousTopLevel: boolean;
+}>;
+type InlineAtomOccurrence = Readonly<{
+    body: number;
+    pmFrom: number;
+    pmTo: number;
+    sourceFrom: number;
+    sourceTo: number;
+    node: Node;
+}>;
+type CriticPayload = Readonly<{
+    id: number;
+    body: number;
+    kind: 'annotation' | 'note_anchor';
+    pmFrom: number;
+    pmTo: number;
+    syntaxFrom: number;
+    syntaxTo: number;
+    noteFrom: number;
+    noteTo: number;
+    note: string;
+    open?: InlineRawRange;
+    middle?: InlineRawRange;
+    close: InlineRawRange;
+}>;
+type InlineRecipeFacts = Readonly<{
+    definitionSeparators: readonly Readonly<{
+        body: number;
+        side: 'before' | 'after';
+        definition: ProtectedSource;
+        range: InlineRawRange;
+    }>[];
+    separators: readonly Readonly<{
+        left: number;
+        right: number;
+        range: InlineRawRange;
+    }>[];
+    critic: readonly CriticPayload[];
+    atoms: readonly InlineAtomOccurrence[];
+    bodies: readonly InlineOccurrence[];
+    edges: readonly InlineEdge[];
+    fences: readonly ClosedFenceBody[];
+}>;
 
 type CapturedTextRun = {
     sourceFrom: number;
@@ -288,11 +345,15 @@ type InlineBody = Readonly<{
 /** Internal actual-capture authority. Public readonly metadata grants no permission. */
 declare function capturedSourceLists(source: string, doc: Node, roots: readonly SourceRoot[], layout: SourceLayout): readonly SourceListLexeme[] | undefined;
 declare function capturedInlineBodies(source: string, doc: Node, roots: readonly SourceRoot[], layout: SourceLayout): readonly InlineBody[] | undefined;
+declare function capturedInlineRecipeFacts(base: SourceSession): InlineRecipeFacts | undefined;
 declare function capturedEmptyBodies(source: string, doc: Node, roots: readonly SourceRoot[], layout: SourceLayout): readonly EmptyBody[] | undefined;
 /** Internal source-render guard; a missing capture fact is not permission. */
 declare function sourceRootHasClosedFences(root: SourceRoot): boolean;
+declare function sourceFenceLength(text: string, character: '`' | '~', minimum: number): number;
+declare function sourceEmDelimiter(mark: Mark, parent: Node, index: number, opening: boolean): string;
+declare function sourceCodeDelimiter(node: Node, opening: boolean): string;
 /** Render only inline content with the same conservative callbacks as roots. */
-declare function serializeSourceInlineBody(node: Node): string;
+declare function serializeSourceInlineBody(node: Node, tableCell?: boolean): string;
 /** Internal source-root renderer; default serializeMarkdown stays unchanged. */
 type SourceListStyle = Readonly<{
     marker: '-' | '+' | '*' | '.' | ')';
@@ -396,4 +457,4 @@ declare function captureFileWindow(cache: FileTokenCache, source: string, patche
     rightIndex: number;
 }>): FileCaptureResult | null;
 
-export { type FileWorkAccumulator as A, type BlankLineUnit as B, type CapturedDocument as C, type SourceListStyle as D, type SourceRootRenderOptions as E, type FallbackEmpty as F, captureFilePipeline as G, captureFileWindow as H, capturedEmptyBodies as I, capturedInlineBodies as J, capturedSourceLists as K, type LayoutContainer as L, parseDocumentWithSourceCapture as M, parseParagraphWithSourceCapture as N, preprocessFileSource as O, type ProtectedSource as P, replayFilePipeline as Q, serializeSourceInlineBody as R, type SourceBlockResult as S, type TextSourceSpan as T, serializeSourceRootMarkdown as U, sourceRootHasClosedFences as V, type FidelityFailure as a, type FidelityResult as b, type FileParseWork as c, type FileRootCorrespondence as d, type FileSourceResult as e, type SourceEdit as f, type SourceFileUpdate as g, type SourceGap as h, type SourceLayout as i, type SourcePatch as j, type SourceRoot as k, type SourceSession as l, type SyntheticEmission as m, applySourceBlockTransaction as n, applySourceTextTransaction as o, createSourceSession as p, parseMarkdown as q, parseMarkdownAsync as r, prepareFileSourceEdits as s, serializeMarkdown as t, type CapturedParagraph as u, type CapturedTextRun as v, type FileCaptureResult as w, type FileCheckpoint as x, type FileDefinition as y, type FileTokenCache as z };
+export { type FileWorkAccumulator as A, type BlankLineUnit as B, type CapturedDocument as C, type SourceListStyle as D, type SourceRootRenderOptions as E, type FallbackEmpty as F, captureFilePipeline as G, captureFileWindow as H, capturedEmptyBodies as I, capturedInlineBodies as J, capturedInlineRecipeFacts as K, type LayoutContainer as L, capturedSourceLists as M, parseDocumentWithSourceCapture as N, parseParagraphWithSourceCapture as O, type ProtectedSource as P, preprocessFileSource as Q, replayFilePipeline as R, type SourceBlockResult as S, type TextSourceSpan as T, serializeSourceInlineBody as U, serializeSourceRootMarkdown as V, sourceCodeDelimiter as W, sourceEmDelimiter as X, sourceFenceLength as Y, sourceRootHasClosedFences as Z, type FidelityFailure as a, type FidelityResult as b, type FileParseWork as c, type FileRootCorrespondence as d, type FileSourceResult as e, type SourceEdit as f, type SourceFileUpdate as g, type SourceGap as h, type SourceLayout as i, type SourcePatch as j, type SourceRoot as k, type SourceSession as l, type SyntheticEmission as m, applySourceBlockTransaction as n, applySourceTextTransaction as o, createSourceSession as p, parseMarkdown as q, parseMarkdownAsync as r, prepareFileSourceEdits as s, serializeMarkdown as t, type CapturedParagraph as u, type CapturedTextRun as v, type FileCaptureResult as w, type FileCheckpoint as x, type FileDefinition as y, type FileTokenCache as z };
