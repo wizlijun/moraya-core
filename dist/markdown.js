@@ -4251,10 +4251,14 @@ function captureFileWindow(cache, source, patches, schema, work, selection) {
     };
     const doc2 = emitCapturedTokens(nextCache.inlineTokens, collector, schema);
     const value = finalizeCapturedDocument(collector, doc2);
-    const dirty = /* @__PURE__ */ new Set();
+    const dirty = /* @__PURE__ */ new Set(), parsed = new Set(parsedIndices);
+    const enclosingMaps = [];
     let rootIndex = 0;
-    for (const index of [...new Set(parsedIndices)].sort((a, b) => a - b)) {
-      const map = coreState.tokens[index]?.map;
+    for (const [index, token] of coreState.tokens.entries()) {
+      if (token.nesting === -1) enclosingMaps.pop();
+      if (token.nesting === 1) enclosingMaps.push(token.map ?? enclosingMaps[enclosingMaps.length - 1] ?? null);
+      if (!parsed.has(index)) continue;
+      const map = token.map ?? enclosingMaps[enclosingMaps.length - 1];
       if (!map) continue;
       const from = collector.lineStarts[map[0]], to = collector.lineStarts[map[1]];
       while (rootIndex < value.roots.length && value.roots[rootIndex].sourceTo <= from) rootIndex++;

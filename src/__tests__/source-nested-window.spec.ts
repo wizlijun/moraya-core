@@ -28,9 +28,21 @@ for(const [name,body,changed,path,nested] of families)it(`bounds actual ${name} 
   expect(w.fullCaptureCalls).toBe(0);expect(w.legacyParseCalls).toBe(0)
   expect(w.blockParseCalls).toBe(1);expect(w.topLevelRunnerCalls).toBe(1)
   expect(w.rawTouchedBeforeRoots).toEqual([count]);expect(w.inlineRoots.length).toBeLessThanOrEqual(3)
+  expect(w.inlineRoots).toContain(count)
   if(nested)expect(w.nestedTokenizeCalls).toBeGreaterThan(0)
   expect(w.blockRuleCalls).toBeLessThanOrEqual(250);expect(w.blockLinesVisited).toBeLessThanOrEqual(1500)
   counters.push([w.blockRuleCalls,w.blockLinesVisited])
  }
  expect(counters[0]).toEqual(counters[1])
+})
+
+it('counts an entirely empty table whose inline cells reparse beside an edited paragraph',()=>{
+ const raw='甲。\n\n|  |  |\n| --- | --- |\n|  |  |\n\nTail。\n'
+ const b=open(raw),p=at(b.doc,[0]),tr=EditorState.create({doc:b.doc}).tr.insertText('乙',p,p+1)
+ expect(b.doc.child(1).type.name).toBe('table');expect(b.doc.child(1).textContent).toBe('')
+ const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(true);if(!r.ok)throw Error(r.reason)
+ expect(r.session.source).toBe('乙。\n\n|  |  |\n| --- | --- |\n|  |  |\n\nTail。\n')
+ expect(r.session.doc.eq(tr.doc)).toBe(true);expect(r.session.protectedSources).toEqual(b.protectedSources)
+ expect(r.file!.work.mode).toBe('local');expect(r.file!.work.fullCaptureCalls).toBe(0)
+ expect(r.file!.work.inlineParseCalls).toBe(5);expect(r.file!.work.inlineRoots).toEqual([0,1])
 })
