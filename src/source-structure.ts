@@ -330,8 +330,10 @@ function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:
  // Only runs beside a touched origin or a true birth may change separators.
  const authorizedSeparator=(slot:Slot):number|undefined=>{
   const {left,right}=neighbors.get(slot)!
-  const c=(left===undefined?undefined:dirty.get(left))??(right===undefined?undefined:dirty.get(right))
-  if(c)return structuralStep(c)
+  for(const root of [left,right]){
+   const c=root===undefined?undefined:dirty.get(root)
+   if(c){const step=structuralStep(c);if(step!==undefined)return step}
+  }
   for(const component of components)for(const birth of component.births)
    if(birth.anchor.kind==='base'&&birth.anchor.slotIds.includes(slot.id))return birth.step
   return undefined

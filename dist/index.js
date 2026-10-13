@@ -6977,8 +6977,13 @@ function makeRecipe(base, ledger, slots, render, rootHasClosedFences) {
   }
   const authorizedSeparator = (slot) => {
     const { left, right } = neighbors.get(slot);
-    const c2 = (left === void 0 ? void 0 : dirty.get(left)) ?? (right === void 0 ? void 0 : dirty.get(right));
-    if (c2) return structuralStep(c2);
+    for (const root of [left, right]) {
+      const c2 = root === void 0 ? void 0 : dirty.get(root);
+      if (c2) {
+        const step = structuralStep(c2);
+        if (step !== void 0) return step;
+      }
+    }
     for (const component of components) for (const birth of component.births)
       if (birth.anchor.kind === "base" && birth.anchor.slotIds.includes(slot.id)) return birth.step;
     return void 0;

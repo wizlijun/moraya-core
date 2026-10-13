@@ -1,6 +1,6 @@
 import {expect,it,vi} from 'vitest'
 import {Slice,type Node as PMNode} from 'prosemirror-model'
-import {Step,StepResult,ReplaceStep,AddMarkStep,RemoveMarkStep} from 'prosemirror-transform'
+import {Step,StepResult,ReplaceStep,AddMarkStep,RemoveMarkStep,AttrStep} from 'prosemirror-transform'
 import * as markdown from '../markdown'
 vi.mock('../markdown',async importOriginal=>{
  const real=await importOriginal<typeof import('../markdown')>()
@@ -56,6 +56,48 @@ it('real joinBackward consumes only crossed seam',()=>{
  const b=open('A\n\nB\n\nC __raw__'),tr=command(state(b,text(b.doc,'B')),joinBackward)
  const r=accept(b,tr,'AB\n\nC __raw__');expect(r.changedRoots).toEqual([0,1])
  expect(r.edits.every(e=>e.to<=b.roots[1]!.sourceTo)).toBe(true)
+})
+it.each([false,true])('left mark does not hide right deletion separator authority (%s)',deleteFirst=>{
+ const b=open('A\n\nB'),tr=EditorState.create({doc:b.doc}).tr
+ if(deleteFirst){tr.delete(3,6);tr.addMark(1,2,b.doc.type.schema.marks.strong!.create())}
+ else {tr.addMark(1,2,b.doc.type.schema.marks.strong!.create());tr.delete(3,6)}
+ expect(open('**A**\n').doc.eq(tr.doc)).toBe(true)
+ const r=accept(b,tr,'**A**\n')
+ expect(r.changedRoots).toEqual([0,1])
+})
+it('left heading AttrStep does not hide right deletion separator authority',()=>{
+ const b=open('# A\n\nB'),tr=EditorState.create({doc:b.doc}).tr
+ tr.step(new AttrStep(0,'level',2));tr.delete(3,6)
+ expect(open('## A\n').doc.eq(tr.doc)).toBe(true)
+ accept(b,tr,'## A\n')
+})
+it('right mark and left deletion retain the surviving marked root',()=>{
+ const b=open('A\n\nB'),tr=EditorState.create({doc:b.doc}).tr
+ tr.addMark(4,5,b.doc.type.schema.marks.strong!.create());tr.delete(0,3)
+ expect(open('**B**').doc.eq(tr.doc)).toBe(true)
+ accept(b,tr,'**B**')
+})
+it.each([
+ ['A\r\n\r\nB','**A**\r\n'],
+ ['A\r\rB','**A**\r'],
+ ['Keep\r\n \t\r\nA\r\n\r\nB','Keep\r\n \t\r\n**A**\r\n'],
+] as const)('left mark with right deletion retains original EOL and untouched blanks %j',(raw,expected)=>{
+ const b=open(raw),tr=EditorState.create({doc:b.doc}).tr
+ const last=b.doc.childCount-1,p=childPos(b.doc,last)
+ const a=text(b.doc,'A')
+ tr.addMark(a,a+1,b.doc.type.schema.marks.strong!.create())
+ tr.delete(p,p+b.doc.child(last).nodeSize)
+ expect(open(expected).doc.eq(tr.doc)).toBe(true)
+ const r=accept(b,tr,expected)
+ if(raw.startsWith('Keep')){
+  const blank=b.layout.blankLines.find(u=>u.sourceFrom===6)!
+  expect(r.edits.every(e=>e.to<=blank.sourceFrom||e.from>=blank.sourceTo)).toBe(true)
+ }
+})
+it('a mark alone preserves its original separator bytes',()=>{
+ const b=open('A\r\n\r\nB'),tr=EditorState.create({doc:b.doc}).tr.addMark(1,2,b.doc.type.schema.marks.strong!.create())
+ const r=accept(b,tr,'**A**\r\n\r\nB')
+ expect(r.edits.every(e=>e.to<=3||e.from>=5)).toBe(true)
 })
 it.each([
  ['A\n\nB\n\nC',1,'A\n\nC'],['A\n\nB',0,'B'],['A\n\nB',1,'A\n'],
