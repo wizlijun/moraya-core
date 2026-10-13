@@ -66,11 +66,12 @@ it('ordered start AttrStep is persisted',()=>{
  const b=open('3. A\n4. B'+tail),tr=state(b,3).tr.step(new AttrStep(0,'order',7))
  const r=accept(b,tr);expect(r.session.source.startsWith('7. A')).toBe(true);expect(r.changedRoots).toEqual([0])
 })
-it('actual task-list producer stays atomic until checkbox source capture is supported',()=>{
+it('actual task-list producer preserves checkbox attrs and external raw',()=>{
  const b=open('A\n\nB'+tail),tr=command(state(b,1,4),wrapInTaskList)
  expect(tr.doc.child(0).child(0).attrs.checked).toBe(false)
- expect(createSourceSession('- [ ] A\n- [ ] B'+tail)).toEqual({ok:false,reason:'unsupported-source'})
- reject(b,tr)
+ const r=accept(b,tr,'- [ ] A\n- [ ] B'+tail)
+ expect(r.session.doc.child(0).child(1).attrs.checked).toBe(false)
+ expect(r.changedRoots).toEqual([0,1]);expect(r.session.source.endsWith(tail)).toBe(true)
 })
 it('split edit new right child and wrap share one transaction',()=>{
  const b=open('HelloWorld'+tail),tr=command(state(b,6),splitBlock)

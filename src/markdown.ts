@@ -31,7 +31,7 @@ import type { Node as PmNode, Mark, Schema } from 'prosemirror-model'
 import { defaultSchema } from './schema'
 import { projectLineEndings } from './source-projection'
 import { rawRange, lineStarts, rendererTailStart, UnsupportedOwnership, type SourceRoot, type SourceGap, type SyntheticEmission, type ProtectedSource } from './source-ownership'
-import { collectBlankDrafts, finishSourceLayout, type BlankDraft, type FallbackEmpty, type SourceLayout, type LayoutRegion } from './source-layout'
+import { collectBlankDrafts, finishSourceLayout, type BlankDraft, type FallbackEmpty, type SourceLayout, type LayoutRegion, type SourceListLexeme, type ListMarker } from './source-layout'
 import { identityTrace, sliceTrace, editTrace, type SourceTrace, type TraceEdit } from './source-trace'
 
 // ── markdown-it instance ────────────────────────────────────────
@@ -425,7 +425,7 @@ export type CapturedDocument = CapturedParagraph & { roots: SourceRoot[]; gaps: 
 type SourceRun = { text: string; kind?: undefined; trace?: undefined }
   | { text: string; kind: 'linear' | 'atomic'; trace: SourceTrace }
 type Capture = {
-  source: string; blankLines: BlankDraft[]; fallback?: FallbackEmpty
+  source: string; blankLines: BlankDraft[]; fallback?: FallbackEmpty; lists: ListDraft[]
   trace: SourceTrace; lineStarts: number[]; protectedSources: ProtectedSource[]; runs: CapturedTextRun[]; roots: SourceRoot[]
   synthetic: { gapIndex: number; emission: SyntheticEmission }[]
 }
@@ -437,7 +437,17 @@ const tokenSources = new WeakMap<object, { collector: Capture; runs: SourceRun[]
 const pendingSources = new WeakMap<object, SourceRun[]>()
 const capturedFenceClosed = new WeakMap<object, boolean>()
 const capturedRootFencesClosed = new WeakMap<SourceRoot, boolean>()
+const capturedListLayouts = new WeakMap<SourceLayout, {
+  source: string; doc: PmNode; roots: readonly SourceRoot[]; lists: readonly SourceListLexeme[]
+}>()
 let captureAvailable = true
+
+/** Internal actual-capture authority. Public readonly metadata grants no permission. */
+export function capturedSourceLists(source: string, doc: PmNode, roots: readonly SourceRoot[], layout: SourceLayout): readonly SourceListLexeme[] | undefined {
+  const bound = capturedListLayouts.get(layout)
+  return bound && bound.source === source && bound.doc === doc && bound.roots === roots
+    && bound.lists === layout.lists ? bound.lists : undefined
+}
 
 /** Internal source-render guard; a missing capture fact is not permission. */
 export function sourceRootHasClosedFences(root: SourceRoot): boolean {
@@ -779,6 +789,29 @@ function captureText(state: any, token: any, delegate: () => void) {
   if (captureCursor(state) !== pos) throw new UnsupportedSourceCapture()
 }
 
+// The existing task parser consumes only the first text child's prefix. Keep
+// that token's existing provenance in step; never manufacture a missing trace.
+function consumeCheckboxSource(token: InlineToken, count: number): void {
+  const provenance = tokenSources.get(token)
+  if (!provenance) return
+  if (provenance.runs.map(run => run.text).join('') !== token.content) throw new UnsupportedSourceCapture()
+  let remaining = Math.min(count, token.content.length)
+  const runs: SourceRun[] = []
+  for (const run of provenance.runs) {
+    if (!remaining) { runs.push(run); continue }
+    if (remaining >= run.text.length) { remaining -= run.text.length; continue }
+    if (run.kind === 'atomic') throw new UnsupportedSourceCapture()
+    const text = run.text.slice(remaining)
+    if (run.trace) {
+      if (run.trace.text !== run.text || run.trace.pieces.some(p => p.kind === 'atomic' && p.from < remaining && remaining < p.to)) throw new UnsupportedSourceCapture()
+      runs.push({ text, kind: run.kind, trace: sliceTrace(run.trace, remaining, run.text.length) })
+    } else runs.push({ text })
+    remaining = 0
+  }
+  if (remaining || runs.map(run => run.text).join('') !== token.content.slice(count)) throw new UnsupportedSourceCapture()
+  tokenSources.set(token, { collector: provenance.collector, runs })
+}
+
 type RootDraft = {
   collector: Capture; kind: 'natural' | 'synthetic'; gapIndex: number
   id: number; tokenType: string; sourceFrom: number; sourceTo: number; tailFrom: number
@@ -787,6 +820,104 @@ type RootDraft = {
 }
 const rootStarts = new WeakMap<object, RootDraft>()
 const rootEnds = new WeakMap<object, RootDraft>()
+
+type ListDraft = {
+  collector: Capture; id: number; kind: 'bullet' | 'ordered'; marker: ListMarker
+  sourceFrom: number; sourceTo: number; tight: boolean; order?: number
+  parent?: { content: PmNode[] }; slot?: number; node?: PmNode
+}
+const listStarts = new WeakMap<object, ListDraft>()
+const listEnds = new WeakMap<object, ListDraft>()
+
+// One pass over the actual token sequence; only paragraphs directly inside an
+// item of this list determine tightness. Empty items have no visible paragraph.
+function prepareListEvents(tokens: InlineToken[], collector: Capture): void {
+  const stack: { token: InlineToken; list: ListDraft | undefined }[] = []
+  for (const token of tokens) {
+    if (token.nesting === -1) {
+      const open = stack.pop()
+      if (!open || open.token.type.replace(/_open$/, '_close') !== token.type) throw new UnsupportedSourceCapture()
+      if (open.list) {
+        if (token.markup !== open.list.marker) throw new UnsupportedSourceCapture()
+        listEnds.set(token, open.list)
+      }
+      continue
+    }
+    let list: ListDraft | undefined
+    if (token.type === 'bullet_list_open' || token.type === 'ordered_list_open') {
+      const kind = token.type === 'bullet_list_open' ? 'bullet' : 'ordered', marker = token.markup
+      if (token.nesting !== 1 || !token.map || token.map.length !== 2
+        || !token.map.every(Number.isInteger) || !marker
+        || !(kind === 'bullet' ? ['-', '+', '*'] : ['.', ')']).includes(marker)) throw new UnsupportedSourceCapture()
+      const from = collector.lineStarts[token.map[0]], to = collector.lineStarts[token.map[1]]
+      if (from === undefined || to === undefined || to <= from) throw new UnsupportedSourceCapture()
+      const raw = rawRange(collector.trace, from, to)
+      if (!raw || (kind === 'ordered' && typeof token.attrGet !== 'function')) throw new UnsupportedSourceCapture()
+      list = { collector, id: collector.lists.length, kind, marker: marker as ListMarker,
+        sourceFrom: raw.from, sourceTo: raw.to, tight: true,
+        ...(kind === 'ordered' ? { order: Number(token.attrGet!('start') ?? 1) } : {}) }
+      collector.lists.push(list); listStarts.set(token, list)
+    } else if (token.type === 'paragraph_open' && stack[stack.length - 1]?.token.type === 'list_item_open') {
+      const direct = stack[stack.length - 2]?.list
+      if (direct) {
+        if (typeof token.hidden !== 'boolean') throw new UnsupportedSourceCapture()
+        if (!token.hidden) direct.tight = false
+      }
+    }
+    if (token.nesting === 1) stack.push({ token, list })
+  }
+  if (stack.length) throw new UnsupportedSourceCapture()
+}
+
+// Capture the actual appended object, not a temporary cursor: createAndFill
+// may later insert an empty paragraph before a list in its containing item.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function captureListEmission(state: any, token: any, delegate: () => void): void {
+  const start = listStarts.get(token), end = listEnds.get(token)
+  if (start) {
+    const parent = state.stack?.[state.stack.length - 1]
+    if (!parent || !Array.isArray(parent.content) || start.parent) throw new UnsupportedSourceCapture()
+    start.parent = parent; start.slot = parent.content.length
+  }
+  delegate()
+  if (end) {
+    const parent = state.stack?.[state.stack.length - 1]
+    if (!parent || parent !== end.parent || end.slot === undefined
+      || parent.content.length !== end.slot + 1 || end.node) throw new UnsupportedSourceCapture()
+    const node: PmNode = parent.content[end.slot]
+    if (node.type.name !== end.kind + '_list' || (end.kind === 'ordered' && node.attrs.order !== end.order)) throw new UnsupportedSourceCapture()
+    end.node = node
+  }
+}
+
+function finishSourceLists(doc: PmNode, collector: Capture): readonly SourceListLexeme[] {
+  const byNode = new Map<PmNode, ListDraft>(), facts: SourceListLexeme[] = []
+  for (const draft of collector.lists) {
+    if (!draft.node || byNode.has(draft.node)) throw new UnsupportedSourceCapture()
+    byNode.set(draft.node, draft)
+  }
+  let rootIndex = 0
+  const seen = new Set<ListDraft>()
+  doc.descendants((node, pmFrom) => {
+    const draft = byNode.get(node)
+    if (!draft) {
+      if (node.type.name === 'bullet_list' || node.type.name === 'ordered_list') throw new UnsupportedSourceCapture()
+      return
+    }
+    if (seen.has(draft)) throw new UnsupportedSourceCapture()
+    seen.add(draft)
+    const pmTo = pmFrom + node.nodeSize
+    while (collector.roots[rootIndex] && collector.roots[rootIndex]!.pmTo <= pmFrom) rootIndex++
+    const root = collector.roots[rootIndex]
+    if (!root || root.pmFrom > pmFrom || root.pmTo < pmTo
+      || root.sourceFrom > draft.sourceFrom || root.sourceTo < draft.sourceTo
+      || node.type.name !== draft.kind + '_list' || (draft.kind === 'ordered' && node.attrs.order !== draft.order)) throw new UnsupportedSourceCapture()
+    facts.push(Object.freeze({ id: draft.id, rootId: root.id, pmFrom, pmTo,
+      sourceFrom: draft.sourceFrom, sourceTo: draft.sourceTo, kind: draft.kind, marker: draft.marker, tight: draft.tight }))
+  })
+  if (seen.size !== collector.lists.length) throw new UnsupportedSourceCapture()
+  return Object.freeze(facts)
+}
 
 function prepareRootEvents(tokens: InlineToken[], collector: Capture): InlineToken[] {
   const starts = collector.lineStarts
@@ -934,6 +1065,7 @@ md.parse = function (src: string, env: unknown) {
   tagPairedHtmlInline(tokens)
   fixFootnoteDefMaps(tokens)
   const collector = (env as { [captureKey]?: Capture } | undefined)?.[captureKey]
+  if (collector) prepareListEvents(tokens, collector)
   tokens = collector ? prepareRootEvents(tokens, collector) : preserveBlankLines(tokens)
   return tokens as unknown as ReturnType<typeof _origMdParse>
 }
@@ -959,7 +1091,7 @@ const parserTokens: Record<string, import('prosemirror-markdown').ParseSpec> = {
   ordered_list: {
     block: 'ordered_list',
     getAttrs(token) {
-      return { order: Number(token.attrGet('start') || 1) }
+      return { order: Number(token.attrGet('start') ?? 1) }
     },
   },
   list_item: {
@@ -983,6 +1115,7 @@ const parserTokens: Record<string, import('prosemirror-markdown').ParseSpec> = {
             if (children && children.length > 0) {
               const firstChild = children[0]
               if (firstChild.type === 'text') {
+                consumeCheckboxSource(firstChild, match[0].length)
                 firstChild.content = firstChild.content.slice(match[0].length)
                 if (!firstChild.content) {
                   children.shift()
@@ -1371,7 +1504,8 @@ class MorayaMarkdownParser extends MarkdownParser {
     }
     for (const key of Object.keys(h)) {
       const delegate = h[key]!
-      h[key] = (state, tok, tokens, i) => captureRootEmission(state, tok, () => delegate(state, tok, tokens, i))
+      h[key] = (state, tok, tokens, i) => captureRootEmission(state, tok,
+        () => captureListEmission(state, tok, () => delegate(state, tok, tokens, i)))
     }
   }
 }
@@ -1455,7 +1589,7 @@ const serializer = new MarkdownSerializer(
       state.renderList(node, '  ', () => '- ')
     },
     ordered_list(state, node) {
-      const start = (node.attrs.order as number) || 1
+      const start = (node.attrs.order as number) ?? 1
       state.renderList(node, '   ', (i: number) => `${start + i}. `)
     },
     list_item(state, node) {
@@ -2055,7 +2189,7 @@ export function parseDocumentWithSourceCapture(source: string, schema?: Schema):
       trace = editTrace(trace, edits)
       if (trace.text !== after) throw new UnsupportedSourceCapture()
     })
-    const collector: Capture = { source, trace, lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [] }
+    const collector: Capture = { source, trace, lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [], lists: [] }
     const doc = getParserFor(schema).parse(work, { [captureKey]: collector })
     // Build one independent PM index. Only actual top-level paragraph text
     // children qualify; atoms leave gaps, and paragraph identity is retained.
@@ -2091,9 +2225,12 @@ export function parseDocumentWithSourceCapture(source: string, schema?: Schema):
       pmEnd = run.pmTo
       sourceEnd = run.sourceTo
     }
+    const lists = finishSourceLists(doc, collector)
+    const layout = finishSourceLayout(collector.blankLines, collector.fallback, lists)
+    capturedListLayouts.set(layout, { source, doc, roots: collector.roots, lists })
     return { ok: true, value: { doc, textRuns: collector.runs,
       protectedSources: Object.freeze(collector.protectedSources),
-      layout: finishSourceLayout(collector.blankLines, collector.fallback),
+      layout,
       roots: collector.roots, gaps: buildSourceGaps(source, collector.roots, collector.synthetic) } }
   } catch (error) {
     return { ok: false, reason: error instanceof UnsupportedSourceCapture || error instanceof UnsupportedOwnership ? 'unsupported-source' : 'parse-error' }

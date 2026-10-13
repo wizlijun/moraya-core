@@ -1523,14 +1523,14 @@ function collectBlankDrafts(source, trace, starts, regions, protectedSources) {
   });
   return result;
 }
-function finishSourceLayout(blankLines, fallback) {
+function finishSourceLayout(blankLines, fallback, lists) {
   const units = blankLines.map((u) => {
     const base = { id: u.id, sourceFrom: u.sourceFrom, sourceTo: u.sourceTo, container: u.container };
     if (u.role === "separator") return { ...base, role: "separator" };
     if (!u.emission) throw new UnsupportedOwnership();
     return { ...base, role: "empty-paragraph", emission: u.emission };
   });
-  return fallback ? { blankLines: units, fallback } : { blankLines: units };
+  return { blankLines: units, ...fallback ? { fallback } : {}, ...lists ? { lists } : {} };
 }
 
 // src/markdown.ts
@@ -1799,7 +1799,12 @@ var tokenSources = /* @__PURE__ */ new WeakMap();
 var pendingSources = /* @__PURE__ */ new WeakMap();
 var capturedFenceClosed = /* @__PURE__ */ new WeakMap();
 var capturedRootFencesClosed = /* @__PURE__ */ new WeakMap();
+var capturedListLayouts = /* @__PURE__ */ new WeakMap();
 var captureAvailable = true;
+function capturedSourceLists(source, doc2, roots, layout) {
+  const bound = capturedListLayouts.get(layout);
+  return bound && bound.source === source && bound.doc === doc2 && bound.roots === roots && bound.lists === layout.lists ? bound.lists : void 0;
+}
 function sourceRootHasClosedFences(root) {
   return capturedRootFencesClosed.get(root) === true;
 }
@@ -2139,8 +2144,131 @@ function captureText(state, token, delegate) {
   delegate();
   if (captureCursor(state) !== pos) throw new UnsupportedSourceCapture();
 }
+function consumeCheckboxSource(token, count) {
+  const provenance = tokenSources.get(token);
+  if (!provenance) return;
+  if (provenance.runs.map((run) => run.text).join("") !== token.content) throw new UnsupportedSourceCapture();
+  let remaining = Math.min(count, token.content.length);
+  const runs = [];
+  for (const run of provenance.runs) {
+    if (!remaining) {
+      runs.push(run);
+      continue;
+    }
+    if (remaining >= run.text.length) {
+      remaining -= run.text.length;
+      continue;
+    }
+    if (run.kind === "atomic") throw new UnsupportedSourceCapture();
+    const text2 = run.text.slice(remaining);
+    if (run.trace) {
+      if (run.trace.text !== run.text || run.trace.pieces.some((p) => p.kind === "atomic" && p.from < remaining && remaining < p.to)) throw new UnsupportedSourceCapture();
+      runs.push({ text: text2, kind: run.kind, trace: sliceTrace(run.trace, remaining, run.text.length) });
+    } else runs.push({ text: text2 });
+    remaining = 0;
+  }
+  if (remaining || runs.map((run) => run.text).join("") !== token.content.slice(count)) throw new UnsupportedSourceCapture();
+  tokenSources.set(token, { collector: provenance.collector, runs });
+}
 var rootStarts = /* @__PURE__ */ new WeakMap();
 var rootEnds = /* @__PURE__ */ new WeakMap();
+var listStarts = /* @__PURE__ */ new WeakMap();
+var listEnds = /* @__PURE__ */ new WeakMap();
+function prepareListEvents(tokens, collector) {
+  const stack = [];
+  for (const token of tokens) {
+    if (token.nesting === -1) {
+      const open = stack.pop();
+      if (!open || open.token.type.replace(/_open$/, "_close") !== token.type) throw new UnsupportedSourceCapture();
+      if (open.list) {
+        if (token.markup !== open.list.marker) throw new UnsupportedSourceCapture();
+        listEnds.set(token, open.list);
+      }
+      continue;
+    }
+    let list;
+    if (token.type === "bullet_list_open" || token.type === "ordered_list_open") {
+      const kind = token.type === "bullet_list_open" ? "bullet" : "ordered", marker = token.markup;
+      if (token.nesting !== 1 || !token.map || token.map.length !== 2 || !token.map.every(Number.isInteger) || !marker || !(kind === "bullet" ? ["-", "+", "*"] : [".", ")"]).includes(marker)) throw new UnsupportedSourceCapture();
+      const from = collector.lineStarts[token.map[0]], to = collector.lineStarts[token.map[1]];
+      if (from === void 0 || to === void 0 || to <= from) throw new UnsupportedSourceCapture();
+      const raw = rawRange(collector.trace, from, to);
+      if (!raw || kind === "ordered" && typeof token.attrGet !== "function") throw new UnsupportedSourceCapture();
+      list = {
+        collector,
+        id: collector.lists.length,
+        kind,
+        marker,
+        sourceFrom: raw.from,
+        sourceTo: raw.to,
+        tight: true,
+        ...kind === "ordered" ? { order: Number(token.attrGet("start") ?? 1) } : {}
+      };
+      collector.lists.push(list);
+      listStarts.set(token, list);
+    } else if (token.type === "paragraph_open" && stack[stack.length - 1]?.token.type === "list_item_open") {
+      const direct = stack[stack.length - 2]?.list;
+      if (direct) {
+        if (typeof token.hidden !== "boolean") throw new UnsupportedSourceCapture();
+        if (!token.hidden) direct.tight = false;
+      }
+    }
+    if (token.nesting === 1) stack.push({ token, list });
+  }
+  if (stack.length) throw new UnsupportedSourceCapture();
+}
+function captureListEmission(state, token, delegate) {
+  const start = listStarts.get(token), end = listEnds.get(token);
+  if (start) {
+    const parent = state.stack?.[state.stack.length - 1];
+    if (!parent || !Array.isArray(parent.content) || start.parent) throw new UnsupportedSourceCapture();
+    start.parent = parent;
+    start.slot = parent.content.length;
+  }
+  delegate();
+  if (end) {
+    const parent = state.stack?.[state.stack.length - 1];
+    if (!parent || parent !== end.parent || end.slot === void 0 || parent.content.length !== end.slot + 1 || end.node) throw new UnsupportedSourceCapture();
+    const node = parent.content[end.slot];
+    if (node.type.name !== end.kind + "_list" || end.kind === "ordered" && node.attrs.order !== end.order) throw new UnsupportedSourceCapture();
+    end.node = node;
+  }
+}
+function finishSourceLists(doc2, collector) {
+  const byNode = /* @__PURE__ */ new Map(), facts = [];
+  for (const draft of collector.lists) {
+    if (!draft.node || byNode.has(draft.node)) throw new UnsupportedSourceCapture();
+    byNode.set(draft.node, draft);
+  }
+  let rootIndex = 0;
+  const seen = /* @__PURE__ */ new Set();
+  doc2.descendants((node, pmFrom) => {
+    const draft = byNode.get(node);
+    if (!draft) {
+      if (node.type.name === "bullet_list" || node.type.name === "ordered_list") throw new UnsupportedSourceCapture();
+      return;
+    }
+    if (seen.has(draft)) throw new UnsupportedSourceCapture();
+    seen.add(draft);
+    const pmTo = pmFrom + node.nodeSize;
+    while (collector.roots[rootIndex] && collector.roots[rootIndex].pmTo <= pmFrom) rootIndex++;
+    const root = collector.roots[rootIndex];
+    if (!root || root.pmFrom > pmFrom || root.pmTo < pmTo || root.sourceFrom > draft.sourceFrom || root.sourceTo < draft.sourceTo || node.type.name !== draft.kind + "_list" || draft.kind === "ordered" && node.attrs.order !== draft.order) throw new UnsupportedSourceCapture();
+    facts.push(Object.freeze({
+      id: draft.id,
+      rootId: root.id,
+      pmFrom,
+      pmTo,
+      sourceFrom: draft.sourceFrom,
+      sourceTo: draft.sourceTo,
+      kind: draft.kind,
+      marker: draft.marker,
+      tight: draft.tight
+    }));
+  });
+  if (seen.size !== collector.lists.length) throw new UnsupportedSourceCapture();
+  return Object.freeze(facts);
+}
 function prepareRootEvents(tokens, collector) {
   const starts = collector.lineStarts;
   const renderable = /* @__PURE__ */ new Set([
@@ -2351,6 +2479,7 @@ md.parse = function(src, env) {
   tagPairedHtmlInline(tokens);
   fixFootnoteDefMaps(tokens);
   const collector = env?.[captureKey];
+  if (collector) prepareListEvents(tokens, collector);
   tokens = collector ? prepareRootEvents(tokens, collector) : preserveBlankLines(tokens);
   return tokens;
 };
@@ -2369,7 +2498,7 @@ var parserTokens = {
   ordered_list: {
     block: "ordered_list",
     getAttrs(token) {
-      return { order: Number(token.attrGet("start") || 1) };
+      return { order: Number(token.attrGet("start") ?? 1) };
     }
   },
   list_item: {
@@ -2388,6 +2517,7 @@ var parserTokens = {
             if (children && children.length > 0) {
               const firstChild = children[0];
               if (firstChild.type === "text") {
+                consumeCheckboxSource(firstChild, match[0].length);
                 firstChild.content = firstChild.content.slice(match[0].length);
                 if (!firstChild.content) {
                   children.shift();
@@ -2689,7 +2819,11 @@ var MorayaMarkdownParser = class extends MarkdownParser {
     };
     for (const key of Object.keys(h)) {
       const delegate = h[key];
-      h[key] = (state, tok, tokens, i) => captureRootEmission(state, tok, () => delegate(state, tok, tokens, i));
+      h[key] = (state, tok, tokens, i) => captureRootEmission(
+        state,
+        tok,
+        () => captureListEmission(state, tok, () => delegate(state, tok, tokens, i))
+      );
     }
   }
 };
@@ -2759,7 +2893,7 @@ var serializer = new MarkdownSerializer(
       state.renderList(node, "  ", () => "- ");
     },
     ordered_list(state, node) {
-      const start = node.attrs.order || 1;
+      const start = node.attrs.order ?? 1;
       state.renderList(node, "   ", (i) => `${start + i}. `);
     },
     list_item(state, node) {
@@ -3220,7 +3354,7 @@ function parseDocumentWithSourceCapture(source, schema) {
       trace = editTrace(trace, edits);
       if (trace.text !== after) throw new UnsupportedSourceCapture();
     });
-    const collector = { source, trace, lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [] };
+    const collector = { source, trace, lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [], lists: [] };
     const doc2 = getParserFor(schema).parse(work, { [captureKey]: collector });
     const text2 = [];
     doc2.forEach((paragraph2, offset) => {
@@ -3250,11 +3384,14 @@ function parseDocumentWithSourceCapture(source, schema) {
       pmEnd = run.pmTo;
       sourceEnd = run.sourceTo;
     }
+    const lists = finishSourceLists(doc2, collector);
+    const layout = finishSourceLayout(collector.blankLines, collector.fallback, lists);
+    capturedListLayouts.set(layout, { source, doc: doc2, roots: collector.roots, lists });
     return { ok: true, value: {
       doc: doc2,
       textRuns: collector.runs,
       protectedSources: Object.freeze(collector.protectedSources),
-      layout: finishSourceLayout(collector.blankLines, collector.fallback),
+      layout,
       roots: collector.roots,
       gaps: buildSourceGaps(source, collector.roots, collector.synthetic)
     } };
@@ -3278,6 +3415,7 @@ function parseParagraphWithSourceCapture(source, schema) {
   return supported && pos === doc2.content.size - 1 ? parsed : { ok: false, reason: "unsupported-source" };
 }
 export {
+  capturedSourceLists,
   parseDocumentWithSourceCapture,
   parseMarkdown,
   parseMarkdownAsync,

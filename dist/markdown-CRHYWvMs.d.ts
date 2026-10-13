@@ -58,9 +58,22 @@ type FallbackEmpty = Readonly<{
     sourceAnchor: number;
     emission: SyntheticEmission;
 }>;
+type ListMarker = '-' | '+' | '*' | '.' | ')';
+type SourceListLexeme = Readonly<{
+    id: number;
+    rootId: number;
+    pmFrom: number;
+    pmTo: number;
+    sourceFrom: number;
+    sourceTo: number;
+    kind: 'bullet' | 'ordered';
+    marker: ListMarker;
+    tight: boolean;
+}>;
 type SourceLayout = Readonly<{
     blankLines: readonly BlankLineUnit[];
     fallback?: FallbackEmpty;
+    lists?: readonly SourceListLexeme[];
 }>;
 
 /**
@@ -102,6 +115,8 @@ type CapturedDocument = CapturedParagraph & {
     protectedSources: readonly ProtectedSource[];
     layout: SourceLayout;
 };
+/** Internal actual-capture authority. Public readonly metadata grants no permission. */
+declare function capturedSourceLists(source: string, doc: Node, roots: readonly SourceRoot[], layout: SourceLayout): readonly SourceListLexeme[] | undefined;
 /** Internal source-render guard; a missing capture fact is not permission. */
 declare function sourceRootHasClosedFences(root: SourceRoot): boolean;
 /** Internal source-root renderer; default serializeMarkdown stays unchanged. */
@@ -143,4 +158,4 @@ declare function parseParagraphWithSourceCapture(source: string, schema?: Schema
     reason: 'unsupported-source' | 'parse-error';
 };
 
-export { type BlankLineUnit as B, type CapturedDocument as C, type FallbackEmpty as F, type LayoutContainer as L, type ProtectedSource as P, type SourceRoot as S, type SourceGap as a, type SourceLayout as b, type SourceEdit as c, type SyntheticEmission as d, parseMarkdownAsync as e, type CapturedParagraph as f, type CapturedTextRun as g, parseDocumentWithSourceCapture as h, parseParagraphWithSourceCapture as i, serializeSourceRootMarkdown as j, sourceRootHasClosedFences as k, parseMarkdown as p, serializeMarkdown as s };
+export { type BlankLineUnit as B, type CapturedDocument as C, type FallbackEmpty as F, type LayoutContainer as L, type ProtectedSource as P, type SourceRoot as S, type SourceGap as a, type SourceLayout as b, type SourceEdit as c, type SyntheticEmission as d, parseMarkdownAsync as e, type CapturedParagraph as f, type CapturedTextRun as g, capturedSourceLists as h, parseDocumentWithSourceCapture as i, parseParagraphWithSourceCapture as j, serializeSourceRootMarkdown as k, sourceRootHasClosedFences as l, parseMarkdown as p, serializeMarkdown as s };

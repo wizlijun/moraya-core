@@ -2129,8 +2129,96 @@ function captureText(state, token, delegate) {
   delegate();
   if (captureCursor(state) !== pos) throw new UnsupportedSourceCapture();
 }
+function consumeCheckboxSource(token, count) {
+  const provenance = tokenSources.get(token);
+  if (!provenance) return;
+  if (provenance.runs.map((run) => run.text).join("") !== token.content) throw new UnsupportedSourceCapture();
+  let remaining = Math.min(count, token.content.length);
+  const runs = [];
+  for (const run of provenance.runs) {
+    if (!remaining) {
+      runs.push(run);
+      continue;
+    }
+    if (remaining >= run.text.length) {
+      remaining -= run.text.length;
+      continue;
+    }
+    if (run.kind === "atomic") throw new UnsupportedSourceCapture();
+    const text2 = run.text.slice(remaining);
+    if (run.trace) {
+      if (run.trace.text !== run.text || run.trace.pieces.some((p) => p.kind === "atomic" && p.from < remaining && remaining < p.to)) throw new UnsupportedSourceCapture();
+      runs.push({ text: text2, kind: run.kind, trace: sliceTrace(run.trace, remaining, run.text.length) });
+    } else runs.push({ text: text2 });
+    remaining = 0;
+  }
+  if (remaining || runs.map((run) => run.text).join("") !== token.content.slice(count)) throw new UnsupportedSourceCapture();
+  tokenSources.set(token, { collector: provenance.collector, runs });
+}
 var rootStarts = /* @__PURE__ */ new WeakMap();
 var rootEnds = /* @__PURE__ */ new WeakMap();
+var listStarts = /* @__PURE__ */ new WeakMap();
+var listEnds = /* @__PURE__ */ new WeakMap();
+function prepareListEvents(tokens, collector) {
+  const stack = [];
+  for (const token of tokens) {
+    if (token.nesting === -1) {
+      const open = stack.pop();
+      if (!open || open.token.type.replace(/_open$/, "_close") !== token.type) throw new UnsupportedSourceCapture();
+      if (open.list) {
+        if (token.markup !== open.list.marker) throw new UnsupportedSourceCapture();
+        listEnds.set(token, open.list);
+      }
+      continue;
+    }
+    let list;
+    if (token.type === "bullet_list_open" || token.type === "ordered_list_open") {
+      const kind = token.type === "bullet_list_open" ? "bullet" : "ordered", marker = token.markup;
+      if (token.nesting !== 1 || !token.map || token.map.length !== 2 || !token.map.every(Number.isInteger) || !marker || !(kind === "bullet" ? ["-", "+", "*"] : [".", ")"]).includes(marker)) throw new UnsupportedSourceCapture();
+      const from = collector.lineStarts[token.map[0]], to = collector.lineStarts[token.map[1]];
+      if (from === void 0 || to === void 0 || to <= from) throw new UnsupportedSourceCapture();
+      const raw = rawRange(collector.trace, from, to);
+      if (!raw || kind === "ordered" && typeof token.attrGet !== "function") throw new UnsupportedSourceCapture();
+      list = {
+        collector,
+        id: collector.lists.length,
+        kind,
+        marker,
+        sourceFrom: raw.from,
+        sourceTo: raw.to,
+        tight: true,
+        ...kind === "ordered" ? { order: Number(token.attrGet("start") ?? 1) } : {}
+      };
+      collector.lists.push(list);
+      listStarts.set(token, list);
+    } else if (token.type === "paragraph_open" && stack[stack.length - 1]?.token.type === "list_item_open") {
+      const direct = stack[stack.length - 2]?.list;
+      if (direct) {
+        if (typeof token.hidden !== "boolean") throw new UnsupportedSourceCapture();
+        if (!token.hidden) direct.tight = false;
+      }
+    }
+    if (token.nesting === 1) stack.push({ token, list });
+  }
+  if (stack.length) throw new UnsupportedSourceCapture();
+}
+function captureListEmission(state, token, delegate) {
+  const start = listStarts.get(token), end = listEnds.get(token);
+  if (start) {
+    const parent = state.stack?.[state.stack.length - 1];
+    if (!parent || !Array.isArray(parent.content) || start.parent) throw new UnsupportedSourceCapture();
+    start.parent = parent;
+    start.slot = parent.content.length;
+  }
+  delegate();
+  if (end) {
+    const parent = state.stack?.[state.stack.length - 1];
+    if (!parent || parent !== end.parent || end.slot === void 0 || parent.content.length !== end.slot + 1 || end.node) throw new UnsupportedSourceCapture();
+    const node = parent.content[end.slot];
+    if (node.type.name !== end.kind + "_list" || end.kind === "ordered" && node.attrs.order !== end.order) throw new UnsupportedSourceCapture();
+    end.node = node;
+  }
+}
 function prepareRootEvents(tokens, collector) {
   const starts = collector.lineStarts;
   const renderable = /* @__PURE__ */ new Set([
@@ -2312,6 +2400,7 @@ md.parse = function(src, env) {
   tagPairedHtmlInline(tokens);
   fixFootnoteDefMaps(tokens);
   const collector = env?.[captureKey];
+  if (collector) prepareListEvents(tokens, collector);
   tokens = collector ? prepareRootEvents(tokens, collector) : preserveBlankLines(tokens);
   return tokens;
 };
@@ -2330,7 +2419,7 @@ var parserTokens = {
   ordered_list: {
     block: "ordered_list",
     getAttrs(token) {
-      return { order: Number(token.attrGet("start") || 1) };
+      return { order: Number(token.attrGet("start") ?? 1) };
     }
   },
   list_item: {
@@ -2349,6 +2438,7 @@ var parserTokens = {
             if (children && children.length > 0) {
               const firstChild = children[0];
               if (firstChild.type === "text") {
+                consumeCheckboxSource(firstChild, match[0].length);
                 firstChild.content = firstChild.content.slice(match[0].length);
                 if (!firstChild.content) {
                   children.shift();
@@ -2650,7 +2740,11 @@ var MorayaMarkdownParser = class extends MarkdownParser {
     };
     for (const key of Object.keys(h)) {
       const delegate = h[key];
-      h[key] = (state, tok, tokens, i) => captureRootEmission(state, tok, () => delegate(state, tok, tokens, i));
+      h[key] = (state, tok, tokens, i) => captureRootEmission(
+        state,
+        tok,
+        () => captureListEmission(state, tok, () => delegate(state, tok, tokens, i))
+      );
     }
   }
 };
@@ -2720,7 +2814,7 @@ var serializer = new MarkdownSerializer(
       state.renderList(node, "  ", () => "- ");
     },
     ordered_list(state, node) {
-      const start = node.attrs.order || 1;
+      const start = node.attrs.order ?? 1;
       state.renderList(node, "   ", (i) => `${start + i}. `);
     },
     list_item(state, node) {

@@ -8,8 +8,13 @@ export type BlankLineUnit = Readonly<{
 export type FallbackEmpty = Readonly<{
   kind:'empty-document-baseline';sourceAnchor:number;emission:SyntheticEmission
 }>
+export type ListMarker = '-'|'+'|'*'|'.'|')'
+export type SourceListLexeme = Readonly<{
+  id:number;rootId:number;pmFrom:number;pmTo:number
+  sourceFrom:number;sourceTo:number;kind:'bullet'|'ordered';marker:ListMarker;tight:boolean
+}>
 export type SourceLayout = Readonly<{
-  blankLines:readonly BlankLineUnit[];fallback?:FallbackEmpty
+  blankLines:readonly BlankLineUnit[];fallback?:FallbackEmpty;lists?:readonly SourceListLexeme[]
 }>
 
 import {sliceTrace,type SourceTrace} from './source-trace'
@@ -62,12 +67,12 @@ export function collectBlankDrafts(source:string,trace:SourceTrace,starts:readon
  }
  result.forEach((u,i)=>{u.id=i});return result
 }
-export function finishSourceLayout(blankLines:readonly BlankDraft[],fallback?:FallbackEmpty):SourceLayout {
+export function finishSourceLayout(blankLines:readonly BlankDraft[],fallback?:FallbackEmpty,lists?:readonly SourceListLexeme[]):SourceLayout {
  const units:BlankLineUnit[]=blankLines.map(u=>{
   const base={id:u.id,sourceFrom:u.sourceFrom,sourceTo:u.sourceTo,container:u.container}
   if(u.role==='separator')return {...base,role:'separator'}
   if(!u.emission)throw new UnsupportedOwnership()
   return {...base,role:'empty-paragraph',emission:u.emission}
  })
- return fallback?{blankLines:units,fallback}:{blankLines:units}
+ return {blankLines:units,...(fallback?{fallback}:{}),...(lists?{lists}:{})}
 }
