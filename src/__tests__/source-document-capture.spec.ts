@@ -8,7 +8,7 @@ import { parseMarkdown, parseDocumentWithSourceCapture, parseParagraphWithSource
 function captured(source: string) {
   const r = parseDocumentWithSourceCapture(source)
   if (!r.ok) throw new Error(r.reason)
-  expect(r.value.doc.eq(parseMarkdown(source))).toBe(true)
+  expect(r.value.doc.eq(parseMarkdown(source.startsWith('\uFEFF') ? source.slice(1) : source))).toBe(true)
   for (const s of r.value.textRuns) {
     expect(s.pmTo).toBeGreaterThan(s.pmFrom)
     expect(s.sourceFrom).toBeGreaterThanOrEqual(0)

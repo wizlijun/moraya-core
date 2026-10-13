@@ -1,6 +1,7 @@
 import type { Node as PmNode, Schema } from 'prosemirror-model'
 import type { Transaction } from 'prosemirror-state'
 import { parseDocumentWithSourceCapture } from './markdown'
+import type { SourceRoot, SourceGap } from './source-ownership'
 
 export type TextSourceSpan = Readonly<{
   sourceFrom: number; sourceTo: number
@@ -10,6 +11,7 @@ export type TextSourceSpan = Readonly<{
 export type SourceSession = Readonly<{
   revision: number; source: string; doc: PmNode
   textSpans: readonly TextSourceSpan[]
+  roots: readonly SourceRoot[]; gaps: readonly SourceGap[]
 }>
 export type FidelityFailure = Readonly<{
   ok: false
@@ -22,7 +24,8 @@ export type FidelityResult = { ok: true; session: SourceSession } | FidelityFail
 export function createSourceSession(source: string, schema?: Schema): FidelityResult {
   const parsed = parseDocumentWithSourceCapture(source, schema)
   if (!parsed.ok) return parsed
-  return { ok: true, session: { revision: 0, source, doc: parsed.value.doc, textSpans: parsed.value.textRuns } }
+  return { ok: true, session: { revision: 0, source, doc: parsed.value.doc, textSpans: parsed.value.textRuns,
+    roots: parsed.value.roots, gaps: parsed.value.gaps } }
 }
 
 function splitsSurrogate(text: string, offset: number): boolean {

@@ -10,7 +10,7 @@ export function identityTrace(text: string): SourceTrace {
 }
 
 // Pieces are ordered and non-overlapping; find only the first possible overlap.
-function firstPiece(t: SourceTrace, from: number): number {
+export function firstPiece(t: SourceTrace, from: number): number {
   let lo = 0, hi = t.pieces.length
   while (lo < hi) {
     const mid = (lo + hi) >>> 1

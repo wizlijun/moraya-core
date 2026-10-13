@@ -2565,6 +2565,56 @@ function editTrace(t, edits) {
   return { text: chunks.join(""), pieces };
 }
 
+// src/source-ownership.ts
+var UnsupportedOwnership = class extends Error {
+};
+function rawRange(trace, from, to) {
+  const view = sliceTrace(trace, from, to);
+  for (const offset of [from, to]) {
+    const piece = trace.pieces[firstPiece(trace, offset)];
+    if (piece?.kind === "atomic" && offset > piece.from && offset < piece.to) {
+      throw new UnsupportedOwnership();
+    }
+  }
+  const real = view.pieces.filter((p) => p.kind !== "generated");
+  if (!real.length) return void 0;
+  if (real.some((p, i) => i > 0 && real[i - 1].sourceTo !== p.sourceFrom)) throw new UnsupportedOwnership();
+  return { from: real[0].sourceFrom, to: real[real.length - 1].sourceTo };
+}
+function lineStarts(text2) {
+  const result = [0];
+  for (let i = 0; i < text2.length; i++) if (text2[i] === "\n") result.push(i + 1);
+  if (result[result.length - 1] !== text2.length) result.push(text2.length);
+  return result;
+}
+function rendererTailStart(text2, from, to, tokenType) {
+  if (to <= from || text2[to - 1] !== "\n") return to;
+  if (["fence", "code_block", "front_matter", "html_block", "math_block", "math_block_eqno"].includes(tokenType)) return to - 1;
+  const flow = /* @__PURE__ */ new Set([
+    "paragraph_open",
+    "heading_open",
+    "bullet_list_open",
+    "ordered_list_open",
+    "blockquote_open",
+    "table_open",
+    "footnote_reference_open",
+    "dl_open",
+    "hr"
+  ]);
+  if (!flow.has(tokenType)) throw new UnsupportedOwnership();
+  let end = to;
+  while (end > from) {
+    const start = Math.max(from, text2.lastIndexOf("\n", end - 2) + 1);
+    const content = text2.slice(start, end - 1);
+    if (/^[ \t]*$/.test(content)) {
+      end = start;
+      continue;
+    }
+    return end - 1;
+  }
+  return from;
+}
+
 // src/markdown.ts
 var md = new MarkdownIt({
   html: true,
@@ -2745,7 +2795,7 @@ function fixFootnoteDefMaps(tokens) {
     prevDefEnd = end;
   }
 }
-function preserveBlankLines(tokens) {
+function preserveBlankLines(tokens, capture = false) {
   function mkToken(type, tag, nesting, extra) {
     return {
       type,
@@ -2775,8 +2825,10 @@ function preserveBlankLines(tokens) {
       if (gap > 1 && lastTopBlockEndLine > 0) {
         const extra = gap - 1;
         for (let j = 0; j < extra; j++) {
+          const open = mkToken("paragraph_open", "p", 1);
+          if (capture) syntheticTokens.add(open);
           result.push(
-            mkToken("paragraph_open", "p", 1),
+            open,
             mkToken("inline", "", 0, { level: 1, block: false, children: [] }),
             mkToken("paragraph_close", "p", -1)
           );
@@ -3099,12 +3151,140 @@ function captureText(state, token, delegate) {
   delegate();
   if (captureCursor(state) !== pos) throw new UnsupportedSourceCapture();
 }
+var syntheticTokens = /* @__PURE__ */ new WeakSet();
+var rootStarts = /* @__PURE__ */ new WeakMap();
+var rootEnds = /* @__PURE__ */ new WeakMap();
+function prepareRootEvents(tokens, collector) {
+  const starts = lineStarts(collector.trace.text);
+  let natural = 0;
+  const renderable = /* @__PURE__ */ new Set([
+    "paragraph_open",
+    "heading_open",
+    "bullet_list_open",
+    "ordered_list_open",
+    "blockquote_open",
+    "table_open",
+    "footnote_reference_open",
+    "dl_open",
+    "hr",
+    "fence",
+    "code_block",
+    "front_matter",
+    "html_block",
+    "math_block",
+    "math_block_eqno"
+  ]);
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    const synthetic = syntheticTokens.has(token);
+    if (token.level !== 0 || token.nesting === -1 || !token.map && !synthetic) continue;
+    let last = i;
+    if (token.nesting === 1) {
+      last = i + 1;
+      while (last < tokens.length && !(tokens[last].level === 0 && tokens[last].nesting === -1)) last++;
+      if (last === tokens.length) throw new UnsupportedSourceCapture();
+    } else if (token.nesting !== 0) throw new UnsupportedSourceCapture();
+    let sourceFrom = 0, sourceTo = 0, tailFrom = 0;
+    if (!synthetic) {
+      const from = starts[token.map[0]], to = starts[token.map[1]];
+      if (from === void 0 || to === void 0 || to <= from) throw new UnsupportedSourceCapture();
+      const raw = rawRange(collector.trace, from, to);
+      if (!raw) throw new UnsupportedSourceCapture();
+      sourceFrom = raw.from;
+      sourceTo = raw.to;
+      tailFrom = sourceTo;
+      if (renderable.has(token.type)) {
+        const tail = rawRange(collector.trace, rendererTailStart(collector.trace.text, from, to, token.type), to);
+        if (tail) {
+          if (tail.to !== sourceTo) throw new UnsupportedSourceCapture();
+          tailFrom = tail.from;
+        }
+      }
+    }
+    const draft = {
+      collector,
+      kind: synthetic ? "synthetic" : "natural",
+      gapIndex: natural,
+      id: natural,
+      tokenType: token.type,
+      sourceFrom,
+      sourceTo,
+      tailFrom
+    };
+    if (!synthetic) natural++;
+    rootStarts.set(token, draft);
+    rootEnds.set(tokens[last], draft);
+    i = last;
+  }
+}
+function rootCursor(state) {
+  if (!Array.isArray(state.stack) || state.stack.length !== 1 || !Array.isArray(state.stack[0].content)) {
+    throw new UnsupportedSourceCapture();
+  }
+  return { count: state.stack[0].content.length, pos: captureCursor(state) };
+}
+function captureRootEmission(state, token, delegate) {
+  const start = rootStarts.get(token), end = rootEnds.get(token);
+  if (start) {
+    const cursor = rootCursor(state);
+    start.childFrom = cursor.count;
+    start.pmFrom = cursor.pos;
+  }
+  delegate();
+  if (end) {
+    const cursor = rootCursor(state);
+    if (end.childFrom === void 0 || end.pmFrom === void 0 || cursor.count <= end.childFrom) {
+      throw new UnsupportedSourceCapture();
+    }
+    const emission = { childFrom: end.childFrom, childTo: cursor.count, pmFrom: end.pmFrom, pmTo: cursor.pos };
+    if (end.kind === "synthetic") end.collector.synthetic.push({ gapIndex: end.gapIndex, emission });
+    else end.collector.roots.push({
+      id: end.id,
+      tokenType: end.tokenType,
+      sourceFrom: end.sourceFrom,
+      sourceTo: end.sourceTo,
+      tailFrom: end.tailFrom,
+      ...emission
+    });
+  }
+}
+function buildSourceGaps(source, roots, synthetic) {
+  const grouped = Array.from({ length: roots.length + 1 }, () => []);
+  for (const entry of synthetic) {
+    if (!Number.isInteger(entry.gapIndex) || entry.gapIndex < 0 || entry.gapIndex > roots.length) {
+      throw new UnsupportedSourceCapture();
+    }
+    grouped[entry.gapIndex].push(entry.emission);
+  }
+  const result = [];
+  let at = 0, lastChild = 0;
+  for (let i = 0; i <= roots.length; i++) {
+    const root = roots[i], to = root?.sourceFrom ?? source.length;
+    if (to < at) throw new UnsupportedSourceCapture();
+    result.push({
+      sourceFrom: at,
+      sourceTo: to,
+      kind: /^[\s\uFEFF]*$/u.test(source.slice(at, to)) ? "trivia" : "opaque",
+      synthetic: grouped[i]
+    });
+    if (root) {
+      if (root.id !== i || root.sourceTo <= to || root.sourceTo > source.length || root.childFrom < lastChild) {
+        throw new UnsupportedSourceCapture();
+      }
+      at = root.sourceTo;
+      lastChild = root.childTo;
+    }
+  }
+  return result;
+}
 var _origMdParse = md.parse.bind(md);
 md.parse = function(src, env) {
   let tokens = _origMdParse(src, env);
   tagPairedHtmlInline(tokens);
   fixFootnoteDefMaps(tokens);
-  tokens = preserveBlankLines(tokens);
+  const collector = env?.[captureKey];
+  tokens = preserveBlankLines(tokens, !!collector);
+  if (collector) prepareRootEvents(tokens, collector);
   return tokens;
 };
 var parserTokens = {
@@ -3440,6 +3620,10 @@ var MorayaMarkdownParser = class extends MarkdownParser {
         defaultHtmlBlock(state, tok, tokens, i);
       }
     };
+    for (const key of Object.keys(h)) {
+      const delegate = h[key];
+      h[key] = (state, tok, tokens, i) => captureRootEmission(state, tok, () => delegate(state, tok, tokens, i));
+    }
   }
 };
 var defaultParser = new MorayaMarkdownParser(defaultSchema);
@@ -3860,16 +4044,18 @@ var UnsupportedSourceCapture = class extends Error {
 function parseDocumentWithSourceCapture(source, schema2) {
   if (!captureAvailable) return { ok: false, reason: "unsupported-source" };
   try {
+    let trace = identityTrace(source);
+    if (source.charCodeAt(0) === 65279) trace = editTrace(trace, [{ from: 0, to: 1, text: "" }]);
     const mathEdits = [];
-    const math = normalizeMathBlocks(source, mathEdits);
-    let trace = editTrace(identityTrace(source), mathEdits);
+    const math = normalizeMathBlocks(trace.text, mathEdits);
+    trace = editTrace(trace, mathEdits);
     if (trace.text !== math) throw new UnsupportedSourceCapture();
     const work = normalizeSmartQuotes(math, (before, after, edits) => {
       if (trace.text !== before) throw new UnsupportedSourceCapture();
       trace = editTrace(trace, edits);
       if (trace.text !== after) throw new UnsupportedSourceCapture();
     });
-    const collector = { trace, runs: [] };
+    const collector = { trace, runs: [], roots: [], synthetic: [] };
     const doc2 = getParserFor(schema2).parse(work, { [captureKey]: collector });
     const text2 = [];
     doc2.forEach((paragraph2, offset) => {
@@ -3899,9 +4085,14 @@ function parseDocumentWithSourceCapture(source, schema2) {
       pmEnd = run.pmTo;
       sourceEnd = run.sourceTo;
     }
-    return { ok: true, value: { doc: doc2, textRuns: collector.runs } };
+    return { ok: true, value: {
+      doc: doc2,
+      textRuns: collector.runs,
+      roots: collector.roots,
+      gaps: buildSourceGaps(source, collector.roots, collector.synthetic)
+    } };
   } catch (error) {
-    return { ok: false, reason: error instanceof UnsupportedSourceCapture ? "unsupported-source" : "parse-error" };
+    return { ok: false, reason: error instanceof UnsupportedSourceCapture || error instanceof UnsupportedOwnership ? "unsupported-source" : "parse-error" };
   }
 }
 
@@ -6085,7 +6276,14 @@ async function createEditor(opts) {
 function createSourceSession(source, schema2) {
   const parsed = parseDocumentWithSourceCapture(source, schema2);
   if (!parsed.ok) return parsed;
-  return { ok: true, session: { revision: 0, source, doc: parsed.value.doc, textSpans: parsed.value.textRuns } };
+  return { ok: true, session: {
+    revision: 0,
+    source,
+    doc: parsed.value.doc,
+    textSpans: parsed.value.textRuns,
+    roots: parsed.value.roots,
+    gaps: parsed.value.gaps
+  } };
 }
 function splitsSurrogate(text2, offset) {
   return offset > 0 && offset < text2.length && /[\uD800-\uDBFF]/.test(text2[offset - 1]) && /[\uDC00-\uDFFF]/.test(text2[offset]);

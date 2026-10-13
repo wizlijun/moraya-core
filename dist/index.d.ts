@@ -1,5 +1,6 @@
 export { createSchema, getDocumentBaseDir, setDocumentBaseDir } from './schema.js';
-export { parseMarkdown, parseMarkdownAsync, serializeMarkdown } from './markdown.js';
+import { S as SourceRoot, a as SourceGap } from './markdown-Bnn17Tqp.js';
+export { p as parseMarkdown, b as parseMarkdownAsync, s as serializeMarkdown } from './markdown-Bnn17Tqp.js';
 export { CreateEditorOptions, EditorPluginOptions, MorayaEditorInstance, createEditor, createEditorPlugins, preloadEnhancementPlugins } from './setup.js';
 export { insertHorizontalRule, insertImage, insertMathBlock, insertTable, setHeading, toggleBlockquote, toggleBold, toggleBulletList, toggleCode, toggleCodeBlock, toggleHighlight, toggleItalic, toggleLink, toggleOrderedList, toggleStrikethrough } from './commands.js';
 export { DocCache, createDocCache, djb2Hash } from './doc-cache.js';
@@ -22,6 +23,8 @@ type SourceSession = Readonly<{
     source: string;
     doc: Node;
     textSpans: readonly TextSourceSpan[];
+    roots: readonly SourceRoot[];
+    gaps: readonly SourceGap[];
 }>;
 type FidelityFailure = Readonly<{
     ok: false;
