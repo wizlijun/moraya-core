@@ -409,6 +409,146 @@ md.block.ruler.before(
   { alt: [] },
 )
 
+// Experimental provenance for one ordinary paragraph. These wrappers delegate to
+// the installed rules; an env-local collector keeps ordinary parses unchanged.
+export type CapturedTextRun = {
+  sourceFrom: number; sourceTo: number; pmFrom: number; pmTo: number
+  kind: 'linear' | 'atomic'
+}
+export type CapturedParagraph = { doc: PmNode; textRuns: CapturedTextRun[] }
+type SourceRun = { from: number; to: number; text: string; kind: 'linear' | 'atomic' }
+type Capture = { source: string; offset: number; runs: CapturedTextRun[]; invalid: boolean }
+const captureKey = Symbol('paragraph source capture')
+const tokenSources = new WeakMap<object, { collector: Capture; runs: SourceRun[] }>()
+const pendingSources = new WeakMap<object, SourceRun[]>()
+let captureAvailable = true
+
+// markdown-it rule storage and ParseState are private APIs. Keep shape-sensitive
+// access here and fail closed for capture if the installed contract changes.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function wrapCaptureRule(ruler: any, name: string, wrapper: (original: any, ...args: any[]) => any) {
+  const original = ruler.__rules__?.find((rule: { name: string }) => rule.name === name)?.fn
+  if (typeof original !== 'function') { captureAvailable = false; return }
+  ruler.at(name, (...args: unknown[]) => wrapper(original, ...args))
+}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const collectorFor = (state: any): Capture | undefined => state.env?.[captureKey]
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const inlineEngine = md.inline as any
+const OriginalInlineState = inlineEngine.State
+inlineEngine.State = function (...args: unknown[]) {
+  const state = new OriginalInlineState(...args)
+  const collector = collectorFor(state)
+  if (collector) {
+    pendingSources.set(state, [])
+    const pushPending = state.pushPending.bind(state)
+    state.pushPending = () => {
+      const token = pushPending()
+      tokenSources.set(token, { collector, runs: pendingSources.get(state)! })
+      pendingSources.set(state, [])
+      return token
+    }
+  }
+  return state
+}
+wrapCaptureRule(md.core.ruler, 'normalize', (original, state) => {
+  const result = original(state)
+  const collector = collectorFor(state)
+  if (collector && state.src !== collector.source) collector.invalid = true
+  return result
+})
+wrapCaptureRule(md.inline.ruler, 'text', (original, state, silent) => {
+  const from = state.pos
+  const ok = original(state, silent)
+  if (ok && !silent && collectorFor(state)) {
+    pendingSources.get(state)!.push({ from, to: state.pos, text: state.src.slice(from, state.pos), kind: 'linear' })
+  }
+  return ok
+})
+for (const name of ['entity', 'escape']) {
+  wrapCaptureRule(md.inline.ruler, name, (original, state, silent) => {
+    const from = state.pos
+    const ok = original(state, silent)
+    const collector = collectorFor(state)
+    if (ok && !silent && collector) {
+      const token = state.tokens[state.tokens.length - 1]
+      if (token.type === 'text_special') tokenSources.set(token, { collector,
+        runs: [{ from, to: state.pos, text: token.content, kind: 'atomic' }] })
+    }
+    return ok
+  })
+}
+wrapCaptureRule(md.inline.ruler, 'emphasis', (original, state, silent) => {
+  const from = state.pos
+  const ok = original(state, silent)
+  const collector = collectorFor(state)
+  if (ok && !silent && collector) {
+    const count = state.pos - from
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    state.tokens.slice(-count).forEach((token: any, i: number) => tokenSources.set(token, { collector,
+      runs: [{ from: from + i, to: from + i + 1, text: token.content, kind: 'linear' }] }))
+  }
+  return ok
+})
+wrapCaptureRule(md.inline.ruler, 'link', (original, state, silent) => {
+  const collector = collectorFor(state)
+  const labelEnd = collector && !silent && state.src[state.pos] === '['
+    ? state.md.helpers.parseLinkLabel(state, state.pos, true) : -1
+  const ok = original(state, silent)
+  if (ok && !silent && collector && (labelEnd < 0 || state.src[labelEnd + 1] !== '(')) collector.invalid = true
+  return ok
+})
+md.inline.ruler.push('source_capture_fallback', (state, silent) => {
+  if (silent || !collectorFor(state)) return false
+  const from = state.pos++
+  const text = state.src.slice(from, state.pos)
+  state.pending += text
+  pendingSources.get(state)!.push({ from, to: state.pos, text, kind: 'linear' })
+  return true
+})
+// Both installed join rules collapse adjacent text into the last surviving token.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function captureJoin(tokens: any[], collector: Capture, special: boolean) {
+  let runs: SourceRun[] = []
+  for (const token of tokens) {
+    if (token.type !== 'text' && !(special && token.type === 'text_special')) { runs = []; continue }
+    runs = runs.concat(token.content ? tokenSources.get(token)?.runs ?? [] : [])
+    tokenSources.set(token, { collector, runs })
+  }
+}
+wrapCaptureRule(md.inline.ruler2, 'fragments_join', (original, state) => {
+  const collector = collectorFor(state)
+  if (collector) captureJoin(state.tokens, collector, false)
+  return original(state)
+})
+wrapCaptureRule(md.core.ruler, 'text_join', (original, state) => {
+  const collector = collectorFor(state)
+  if (collector) for (const token of state.tokens) {
+    if (token.type === 'inline') captureJoin(token.children, collector, true)
+  }
+  return original(state)
+})
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function captureText(state: any, token: any, delegate: () => void) {
+  const provenance = tokenSources.get(token)
+  if (!provenance) { delegate(); return }
+  const { collector, runs } = provenance
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cursor = () => state.stack.reduce((n: number, frame: any) =>
+    n + frame.content.reduce((sum: number, node: PmNode) => sum + node.nodeSize, 0), state.stack.length - 1)
+  if (runs.map(run => run.text).join('') !== token.content) collector.invalid = true
+  let pos = cursor()
+  for (const run of runs) {
+    if (!run.text) continue
+    collector.runs.push({ sourceFrom: collector.offset + run.from, sourceTo: collector.offset + run.to,
+      pmFrom: pos, pmTo: pos + run.text.length, kind: run.kind })
+    pos += run.text.length
+  }
+  delegate()
+  if (cursor() !== pos) collector.invalid = true
+}
+
 // Patch md.parse to inject paired-tag pre-processing and blank-line preservation
 // before prosemirror-markdown processes the tokens.
 const _origMdParse = md.parse.bind(md)
@@ -417,6 +557,18 @@ md.parse = function (src: string, env: unknown) {
   tagPairedHtmlInline(tokens)
   fixFootnoteDefMaps(tokens)
   tokens = preserveBlankLines(tokens)
+  const collector = (env as { [captureKey]?: Capture } | undefined)?.[captureKey]
+  if (collector) {
+    const inline = tokens[1]
+    const allowed = new Set(['text', 'em_open', 'em_close', 'strong_open', 'strong_close', 'link_open', 'link_close'])
+    if (tokens.length !== 3 || tokens[0]?.type !== 'paragraph_open' || inline?.type !== 'inline'
+      || tokens[2]?.type !== 'paragraph_close' || inline.content.includes('\n')
+      || collector.source.trim() !== inline.content
+      || inline.children?.some(token => !allowed.has(token.type) || token.markup === 'autolink')) {
+      throw new UnsupportedSourceCapture()
+    }
+    collector.offset = collector.source.length - collector.source.trimStart().length
+  }
   return tokens as unknown as ReturnType<typeof _origMdParse>
 }
 
@@ -763,7 +915,7 @@ class MorayaMarkdownParser extends MarkdownParser {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     h['text'] = (state: any, tok: any, toks: any[], ii: number) => {
       if (tok.meta?.mediaSkip) return
-      defaultTextHandler!(state, tok, toks, ii)
+      captureText(state, tok, () => defaultTextHandler!(state, tok, toks, ii))
     }
 
     h['html_inline'] = (state, tok, tokens, i) => {
@@ -1393,4 +1545,34 @@ export function serializeMarkdown(doc: PmNode): string {
   // Strip zero-width spaces used as cursor targets after inline code marks.
   result = result.replace(/​/g, '')
   return result
+}
+
+class UnsupportedSourceCapture extends Error {}
+
+/** Internal experimental hook. Never uses parseMarkdown's empty-doc fallback. */
+export function parseParagraphWithSourceCapture(source: string, schema?: Schema):
+  { ok: true; value: CapturedParagraph } | { ok: false; reason: 'unsupported-source' | 'parse-error' } {
+  const work = normalizeSmartQuotes(normalizeMathBlocks(source))
+  if (!captureAvailable || work !== source || /\{(?:>>|==|\+\+|--|~~)/.test(source)) {
+    return { ok: false, reason: 'unsupported-source' }
+  }
+  const collector: Capture = { source, offset: 0, runs: [], invalid: false }
+  try {
+    const doc = getParserFor(schema).parse(work, { [captureKey]: collector })
+    let pos = 1
+    for (const run of collector.runs) {
+      if (run.pmFrom !== pos || run.pmTo <= pos || run.sourceFrom < collector.offset
+        || run.sourceTo > source.length) collector.invalid = true
+      pos = run.pmTo
+    }
+    if (doc.childCount !== 1 || doc.firstChild?.type.name !== 'paragraph'
+      || pos !== doc.content.size - 1 || collector.invalid) return { ok: false, reason: 'unsupported-source' }
+    let supported = true
+    doc.firstChild.forEach(node => {
+      if (!node.isText || node.marks.some(mark => !['em', 'strong', 'link'].includes(mark.type.name))) supported = false
+    })
+    return supported ? { ok: true, value: { doc, textRuns: collector.runs } } : { ok: false, reason: 'unsupported-source' }
+  } catch (error) {
+    return { ok: false, reason: error instanceof UnsupportedSourceCapture ? 'unsupported-source' : 'parse-error' }
+  }
 }

@@ -72,3 +72,7 @@ export type {
 
 // NOTE: defaultSchema is intentionally NOT exported. Per §6.1.1, consumers must
 // always go through createSchema(config) to ensure proper DI of MediaResolver.
+
+// Experimental source-preserving paragraph editing (explicit opt-in consumers).
+export { createSourceSession, applySourceTextTransaction } from './source-fidelity'
+export type { TextSourceSpan, SourceSession, FidelityFailure, FidelityResult } from './source-fidelity'

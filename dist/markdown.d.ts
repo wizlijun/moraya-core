@@ -22,6 +22,17 @@ import { Schema, Node } from 'prosemirror-model';
  * round-trips through any consumer schema without rebuilding.
  */
 
+type CapturedTextRun = {
+    sourceFrom: number;
+    sourceTo: number;
+    pmFrom: number;
+    pmTo: number;
+    kind: 'linear' | 'atomic';
+};
+type CapturedParagraph = {
+    doc: Node;
+    textRuns: CapturedTextRun[];
+};
 /**
  * Parse a markdown string into a ProseMirror document node. Never throws (§4.5).
  *
@@ -42,5 +53,13 @@ declare function parseMarkdownAsync(markdown: string, schemaArg?: Schema): Promi
  * Serialize a ProseMirror document node to a markdown string. Never throws (§4.5).
  */
 declare function serializeMarkdown(doc: Node): string;
+/** Internal experimental hook. Never uses parseMarkdown's empty-doc fallback. */
+declare function parseParagraphWithSourceCapture(source: string, schema?: Schema): {
+    ok: true;
+    value: CapturedParagraph;
+} | {
+    ok: false;
+    reason: 'unsupported-source' | 'parse-error';
+};
 
-export { parseMarkdown, parseMarkdownAsync, serializeMarkdown };
+export { type CapturedParagraph, type CapturedTextRun, parseMarkdown, parseMarkdownAsync, parseParagraphWithSourceCapture, serializeMarkdown };

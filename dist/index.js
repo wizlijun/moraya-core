@@ -2702,12 +2702,155 @@ md.block.ruler.before(
   },
   { alt: [] }
 );
+var captureKey = /* @__PURE__ */ Symbol("paragraph source capture");
+var tokenSources = /* @__PURE__ */ new WeakMap();
+var pendingSources = /* @__PURE__ */ new WeakMap();
+var captureAvailable = true;
+function wrapCaptureRule(ruler, name, wrapper) {
+  const original = ruler.__rules__?.find((rule) => rule.name === name)?.fn;
+  if (typeof original !== "function") {
+    captureAvailable = false;
+    return;
+  }
+  ruler.at(name, (...args) => wrapper(original, ...args));
+}
+var collectorFor = (state) => state.env?.[captureKey];
+var inlineEngine = md.inline;
+var OriginalInlineState = inlineEngine.State;
+inlineEngine.State = function(...args) {
+  const state = new OriginalInlineState(...args);
+  const collector = collectorFor(state);
+  if (collector) {
+    pendingSources.set(state, []);
+    const pushPending = state.pushPending.bind(state);
+    state.pushPending = () => {
+      const token = pushPending();
+      tokenSources.set(token, { collector, runs: pendingSources.get(state) });
+      pendingSources.set(state, []);
+      return token;
+    };
+  }
+  return state;
+};
+wrapCaptureRule(md.core.ruler, "normalize", (original, state) => {
+  const result = original(state);
+  const collector = collectorFor(state);
+  if (collector && state.src !== collector.source) collector.invalid = true;
+  return result;
+});
+wrapCaptureRule(md.inline.ruler, "text", (original, state, silent) => {
+  const from = state.pos;
+  const ok = original(state, silent);
+  if (ok && !silent && collectorFor(state)) {
+    pendingSources.get(state).push({ from, to: state.pos, text: state.src.slice(from, state.pos), kind: "linear" });
+  }
+  return ok;
+});
+for (const name of ["entity", "escape"]) {
+  wrapCaptureRule(md.inline.ruler, name, (original, state, silent) => {
+    const from = state.pos;
+    const ok = original(state, silent);
+    const collector = collectorFor(state);
+    if (ok && !silent && collector) {
+      const token = state.tokens[state.tokens.length - 1];
+      if (token.type === "text_special") tokenSources.set(token, {
+        collector,
+        runs: [{ from, to: state.pos, text: token.content, kind: "atomic" }]
+      });
+    }
+    return ok;
+  });
+}
+wrapCaptureRule(md.inline.ruler, "emphasis", (original, state, silent) => {
+  const from = state.pos;
+  const ok = original(state, silent);
+  const collector = collectorFor(state);
+  if (ok && !silent && collector) {
+    const count = state.pos - from;
+    state.tokens.slice(-count).forEach((token, i) => tokenSources.set(token, {
+      collector,
+      runs: [{ from: from + i, to: from + i + 1, text: token.content, kind: "linear" }]
+    }));
+  }
+  return ok;
+});
+wrapCaptureRule(md.inline.ruler, "link", (original, state, silent) => {
+  const collector = collectorFor(state);
+  const labelEnd = collector && !silent && state.src[state.pos] === "[" ? state.md.helpers.parseLinkLabel(state, state.pos, true) : -1;
+  const ok = original(state, silent);
+  if (ok && !silent && collector && (labelEnd < 0 || state.src[labelEnd + 1] !== "(")) collector.invalid = true;
+  return ok;
+});
+md.inline.ruler.push("source_capture_fallback", (state, silent) => {
+  if (silent || !collectorFor(state)) return false;
+  const from = state.pos++;
+  const text2 = state.src.slice(from, state.pos);
+  state.pending += text2;
+  pendingSources.get(state).push({ from, to: state.pos, text: text2, kind: "linear" });
+  return true;
+});
+function captureJoin(tokens, collector, special) {
+  let runs = [];
+  for (const token of tokens) {
+    if (token.type !== "text" && !(special && token.type === "text_special")) {
+      runs = [];
+      continue;
+    }
+    runs = runs.concat(token.content ? tokenSources.get(token)?.runs ?? [] : []);
+    tokenSources.set(token, { collector, runs });
+  }
+}
+wrapCaptureRule(md.inline.ruler2, "fragments_join", (original, state) => {
+  const collector = collectorFor(state);
+  if (collector) captureJoin(state.tokens, collector, false);
+  return original(state);
+});
+wrapCaptureRule(md.core.ruler, "text_join", (original, state) => {
+  const collector = collectorFor(state);
+  if (collector) for (const token of state.tokens) {
+    if (token.type === "inline") captureJoin(token.children, collector, true);
+  }
+  return original(state);
+});
+function captureText(state, token, delegate) {
+  const provenance = tokenSources.get(token);
+  if (!provenance) {
+    delegate();
+    return;
+  }
+  const { collector, runs } = provenance;
+  const cursor = () => state.stack.reduce((n, frame) => n + frame.content.reduce((sum, node) => sum + node.nodeSize, 0), state.stack.length - 1);
+  if (runs.map((run) => run.text).join("") !== token.content) collector.invalid = true;
+  let pos = cursor();
+  for (const run of runs) {
+    if (!run.text) continue;
+    collector.runs.push({
+      sourceFrom: collector.offset + run.from,
+      sourceTo: collector.offset + run.to,
+      pmFrom: pos,
+      pmTo: pos + run.text.length,
+      kind: run.kind
+    });
+    pos += run.text.length;
+  }
+  delegate();
+  if (cursor() !== pos) collector.invalid = true;
+}
 var _origMdParse = md.parse.bind(md);
 md.parse = function(src, env) {
   let tokens = _origMdParse(src, env);
   tagPairedHtmlInline(tokens);
   fixFootnoteDefMaps(tokens);
   tokens = preserveBlankLines(tokens);
+  const collector = env?.[captureKey];
+  if (collector) {
+    const inline = tokens[1];
+    const allowed = /* @__PURE__ */ new Set(["text", "em_open", "em_close", "strong_open", "strong_close", "link_open", "link_close"]);
+    if (tokens.length !== 3 || tokens[0]?.type !== "paragraph_open" || inline?.type !== "inline" || tokens[2]?.type !== "paragraph_close" || inline.content.includes("\n") || collector.source.trim() !== inline.content || inline.children?.some((token) => !allowed.has(token.type) || token.markup === "autolink")) {
+      throw new UnsupportedSourceCapture();
+    }
+    collector.offset = collector.source.length - collector.source.trimStart().length;
+  }
   return tokens;
 };
 var parserTokens = {
@@ -2974,7 +3117,7 @@ var MorayaMarkdownParser = class extends MarkdownParser {
     const defaultTextHandler = h["text"];
     h["text"] = (state, tok, toks, ii) => {
       if (tok.meta?.mediaSkip) return;
-      defaultTextHandler(state, tok, toks, ii);
+      captureText(state, tok, () => defaultTextHandler(state, tok, toks, ii));
     };
     h["html_inline"] = (state, tok, tokens, i) => {
       if (tok.meta?.mediaSkip) return;
@@ -3440,6 +3583,31 @@ function serializeMarkdown(doc2) {
   result = relaxEscapes(result, doc2);
   result = result.replace(/​/g, "");
   return result;
+}
+var UnsupportedSourceCapture = class extends Error {
+};
+function parseParagraphWithSourceCapture(source, schema2) {
+  const work = normalizeSmartQuotes(normalizeMathBlocks(source));
+  if (!captureAvailable || work !== source || /\{(?:>>|==|\+\+|--|~~)/.test(source)) {
+    return { ok: false, reason: "unsupported-source" };
+  }
+  const collector = { source, offset: 0, runs: [], invalid: false };
+  try {
+    const doc2 = getParserFor(schema2).parse(work, { [captureKey]: collector });
+    let pos = 1;
+    for (const run of collector.runs) {
+      if (run.pmFrom !== pos || run.pmTo <= pos || run.sourceFrom < collector.offset || run.sourceTo > source.length) collector.invalid = true;
+      pos = run.pmTo;
+    }
+    if (doc2.childCount !== 1 || doc2.firstChild?.type.name !== "paragraph" || pos !== doc2.content.size - 1 || collector.invalid) return { ok: false, reason: "unsupported-source" };
+    let supported = true;
+    doc2.firstChild.forEach((node) => {
+      if (!node.isText || node.marks.some((mark) => !["em", "strong", "link"].includes(mark.type.name))) supported = false;
+    });
+    return supported ? { ok: true, value: { doc: doc2, textRuns: collector.runs } } : { ok: false, reason: "unsupported-source" };
+  } catch (error) {
+    return { ok: false, reason: error instanceof UnsupportedSourceCapture ? "unsupported-source" : "parse-error" };
+  }
 }
 
 // src/setup.ts
@@ -5617,11 +5785,58 @@ async function createEditor(opts) {
     }
   };
 }
+
+// src/source-fidelity.ts
+function createSourceSession(source, schema2) {
+  const parsed = parseParagraphWithSourceCapture(source, schema2);
+  if (!parsed.ok) return parsed;
+  return { ok: true, session: { revision: 0, source, doc: parsed.value.doc, textSpans: parsed.value.textRuns } };
+}
+function splitsSurrogate(text2, offset) {
+  return offset > 0 && offset < text2.length && /[\uD800-\uDBFF]/.test(text2[offset - 1]) && /[\uDC00-\uDFFF]/.test(text2[offset]);
+}
+function boundary(span, pos) {
+  if (pos === span.pmFrom) return span.sourceFrom;
+  if (pos === span.pmTo) return span.sourceTo;
+  if (span.kind === "linear") return span.sourceFrom + pos - span.pmFrom;
+  return void 0;
+}
+function applySourceTextTransaction(base, tr) {
+  if (!tr.before.eq(base.doc)) return { ok: false, reason: "stale-document" };
+  if (tr.steps.length !== 1) return { ok: false, reason: "unsupported-step" };
+  const step = tr.steps[0].toJSON();
+  if (step.stepType !== "replace" || step.structure) return { ok: false, reason: "unsupported-step" };
+  const { from, to } = step;
+  const paragraph2 = base.doc.firstChild;
+  if (from < 1 || to > paragraph2.nodeSize - 1 || to < from || tr.doc.childCount !== 1 || tr.doc.firstChild?.type.name !== "paragraph" || step.slice?.openStart || step.slice?.openEnd || step.slice?.content?.some((node) => node.type !== "text")) {
+    return { ok: false, reason: "unsupported-step" };
+  }
+  if (splitsSurrogate(paragraph2.textContent, from - 1) || splitsSurrogate(paragraph2.textContent, to - 1)) {
+    return { ok: false, reason: "unmapped-range" };
+  }
+  const spans = base.textSpans.filter((span) => from === to ? span.pmFrom <= from && span.pmTo >= to : span.pmTo > from && span.pmFrom < to);
+  if (!spans.length) return { ok: false, reason: "unmapped-range" };
+  if (from === to && spans.some((span) => boundary(span, from) !== boundary(spans[0], from))) {
+    return { ok: false, reason: "unmapped-range" };
+  }
+  const sourceFrom = boundary(spans[0], from);
+  const sourceTo = boundary(spans[spans.length - 1], to);
+  if (sourceFrom === void 0 || sourceTo === void 0 || spans.some((span, i) => i > 0 && spans[i - 1].sourceTo !== span.sourceFrom) || splitsSurrogate(base.source, sourceFrom) || splitsSurrogate(base.source, sourceTo)) {
+    return { ok: false, reason: "unmapped-range" };
+  }
+  const insert = (step.slice?.content ?? []).map((node) => node.text).join("");
+  const candidate = base.source.slice(0, sourceFrom) + insert + base.source.slice(sourceTo);
+  const result = createSourceSession(candidate, base.doc.type.schema);
+  if (!result.ok || !result.session.doc.eq(tr.doc)) return { ok: false, reason: "semantic-mismatch" };
+  return { ok: true, session: { ...result.session, revision: base.revision + 1 } };
+}
 export {
+  applySourceTextTransaction,
   createDocCache,
   createEditor,
   createEditorPlugins,
   createSchema,
+  createSourceSession,
   djb2Hash,
   getDocumentBaseDir,
   insertHorizontalRule,
