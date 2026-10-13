@@ -2928,6 +2928,26 @@ wrapCaptureRule(md.inline.ruler, "newline", (original, state, silent) => {
   if (!result || state.pending !== "" || expected && (state.tokens[start]?.type !== "text" || state.tokens[start].content !== expected)) throw new UnsupportedSourceCapture();
   return result;
 });
+wrapCaptureRule(md.inline.ruler, "backticks", (original, state, silent) => {
+  const owner = inlineStateOwners.get(state);
+  if (silent || !owner || state.src[state.pos] !== "`") return original(state, silent);
+  const from = state.pos, pending = state.pending, tokenCount = state.tokens.length;
+  if (!Number.isInteger(state.posMax) || state.posMax <= from || state.posMax > state.src.length) {
+    throw new UnsupportedSourceCapture();
+  }
+  let end = from + 1;
+  while (end < state.posMax && state.src[end] === "`") end++;
+  const marker = state.src.slice(from, end);
+  const result = original(state, silent);
+  if (!result) throw new UnsupportedSourceCapture();
+  if (state.pos === end) {
+    if (state.backticksScanned !== true || state.pending !== pending + marker || state.tokens.length !== tokenCount) {
+      throw new UnsupportedSourceCapture();
+    }
+    pendingSources.get(state).push({ text: marker, kind: "linear", trace: sliceTrace(owner, from, end) });
+  }
+  return result;
+});
 wrapCaptureRule(md.inline.ruler, "text", (original, state, silent) => {
   const from = state.pos;
   const ok = original(state, silent);

@@ -87,3 +87,20 @@ it('reports parser exceptions without an empty-document fallback', () => {
     expect(parseDocumentWithSourceCapture('甲', schema)).toEqual({ ok: false, reason: 'parse-error' })
   } finally { throwingText.mockRestore() }
 })
+
+it.each([
+  '甲 ` 目标乙', '甲 `` 目标乙', '甲 `\n目标乙',
+  '甲 ` 目标乙\n\n独立目标丙', '甲 ` 目标乙 `` 目标丙',
+])('captures declared unclosed backtick markers without losing neighboring text: %j', source => {
+  const r = captured(source)
+  // These fixtures have one paragraph or a single two-LF paragraph separator,
+  // so source and PM positions differ by the initial paragraph boundary only.
+  for (let raw = 0; raw < source.length; raw++) {
+    if (source[raw] === '\n') continue
+    const span = r.textRuns.find(s => s.sourceFrom <= raw && s.sourceTo > raw)
+    expect(span, `raw UTF-16 offset ${raw}`).toBeDefined()
+    expect(span!.kind).toBe('linear')
+    expect(span!.pmFrom + raw - span!.sourceFrom).toBe(raw + 1)
+    expect(r.doc.textBetween(raw + 1, raw + 2)).toBe(source[raw])
+  }
+})
