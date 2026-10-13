@@ -183,3 +183,11 @@ it('rejects text replacement inside list containers', () => {
     if (!result.ok) expect(['unsupported-step', 'unmapped-range']).toContain(result.reason)
   }
 })
+
+it('keeps successful public exact results limited to the established session contract', () => {
+  const base = session('甲乙')
+  const result = replace(base, 1, 2, '丙')
+  expect(result.ok).toBe(true)
+  expect(Object.keys(result).sort()).toEqual(['ok', 'session'])
+  expect(output(result).source).toBe('丙乙')
+})
