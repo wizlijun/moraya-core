@@ -2,6 +2,10 @@
 
 All notable changes to `@moraya/core` are documented here. SemVer.
 
+## Unreleased
+
+- Source-preserving transactions now map actual nested prose, headings, table cells and supported literal bodies, retaining untouched Markdown bytes and protected definitions. Complete LF container windows can reparse locally with bounded block work and replay remote reference changes. File UI, history, native/IME integration and dedicated literal delimiter changes remain future work.
+
 ## [0.1.0] — 2026-05-07
 
 Initial public release on npmjs.com. Faithful 1:1 extraction of Moraya desktop's `src/lib/editor/` markdown editor core into a host-agnostic, dependency-injected ESM package, per the iteration spec at [`v0.60.0-pre-shared-markdown-core.md`](https://github.com/zouwei/moraya/blob/main/docs/iterations/v0.60.0-pre-shared-markdown-core.md).

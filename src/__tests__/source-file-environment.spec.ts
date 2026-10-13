@@ -145,13 +145,18 @@ it.each([
   ['list continuation', 'Middle', '- A\n  continuation'],
   ['definition list', 'Middle', 'Term\n: definition'],
   ['math block', 'Middle', '$$\nx+y\n$$'],
-] as const)('explicit fallback keeps oracle equality: %s', (_name, removed, added) => {
+] as const)('window admission keeps oracle equality: %s', (name, removed, added) => {
   const base = open('Before\n\nMiddle\n\nAfter\n\nTail'), r = replace(base, removed, added)
   const source = base.source.replace(removed, () => added), oracle = createSourceSession(source)
   expect(r.ok).toBe(oracle.ok)
   if (!r.ok || !oracle.ok) return
-  expect(r.file.work.mode).toBe('full-fallback')
-  expect(r.file.work.fullCaptureCalls).toBeGreaterThan(0)
+  if (name === 'setext' || name === 'list continuation') {
+    expect(r.file.work.mode).toBe('local')
+    expect(r.file.work.fullCaptureCalls).toBe(0)
+  } else {
+    expect(r.file.work.mode).toBe('full-fallback')
+    expect(r.file.work.fullCaptureCalls).toBeGreaterThan(0)
+  }
   expect(r.session.doc.eq(oracle.session.doc)).toBe(true)
   for (const key of ['roots', 'gaps', 'protectedSources', 'layout', 'textSpans'] as const)
     expect(r.session[key]).toEqual(oracle.session[key])

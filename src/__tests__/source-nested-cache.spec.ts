@@ -102,3 +102,41 @@ it.each(actualBodies)('body facts survive three replay generations and a foreign
   expect(spy).not.toHaveBeenCalled()
  }finally{spy.mockRestore()}
 })
+
+import {prepareFileSourceEdits,type SourceSession} from '../source-fidelity'
+it('shifts cached nested facts, replays remote reference changes, and never caches a rejected candidate',()=>{
+ const tail='\n\nGap。\n\nGap2。\n\n| H |\n| --- |\n| 甲 |\n\n* 甲。\n\n> 甲 [label][r]。\n\n[r]: /old\n'
+ const raw='Start。'+tail
+ let session=open(raw)
+ const verify=(next:SourceSession,expected:string)=>{
+  expect(next.source).toBe(expected)
+  const actual=open(expected);expect(next.doc.eq(actual.doc)).toBe(true)
+  for(const key of ['textSpans','roots','gaps','protectedSources','layout'] as const)expect(next[key]).toEqual(actual[key])
+  session=next
+ }
+ const inserted=prepareFileSourceEdits(session,{expectedRevision:session.revision,edits:[{from:6,to:6,removed:'',text:'\nMore。'}]})
+ expect(inserted.ok).toBe(true);if(!inserted.ok)throw Error(inserted.reason)
+ expect(['local','expanded']).toContain(inserted.file.work.mode)
+ verify(inserted.session,'Start。\nMore。'+tail)
+ const edit=(path:readonly number[],expected:string)=>{
+  const p=at(session.doc,path),tr=EditorState.create({doc:session.doc}).tr.insertText('乙',p,p+1)
+  expect(session.doc.textBetween(p,p+1)).toBe('甲')
+  const result=applySourceBlockTransaction(session,tr);expect(result.ok).toBe(true);if(!result.ok)throw Error(result.reason)
+  expect(['local','expanded']).toContain(result.file!.work.mode);expect(result.session.doc.eq(tr.doc)).toBe(true)
+  verify(result.session,expected)
+ }
+ edit([3,1,0,0],'Start。\nMore。\n\nGap。\n\nGap2。\n\n| H |\n| --- |\n| 乙 |\n\n* 甲。\n\n> 甲 [label][r]。\n\n[r]: /old\n')
+ edit([4,0,0],'Start。\nMore。\n\nGap。\n\nGap2。\n\n| H |\n| --- |\n| 乙 |\n\n* 乙。\n\n> 甲 [label][r]。\n\n[r]: /old\n')
+ const from=session.source.length-5
+ expect(session.source.slice(from,from+4)).toBe('/old')
+ const updated=prepareFileSourceEdits(session,{expectedRevision:session.revision,edits:[{from,to:from+4,removed:'/old',text:'/new'}]})
+ expect(updated.ok).toBe(true);if(!updated.ok)throw Error(updated.reason)
+ expect(updated.file.work.environmentChanged).toBe(true)
+ verify(updated.session,'Start。\nMore。\n\nGap。\n\nGap2。\n\n| H |\n| --- |\n| 乙 |\n\n* 乙。\n\n> 甲 [label][r]。\n\n[r]: /new\n')
+ const p=at(session.doc,[5,0]),before=JSON.stringify(session)
+ const rejected=applySourceBlockTransaction(session,EditorState.create({doc:session.doc}).tr.insertText('>',p))
+ expect(rejected.ok).toBe(false);expect(JSON.stringify(session)).toBe(before)
+ edit([5,0],'Start。\nMore。\n\nGap。\n\nGap2。\n\n| H |\n| --- |\n| 乙 |\n\n* 乙。\n\n> 乙 [label][r]。\n\n[r]: /new\n')
+ let href='';session.doc.descendants(n=>{for(const m of n.marks)if(m.type.name==='link')href=m.attrs.href})
+ expect(href).toBe('/new')
+})

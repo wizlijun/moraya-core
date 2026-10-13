@@ -176,7 +176,7 @@ declare function applySourceTextTransaction(base: SourceSession, tr: Transaction
 type SourceBlockResult = {
     ok: true;
     session: SourceSession;
-    mode: 'unchanged' | 'exact-text' | 'root-render';
+    mode: 'unchanged' | 'exact-text' | 'fragment-render' | 'root-render';
     edits: readonly SourceEdit[];
     changedRoots: readonly number[];
     file?: SourceFileUpdate;
@@ -222,10 +222,21 @@ type CapturedDocument = CapturedParagraph & {
     protectedSources: readonly ProtectedSource[];
     layout: SourceLayout;
 };
+type InlineBody = Readonly<{
+    pmFrom: number;
+    pmTo: number;
+    sourceFrom: number;
+    sourceTo: number;
+    kind: 'paragraph' | 'heading' | 'table-cell';
+    singlePhysicalLine: boolean;
+}>;
 /** Internal actual-capture authority. Public readonly metadata grants no permission. */
 declare function capturedSourceLists(source: string, doc: Node, roots: readonly SourceRoot[], layout: SourceLayout): readonly SourceListLexeme[] | undefined;
+declare function capturedInlineBodies(source: string, doc: Node, roots: readonly SourceRoot[], layout: SourceLayout): readonly InlineBody[] | undefined;
 /** Internal source-render guard; a missing capture fact is not permission. */
 declare function sourceRootHasClosedFences(root: SourceRoot): boolean;
+/** Render only inline content with the same conservative callbacks as roots. */
+declare function serializeSourceInlineBody(node: Node): string;
 /** Internal source-root renderer; default serializeMarkdown stays unchanged. */
 type SourceListStyle = Readonly<{
     marker: '-' | '+' | '*' | '.' | ')';
@@ -317,8 +328,7 @@ type FileCaptureResult = {
 declare function preprocessFileSource(source: string): SourceTrace;
 declare function captureFilePipeline(source: string, schema?: Schema, work?: FileWorkAccumulator): FileCaptureResult;
 declare function replayFilePipeline(cache: FileTokenCache, schema?: Schema, work?: FileWorkAccumulator): FileCaptureResult;
-/** A conservative first admission: actual single-line paragraph/reference
- * checkpoints. All candidate rules still see the complete file and true EOF. */
+/** All candidate rules still see the complete file and true EOF. */
 declare function captureFileWindow(cache: FileTokenCache, source: string, patches: readonly Readonly<{
     from: number;
     to: number;
@@ -328,4 +338,4 @@ declare function captureFileWindow(cache: FileTokenCache, source: string, patche
     rightIndex: number;
 }>): FileCaptureResult | null;
 
-export { type FileWorkAccumulator as A, type BlankLineUnit as B, type CapturedDocument as C, type SourceListStyle as D, type SourceRootRenderOptions as E, type FallbackEmpty as F, captureFilePipeline as G, captureFileWindow as H, capturedSourceLists as I, parseDocumentWithSourceCapture as J, parseParagraphWithSourceCapture as K, type LayoutContainer as L, preprocessFileSource as M, replayFilePipeline as N, serializeSourceRootMarkdown as O, type ProtectedSource as P, sourceRootHasClosedFences as Q, type SourceBlockResult as S, type TextSourceSpan as T, type FidelityFailure as a, type FidelityResult as b, type FileParseWork as c, type FileRootCorrespondence as d, type FileSourceResult as e, type SourceEdit as f, type SourceFileUpdate as g, type SourceGap as h, type SourceLayout as i, type SourcePatch as j, type SourceRoot as k, type SourceSession as l, type SyntheticEmission as m, applySourceBlockTransaction as n, applySourceTextTransaction as o, createSourceSession as p, parseMarkdown as q, parseMarkdownAsync as r, prepareFileSourceEdits as s, serializeMarkdown as t, type CapturedParagraph as u, type CapturedTextRun as v, type FileCaptureResult as w, type FileCheckpoint as x, type FileDefinition as y, type FileTokenCache as z };
+export { type FileWorkAccumulator as A, type BlankLineUnit as B, type CapturedDocument as C, type SourceListStyle as D, type SourceRootRenderOptions as E, type FallbackEmpty as F, captureFilePipeline as G, captureFileWindow as H, capturedInlineBodies as I, capturedSourceLists as J, parseDocumentWithSourceCapture as K, type LayoutContainer as L, parseParagraphWithSourceCapture as M, preprocessFileSource as N, replayFilePipeline as O, type ProtectedSource as P, serializeSourceInlineBody as Q, serializeSourceRootMarkdown as R, type SourceBlockResult as S, type TextSourceSpan as T, sourceRootHasClosedFences as U, type FidelityFailure as a, type FidelityResult as b, type FileParseWork as c, type FileRootCorrespondence as d, type FileSourceResult as e, type SourceEdit as f, type SourceFileUpdate as g, type SourceGap as h, type SourceLayout as i, type SourcePatch as j, type SourceRoot as k, type SourceSession as l, type SyntheticEmission as m, applySourceBlockTransaction as n, applySourceTextTransaction as o, createSourceSession as p, parseMarkdown as q, parseMarkdownAsync as r, prepareFileSourceEdits as s, serializeMarkdown as t, type CapturedParagraph as u, type CapturedTextRun as v, type FileCaptureResult as w, type FileCheckpoint as x, type FileDefinition as y, type FileTokenCache as z };

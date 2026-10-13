@@ -2688,6 +2688,71 @@ function finishSourceLayout(blankLines, fallback, lists) {
   return { blankLines: units, ...fallback ? { fallback } : {}, ...lists ? { lists } : {} };
 }
 
+// src/source-content-trace.ts
+function traceConsumedLines(trace, read, actual) {
+  const chunks = [], pieces = [];
+  let length = 0;
+  for (let i = 0; i < read.end - read.begin; i++) {
+    const row = read.rows[i];
+    if (!row) return void 0;
+    let first = row.b, width = 0;
+    const last = row.e + (i + 1 < read.end - read.begin || read.keepLastLF ? 1 : 0);
+    while (first < last && width < read.indent) {
+      const ch = trace.text[first];
+      if (ch === " ") width++;
+      else if (ch === "	") width += 4 - (width + row.bs) % 4;
+      else if (first - row.b < row.t) width++;
+      else break;
+      first++;
+    }
+    if (width > read.indent) {
+      const padding = " ".repeat(width - read.indent);
+      pieces.push({ from: length, to: length + padding.length, sourceFrom: 0, sourceTo: 0, kind: "generated" });
+      chunks.push(padding);
+      length += padding.length;
+    }
+    const part = sliceTrace(trace, first, last);
+    for (const p of part.pieces) pieces.push({ ...p, from: p.from + length, to: p.to + length });
+    chunks.push(part.text);
+    length += part.text.length;
+  }
+  const text2 = chunks.join("");
+  return text2 === actual ? { text: text2, pieces } : void 0;
+}
+function traceTableRow(trace, from, to, actual) {
+  const row = sliceTrace(trace, from, to), left = row.text.length - row.text.trimStart().length;
+  const trimmed = sliceTrace(row, left, left + row.text.trim().length);
+  const cells = [];
+  let start = 0, escaped = false;
+  let edits = [];
+  const append = (end) => {
+    cells.push(editTrace(sliceTrace(trimmed, start, end), edits));
+    edits = [];
+  };
+  for (let i = 0; i < trimmed.text.length; i++) {
+    const ch = trimmed.text[i];
+    if (ch === "|") {
+      if (escaped) edits.push({ from: i - 1 - start, to: i + 1 - start, text: "|" });
+      else {
+        append(i);
+        start = i + 1;
+      }
+    }
+    escaped = ch === "\\";
+  }
+  append(trimmed.text.length);
+  if (cells[0]?.text === "") cells.shift();
+  if (cells[cells.length - 1]?.text === "") cells.pop();
+  const projected = actual.map((value, i) => {
+    const cell = cells[i];
+    if (!cell) return void 0;
+    const leading = cell.text.length - cell.text.trimStart().length;
+    return sliceTrace(cell, leading, leading + cell.text.trim().length);
+  });
+  if (projected.some((cell, i) => (cell?.text ?? "") !== actual[i])) return void 0;
+  return projected;
+}
+
 // src/markdown.ts
 var md = new MarkdownIt({
   html: true,
@@ -2941,6 +3006,11 @@ md.block.ruler.before(
     token.block = true;
     token.map = [startLine, nextLine + 1];
     token.content = state.src.slice(contentStart, contentEnd);
+    const collector = collectorFor(state);
+    if (collector) {
+      if (contentStart === void 0 || contentEnd === void 0) throw new UnsupportedSourceCapture();
+      literalFacts.set(token, { collector, trace: sliceTrace(collector.trace, contentStart, contentEnd), kind: "front_matter" });
+    }
     state.line = nextLine + 1;
     return true;
   },
@@ -2948,6 +3018,12 @@ md.block.ruler.before(
 );
 var captureKey = /* @__PURE__ */ Symbol("document source capture");
 var owners = /* @__PURE__ */ new WeakMap();
+var inlineFrames = /* @__PURE__ */ new WeakMap();
+var inlineCloseStates = /* @__PURE__ */ new WeakSet();
+var inlineFacts = /* @__PURE__ */ new WeakMap();
+var literalFacts = /* @__PURE__ */ new WeakMap();
+var capturedTextParents = ["paragraph", "heading", "code_block", "frontmatter", "html_block"];
+var capturedTextMarks = ["em", "strong", "link", "annotation", "html_mark", "highlight", "strike_through"];
 var tokenArrays = /* @__PURE__ */ new WeakMap();
 var inlineStateOwners = /* @__PURE__ */ new WeakMap();
 var tokenSources = /* @__PURE__ */ new WeakMap();
@@ -2959,6 +3035,10 @@ var captureAvailable = true;
 function capturedSourceLists(source, doc2, roots, layout) {
   const bound = capturedListLayouts.get(layout);
   return bound && bound.source === source && bound.doc === doc2 && bound.roots === roots && bound.lists === layout.lists ? bound.lists : void 0;
+}
+function capturedInlineBodies(source, doc2, roots, layout) {
+  const bound = capturedListLayouts.get(layout);
+  return bound && bound.source === source && bound.doc === doc2 && bound.roots === roots && bound.lists === layout.lists ? bound.bodies : void 0;
 }
 function sourceRootHasClosedFences(root) {
   return capturedRootFencesClosed.get(root) === true;
@@ -2978,7 +3058,7 @@ wrapCaptureRule(md.block.ruler, "fence", (original, state, startLine, endLine, s
   const originalGetLines = state.getLines, descriptor = Object.getOwnPropertyDescriptor(state, "getLines");
   if (typeof originalGetLines !== "function" || descriptor?.configurable === false) throw new UnsupportedSourceCapture();
   const tokenStart = state.tokens.length;
-  let contentEnd;
+  let contentEnd, bodyTrace;
   Object.defineProperty(state, "getLines", {
     configurable: true,
     writable: true,
@@ -2986,7 +3066,13 @@ wrapCaptureRule(md.block.ruler, "fence", (original, state, startLine, endLine, s
     value: function(begin, end, indent, keepLastLF) {
       if (this !== state || contentEnd !== void 0 || begin !== startLine + 1 || !Number.isInteger(end) || end < begin || end > endLine || keepLastLF !== true) throw new UnsupportedSourceCapture();
       contentEnd = end;
-      return originalGetLines.call(this, begin, end, indent, keepLastLF);
+      const read = { begin, end, indent, keepLastLF, rows: Array.from({ length: end - begin }, (_, i) => {
+        const line = begin + i;
+        return { b: state.bMarks[line], e: state.eMarks[line], t: state.tShift[line], bs: state.bsCount[line] };
+      }) };
+      const value = originalGetLines.call(this, begin, end, indent, keepLastLF);
+      bodyTrace = traceConsumedLines(collectorFor(state).trace, read, value);
+      return value;
     }
   });
   let result;
@@ -3000,9 +3086,66 @@ wrapCaptureRule(md.block.ruler, "fence", (original, state, startLine, endLine, s
     const tokens = state.tokens.slice(tokenStart), token = tokens[0];
     if (tokens.length !== 1 || token?.type !== "fence" || contentEnd === void 0 || token.map?.[0] !== startLine || token.map?.[1] !== state.line || state.line !== contentEnd && state.line !== contentEnd + 1) throw new UnsupportedSourceCapture();
     capturedFenceClosed.set(token, state.line === contentEnd + 1);
+    if (bodyTrace) literalFacts.set(token, { collector: collectorFor(state), trace: bodyTrace, kind: token.type });
   } else if (contentEnd !== void 0) throw new UnsupportedSourceCapture();
   return result;
 });
+for (const name of ["code", "html_block"]) wrapCaptureRule(md.block.ruler, name, (original, state, ...args) => {
+  const collector = collectorFor(state);
+  if (!collector) return original(state, ...args);
+  const getLines = state.getLines, descriptor = Object.getOwnPropertyDescriptor(state, "getLines"), start = state.tokens.length;
+  let bodyTrace;
+  state.getLines = function(begin, end, indent, keepLastLF) {
+    const read = { begin, end, indent, keepLastLF, rows: Array.from({ length: end - begin }, (_, i) => {
+      const line = begin + i;
+      return { b: this.bMarks[line], e: this.eMarks[line], t: this.tShift[line], bs: this.bsCount[line] };
+    }) };
+    const value = getLines.call(this, begin, end, indent, keepLastLF);
+    bodyTrace = traceConsumedLines(collector.trace, read, value);
+    return value;
+  };
+  let result;
+  try {
+    result = original(state, ...args);
+  } finally {
+    if (descriptor) Object.defineProperty(state, "getLines", descriptor);
+    else delete state.getLines;
+  }
+  const added = state.tokens.slice(start), token = added[0];
+  if (result && added.length === 1 && bodyTrace && token.type === (name === "code" ? "code_block" : "html_block")) {
+    if (name === "code") bodyTrace = { text: bodyTrace.text + "\n", pieces: [
+      ...bodyTrace.pieces,
+      { from: bodyTrace.text.length, to: bodyTrace.text.length + 1, sourceFrom: 0, sourceTo: 0, kind: "generated" }
+    ] };
+    if (bodyTrace.text === token.content) literalFacts.set(token, { collector, trace: bodyTrace, kind: token.type });
+  }
+  return result;
+}, true);
+wrapCaptureRule(md.block.ruler, "table", (original, state, ...args) => {
+  const collector = collectorFor(state), start = state.tokens.length;
+  const result = original(state, ...args);
+  if (!collector || !result) return result;
+  const tokens = state.tokens.slice(start);
+  for (let i = 0; i < tokens.length; i++) {
+    const row = tokens[i];
+    if (row.type !== "tr_open" || !row.map) continue;
+    const slots = [];
+    let j = i + 1;
+    for (; j < tokens.length && tokens[j].type !== "tr_close"; j += 3) {
+      if (!["th_open", "td_open"].includes(tokens[j]?.type) || tokens[j + 1]?.type !== "inline" || tokens[j + 2]?.type !== tokens[j].type.replace("_open", "_close")) throw new UnsupportedSourceCapture();
+      slots.push(tokens[j + 1]);
+    }
+    if (tokens[j]?.type !== "tr_close") throw new UnsupportedSourceCapture();
+    const line = row.map[0];
+    const projected = traceTableRow(collector.trace, state.bMarks[line] + state.tShift[line], state.eMarks[line], slots.map((t) => t.content));
+    if (projected) slots.forEach((token, k) => {
+      const trace = projected[k];
+      if (trace) bindInlineTrace(token, collector, trace, "table-cell");
+    });
+    i = j;
+  }
+  return result;
+}, true);
 var inlineEngine = md.inline;
 var OriginalInlineState = inlineEngine.State;
 if (typeof OriginalInlineState !== "function") captureAvailable = false;
@@ -3083,34 +3226,37 @@ wrapCaptureRule(md.block.ruler, "reference", function observeReferenceCandidate(
   }
   return result;
 });
-wrapCaptureRule(md.block.ruler, "paragraph", (original, state, ...args) => {
+function bindInlineTrace(token, collector, trace, kind) {
+  if (trace.text !== token.content || !Array.isArray(token.children)) throw new UnsupportedSourceCapture();
+  owners.set(token.children, trace);
+  tokenArrays.set(token, token.children);
+  inlineFacts.set(token, { collector, trace, kind });
+}
+for (const name of ["paragraph", "lheading"]) wrapCaptureRule(md.block.ruler, name, (original, state, ...args) => {
   const collector = collectorFor(state);
   if (!collector) return original(state, ...args);
-  const top = state.level === 0 && state.blkIndent === 0, level = state.level;
-  const originalGetLines = state.getLines;
+  const level = state.level, originalGetLines = state.getLines, start = state.tokens.length;
   if (typeof originalGetLines !== "function" || !Array.isArray(state.bMarks) || !Array.isArray(state.eMarks)) throw new UnsupportedSourceCapture();
-  const start = state.tokens.length;
-  let capturedLines;
-  let terminal;
+  let capturedLines, terminal;
   state.getLines = function(begin, end, indent, keepLastLF) {
+    const read = { begin, end, indent, keepLastLF, rows: Array.from({ length: end - begin }, (_, i) => {
+      const line = begin + i;
+      return { b: this.bMarks[line], e: this.eMarks[line], t: this.tShift[line], bs: this.bsCount[line] };
+    }) };
     const value = originalGetLines.call(this, begin, end, indent, keepLastLF);
-    const endOfLine = this.eMarks[end - 1];
+    let part = traceConsumedLines(collector.trace, read, value);
+    if (!part) throw new UnsupportedSourceCapture();
+    const endOfLine = read.rows[read.rows.length - 1]?.e;
     let slashes = 0;
     for (let i = value.length - 1; i >= 0 && value[i] === "\\"; i--) slashes++;
-    const restore = !keepLastLF && this.src[endOfLine] === "\n" && (value.endsWith("  ") || slashes % 2 === 1);
+    const restore = name === "paragraph" && !keepLastLF && endOfLine !== void 0 && this.src[endOfLine] === "\n" && (value.endsWith("  ") || slashes % 2 === 1);
     const left = value.length - value.trimStart().length;
-    if (restore) terminal = {
-      content: value.trimStart() + "\n",
-      from: this.bMarks[begin] + left,
-      to: endOfLine + 1
-    };
-    if (top) {
-      if (indent !== 0) throw new UnsupportedSourceCapture();
-      const from = this.bMarks[begin], to = keepLastLF ? Math.min(this.src.length, endOfLine + 1) : endOfLine;
-      const part = sliceTrace(collector.trace, from, to);
-      if (part.text !== value) throw new UnsupportedSourceCapture();
-      capturedLines = restore ? sliceTrace(collector.trace, terminal.from, terminal.to) : sliceTrace(part, left, left + value.trim().length);
+    if (restore) {
+      const eol = sliceTrace(collector.trace, endOfLine, endOfLine + 1);
+      part = { text: part.text + eol.text, pieces: [...part.pieces, ...eol.pieces.map((p) => ({ ...p, from: p.from + value.length, to: p.to + value.length }))] };
+      terminal = value.trimStart() + "\n";
     }
+    capturedLines = sliceTrace(part, left, restore ? part.text.length : left + value.trim().length);
     return value;
   };
   let result;
@@ -3121,17 +3267,41 @@ wrapCaptureRule(md.block.ruler, "paragraph", (original, state, ...args) => {
   }
   if (result) for (const token of state.tokens.slice(start)) {
     if (token.type !== "inline" || token.level !== level + 1) continue;
-    if (terminal) token.content = terminal.content;
-    if (top) {
-      if (!capturedLines || capturedLines.text !== token.content || !Array.isArray(token.children)) {
-        throw new UnsupportedSourceCapture();
-      }
-      owners.set(token.children, capturedLines);
-      tokenArrays.set(token, token.children);
-    }
+    if (terminal !== void 0) token.content = terminal;
+    if (!capturedLines) throw new UnsupportedSourceCapture();
+    bindInlineTrace(token, collector, capturedLines, name === "paragraph" ? "paragraph" : "heading");
   }
   return result;
-});
+}, true);
+wrapCaptureRule(md.block.ruler, "heading", (original, state, startLine, endLine, silent) => {
+  const collector = collectorFor(state);
+  if (!collector || silent) return original(state, startLine, endLine, silent);
+  const start = state.tokens.length;
+  const spaces = state.skipSpacesBack, chars = state.skipCharsBack;
+  let spacesEnd, charsEnd, bodyFrom;
+  state.skipSpacesBack = function(...args) {
+    bodyFrom = args[1];
+    return spacesEnd = spaces.apply(this, args);
+  };
+  state.skipCharsBack = function(...args) {
+    return charsEnd = chars.apply(this, args);
+  };
+  let result;
+  try {
+    result = original(state, startLine, endLine, silent);
+  } finally {
+    state.skipSpacesBack = spaces;
+    state.skipCharsBack = chars;
+  }
+  if (result) {
+    const [open, token] = state.tokens.slice(start), from = bodyFrom;
+    if (open.type !== "heading_open" || token.type !== "inline" || token.level !== open.level + 1 || spacesEnd === void 0 || charsEnd === void 0 || bodyFrom === void 0) throw new UnsupportedSourceCapture();
+    const end = charsEnd > from && /[ \t]/.test(state.src[charsEnd - 1]) ? charsEnd : spacesEnd;
+    const part = sliceTrace(collector.trace, from, end), left = part.text.length - part.text.trimStart().length;
+    bindInlineTrace(token, collector, sliceTrace(part, left, left + part.text.trim().length), "heading");
+  }
+  return result;
+}, true);
 wrapCaptureRule(md.core.ruler, "inline", (original, state) => {
   if (!collectorFor(state)) return original(state);
   const collector = collectorFor(state);
@@ -3292,7 +3462,7 @@ function captureText(state, token, delegate) {
   const { collector, runs } = provenance;
   if (runs.map((run) => run.text).join("") !== token.content) throw new UnsupportedSourceCapture();
   let pos = captureCursor(state);
-  const supported = state.stack[state.stack.length - 1].marks.every((mark) => ["em", "strong", "link"].includes(mark.type.name));
+  const supported = state.stack[state.stack.length - 1].marks.every((mark) => capturedTextMarks.includes(mark.type.name));
   for (const run of runs) {
     const a = pos;
     pos += run.text.length;
@@ -3320,6 +3490,74 @@ function captureText(state, token, delegate) {
   }
   delegate();
   if (captureCursor(state) !== pos) throw new UnsupportedSourceCapture();
+}
+function captureLiteralEmission(state, token, delegate) {
+  const fact = literalFacts.get(token);
+  if (!fact) {
+    delegate();
+    return;
+  }
+  const frame = state.stack[state.stack.length - 1], index = frame.content.length, from = captureCursor(state) + 1;
+  delegate();
+  if (state.stack[state.stack.length - 1] !== frame || frame.content.length !== index + 1) return;
+  const node = frame.content[index], kind = fact.kind === "fence" ? "code_block" : fact.kind === "front_matter" ? "frontmatter" : fact.kind;
+  if (node.type.name !== kind || !["code_block", "frontmatter", "html_block"].includes(kind)) return;
+  const text2 = token.content.endsWith("\n") ? token.content.slice(0, -1) : token.content;
+  if (node.textContent !== text2 || node.content.size !== text2.length || node.marks.length) return;
+  let plain = true;
+  node.forEach((child) => {
+    if (!child.isText || child.marks.length) plain = false;
+  });
+  if (!plain || fact.trace.text !== token.content) return;
+  const trace = sliceTrace(fact.trace, 0, text2.length), runFrom = fact.collector.runs.length;
+  for (const p of trace.pieces) if (p.kind !== "generated") fact.collector.runs.push({
+    sourceFrom: p.sourceFrom,
+    sourceTo: p.sourceTo,
+    pmFrom: from + p.from,
+    pmTo: from + p.to,
+    kind: p.kind === "copy" ? "linear" : "atomic"
+  });
+  fact.collector.emissions.push({ from, to: from + text2.length, kind, runFrom, runTo: fact.collector.runs.length, node });
+}
+function captureInlineEmission(state, token, delegate) {
+  const fact = inlineFacts.get(token);
+  if (!fact) {
+    delegate();
+    return;
+  }
+  if (!inlineCloseStates.has(state)) {
+    const close = state.closeNode;
+    state.closeNode = function() {
+      const frame2 = this.stack[this.stack.length - 1], emission2 = inlineFrames.get(frame2), node = close.call(this);
+      if (emission2) {
+        if (!node || node.type.name !== emission2.kind || node.content.size !== emission2.to - emission2.from || emission2.node) throw new UnsupportedSourceCapture();
+        emission2.node = node;
+      }
+      return node;
+    };
+    inlineCloseStates.add(state);
+  }
+  const frame = state.stack[state.stack.length - 1], from = captureCursor(state), runFrom = fact.collector.runs.length;
+  delegate();
+  const to = captureCursor(state);
+  if (state.stack[state.stack.length - 1] !== frame) throw new UnsupportedSourceCapture();
+  if (!["paragraph", "heading"].includes(frame.type.name)) return;
+  const emission = { from, to, kind: frame.type.name, runFrom, runTo: fact.collector.runs.length };
+  fact.collector.emissions.push(emission);
+  inlineFrames.set(frame, emission);
+  if (fact.trace && fact.kind) {
+    const pieces = fact.trace.pieces;
+    const contiguous = pieces.length > 0 && pieces.every((p, i) => p.kind !== "generated" && (!i || pieces[i - 1].sourceTo === p.sourceFrom));
+    const raw = contiguous ? rawRange(fact.trace, 0, fact.trace.text.length) : void 0;
+    if (raw) emission.body = {
+      pmFrom: from,
+      pmTo: to,
+      sourceFrom: raw.from,
+      sourceTo: raw.to,
+      kind: fact.kind,
+      singlePhysicalLine: !/[\r\n]/.test(fact.collector.source.slice(raw.from, raw.to))
+    };
+  }
 }
 function consumeCheckboxSource(token, count) {
   const provenance = tokenSources.get(token);
@@ -3689,6 +3927,11 @@ var parserTokens = {
           const match = t.content.match(/^\[( |x|X)\]\s?/);
           if (match) {
             checked = match[1] !== " ";
+            const fact = inlineFacts.get(t);
+            if (fact?.trace) {
+              if (fact.trace.text !== t.content) throw new UnsupportedSourceCapture();
+              inlineFacts.set(t, { ...fact, trace: sliceTrace(fact.trace, match[0].length, fact.trace.text.length) });
+            }
             t.content = t.content.slice(match[0].length);
             const children2 = t.children;
             if (children2 && children2.length > 0) {
@@ -3994,6 +4237,12 @@ var MorayaMarkdownParser = class extends MarkdownParser {
         defaultHtmlBlock(state, tok, tokens, i);
       }
     };
+    for (const key of ["fence", "code_block", "front_matter", "html_block"]) {
+      const delegate = h[key];
+      h[key] = (state, tok, tokens, i) => captureLiteralEmission(state, tok, () => delegate(state, tok, tokens, i));
+    }
+    const defaultInline = h["inline"];
+    h["inline"] = (state, tok, tokens, i) => captureInlineEmission(state, tok, () => defaultInline(state, tok, tokens, i));
     for (const key of Object.keys(h)) {
       const delegate = h[key];
       h[key] = (state, tok, tokens, i) => captureRootEmission(
@@ -4343,6 +4592,15 @@ var sourceRootSerializer = new MarkdownSerializer({
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 }, sourceMarks, { hardBreakNodeName: "hardbreak", strict: false });
+function serializeSourceInlineBody(node) {
+  const inline = new MarkdownSerializer({
+    ...sourceRootSerializer.nodes,
+    [node.type.name](state, body) {
+      state.renderInline(body);
+    }
+  }, sourceRootSerializer.marks, sourceRootSerializer.options);
+  return inline.serialize(node.type.schema.topNodeType.create(null, [node]));
+}
 function renderSourceList(state, node, style, indent, firstDelim) {
   if (node.attrs.tight !== void 0 && node.attrs.tight !== style.tight) throw new UnsupportedSourceCapture();
   const previous = state.options.tightLists;
@@ -4551,23 +4809,45 @@ var UnsupportedSourceCapture = class extends Error {
 function finalizeCapturedDocument(collector, doc2) {
   const source = collector.source;
   const text2 = [];
-  doc2.forEach((paragraph2, offset) => {
-    if (paragraph2.type.name !== "paragraph") return;
-    paragraph2.forEach((node, inner) => {
-      if (node.isText) text2.push({ node, paragraph: paragraph2, from: offset + 1 + inner, to: offset + 1 + inner + node.nodeSize });
+  const occurrences = /* @__PURE__ */ new Set(), emitted = /* @__PURE__ */ new Map();
+  for (const emission of collector.emissions) {
+    if (!emission.node || emitted.has(emission.node)) throw new UnsupportedSourceCapture();
+    emitted.set(emission.node, emission);
+  }
+  doc2.descendants((parent, offset) => {
+    if (!capturedTextParents.includes(parent.type.name)) return;
+    const from = offset + 1, emission = emitted.get(parent);
+    if (emission) {
+      emitted.delete(parent);
+      occurrences.add(from);
+      if (parent.content.size !== emission.to - emission.from || parent.type.name !== emission.kind) throw new UnsupportedSourceCapture();
+      const delta = from - emission.from;
+      for (let i = emission.runFrom; i < emission.runTo; i++) {
+        const run = collector.runs[i];
+        if (run.pmFrom < emission.from || run.pmTo > emission.to) throw new UnsupportedSourceCapture();
+        run.pmFrom += delta;
+        run.pmTo += delta;
+      }
+      if (emission.body) collector.bodies.push({ ...emission.body, pmFrom: from, pmTo: from + parent.content.size });
+    }
+    parent.forEach((node, inner) => {
+      if (node.isText) text2.push({ node, parentFrom: from, from: from + inner, to: from + inner + node.nodeSize });
     });
+    return false;
   });
+  if (emitted.size) throw new UnsupportedSourceCapture();
   let pmEnd = 0, sourceEnd = 0, textIndex = 0;
   for (const run of collector.runs) {
     if (run.pmFrom < pmEnd || run.pmTo <= run.pmFrom || run.pmTo > doc2.content.size || run.sourceFrom < sourceEnd || run.sourceTo <= run.sourceFrom || run.sourceTo > source.length || run.kind === "linear" && run.sourceTo - run.sourceFrom !== run.pmTo - run.pmFrom) {
       throw new UnsupportedSourceCapture();
     }
     while (textIndex < text2.length && text2[textIndex].to <= run.pmFrom) textIndex++;
-    const paragraph2 = text2[textIndex]?.paragraph;
+    const paragraph2 = text2[textIndex]?.parentFrom;
+    if (paragraph2 === void 0 || !occurrences.has(paragraph2)) throw new UnsupportedSourceCapture();
     let pos = run.pmFrom;
     while (pos < run.pmTo) {
       const part = text2[textIndex];
-      if (!part || part.paragraph !== paragraph2 || part.from > pos || part.to <= pos || part.node.marks.some((mark) => !["em", "strong", "link"].includes(mark.type.name))) {
+      if (!part || part.parentFrom !== paragraph2 || part.from > pos || part.to <= pos || part.node.marks.some((mark) => !capturedTextMarks.includes(mark.type.name))) {
         throw new UnsupportedSourceCapture();
       }
       const end = Math.min(part.to, run.pmTo);
@@ -4580,7 +4860,7 @@ function finalizeCapturedDocument(collector, doc2) {
   }
   const lists = finishSourceLists(doc2, collector);
   const layout = finishSourceLayout(collector.blankLines, collector.fallback, lists);
-  capturedListLayouts.set(layout, { source, doc: doc2, roots: collector.roots, lists });
+  capturedListLayouts.set(layout, { source, doc: doc2, roots: collector.roots, lists, bodies: Object.freeze(collector.bodies.map((body) => Object.freeze(body))) });
   return {
     doc: doc2,
     textRuns: collector.runs,
@@ -4631,6 +4911,8 @@ function newFileCollector(source, trace, work) {
   return {
     source,
     trace,
+    bodies: [],
+    emissions: [],
     lineStarts: [],
     protectedSources: [],
     runs: [],
@@ -4675,6 +4957,12 @@ function cloneTokenBatch(tokens, collector, rawDelta = 0, lineDelta = 0) {
     }
     const provenance = tokenSources.get(token);
     if (provenance) tokenSources.set(copy, { collector, runs: provenance.runs.map((run) => run.trace ? { text: run.text, kind: run.kind, trace: shiftTrace(run.trace, rawDelta) } : { text: run.text }) });
+    if (token.type === "inline") {
+      const fact = inlineFacts.get(token);
+      inlineFacts.set(copy, { collector, ...fact?.kind ? { kind: fact.kind } : {}, ...fact?.trace ? { trace: shiftTrace(fact.trace, rawDelta) } : {} });
+    }
+    const literal = literalFacts.get(token);
+    if (literal) literalFacts.set(copy, { collector, trace: shiftTrace(literal.trace, rawDelta), kind: literal.kind });
     const closed = capturedFenceClosed.get(token);
     if (closed !== void 0) capturedFenceClosed.set(copy, closed);
     return copy;
@@ -4921,6 +5209,53 @@ function replayInlineEffects(labels, env, work) {
     work.inlineEffectReplayCount++;
   }
 }
+function closedWindowSegments(tokens, checkpoints) {
+  const allowed = /* @__PURE__ */ new Set([
+    "paragraph",
+    "heading",
+    "blockquote",
+    "bullet_list",
+    "ordered_list",
+    "list_item",
+    "footnote_reference",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "th",
+    "td"
+  ]);
+  if (checkpoints.length < 2) return false;
+  for (let i = 1; i < checkpoints.length; i++) {
+    const left = checkpoints[i - 1], right = checkpoints[i], stack = [];
+    if (left.state.level !== 0 || right.state.level !== 0) return false;
+    for (const token of tokens.slice(left.tokenIndex, right.tokenIndex)) {
+      if (token.map && (token.map[0] < left.line || token.map[1] > right.line || token.map[0] > token.map[1])) return false;
+      if (token.nesting === -1) {
+        if (!token.type.endsWith("_close") || stack.pop() !== token.type.slice(0, -6)) return false;
+      }
+      if (token.level !== stack.length) return false;
+      if (token.nesting === 1) {
+        const kind = token.type.slice(0, -5);
+        if (!token.type.endsWith("_open") || !allowed.has(kind)) return false;
+        stack.push(kind);
+      } else if (token.nesting === 0 && token.type !== "inline") return false;
+    }
+    if (stack.length) return false;
+  }
+  return true;
+}
+function windowTokenFacts(tokens) {
+  return tokens.map((token) => {
+    const inline = inlineFacts.get(token), literal = literalFacts.get(token);
+    return {
+      inline: inline ? { kind: inline.kind, trace: inline.trace } : void 0,
+      literal: literal ? { kind: literal.kind, trace: literal.trace } : void 0,
+      closed: capturedFenceClosed.get(token),
+      children: token.children ? windowTokenFacts(token.children) : void 0
+    };
+  });
+}
 function captureFileWindow(cache, source, patches, schema2, work, selection) {
   if (!fileHooksValid() || !captureAvailable) return { ok: false, reason: "unsupported-source" };
   if (!patches.length || cache.trace.text !== cache.source || !cache.checkpoints.length) return null;
@@ -4931,9 +5266,7 @@ function captureFileWindow(cache, source, patches, schema2, work, selection) {
     const collector = newFileCollector(source, trace, work), file = collector.file;
     collector.lineStarts = lineStarts(source);
     const { leftIndex, rightIndex } = selection, left = cache.checkpoints[leftIndex];
-    const oldRight = cache.checkpoints[rightIndex];
-    const admitted = (tokens2) => tokens2.every((t) => ["paragraph_open", "inline", "paragraph_close"].includes(t.type) && (!t.map || t.map[1] - t.map[0] <= 1));
-    if (!admitted(cache.blockTokens.slice(left.tokenIndex, oldRight.tokenIndex))) return null;
+    if (!closedWindowSegments(cache.blockTokens, cache.checkpoints.slice(leftIndex, rightIndex + 1))) return null;
     if (source.slice(0, left.offset) !== cache.source.slice(0, left.offset)) return null;
     const delta = source.length - cache.source.length;
     const tokens = cloneTokenBatch(cache.blockTokens.slice(0, left.tokenIndex), collector);
@@ -4953,7 +5286,7 @@ function captureFileWindow(cache, source, patches, schema2, work, selection) {
       if (previous && newPrevious && old.offset < cache.source.length) {
         const sentinelOld = cloneTokenBatch(cache.blockTokens.slice(previous.tokenIndex, old.tokenIndex), collector, delta, checkpoint.line - old.line);
         const sentinelNew = tokens.slice(newPrevious.tokenIndex, checkpoint.tokenIndex);
-        if (!sameTokenData(sentinelOld, sentinelNew)) return false;
+        if (!sameTokenData(sentinelOld, sentinelNew) || !sameTokenData(windowTokenFacts(sentinelOld), windowTokenFacts(sentinelNew))) return false;
         const oldDefinitions = cache.definitions.filter((d) => previous.offset <= d.sourceFrom && d.sourceFrom < old.offset).map((d) => ({ ...d, sourceFrom: d.sourceFrom + delta, sourceTo: d.sourceTo + delta }));
         const newDefinitions = file.definitions.filter((d) => newPrevious.offset <= d.sourceFrom && d.sourceFrom < checkpoint.offset);
         if (!sameTokenData(oldDefinitions, newDefinitions)) return false;
@@ -4963,7 +5296,7 @@ function captureFileWindow(cache, source, patches, schema2, work, selection) {
       return true;
     }, work);
     work.blockWindows = [...work.blockWindows, { sourceFrom: left.offset, sourceTo: state.bMarks[state.line] }];
-    if (!matched || !admitted(tokens.slice(left.tokenIndex))) return null;
+    if (!matched || !closedWindowSegments(tokens, file.checkpoints)) return null;
     const right = cache.checkpoints[matchedIndex], lineDelta = matched.line - right.line;
     const tokenDelta = tokens.length - right.tokenIndex;
     const windowEnd = tokens.length;
@@ -7574,6 +7907,12 @@ function selectBlockWindow(cache, patches) {
   return { leftIndex, rightIndex };
 }
 function prepareCandidate(base, patches, work, expectedDoc) {
+  return prepareCandidateInternal(base, patches, work, expectedDoc, false);
+}
+function preparePreservingSourceCandidate(base, patches, work, expectedDoc) {
+  return prepareCandidateInternal(base, patches, work, expectedDoc, true);
+}
+function prepareCandidateInternal(base, patches, work, expectedDoc, preserveProtected) {
   if (!patches.length) {
     if (expectedDoc && !expectedDoc.eq(base.verifiedBase.doc)) return { ok: false, reason: "semantic-mismatch", work };
     return { ...finishUnchangedFile(base, work), edits: [] };
@@ -7591,6 +7930,21 @@ function prepareCandidate(base, patches, work, expectedDoc) {
   }
   if (!parsed.ok) return { ...parsed, work };
   if (expectedDoc && !parsed.value.doc.eq(expectedDoc)) return { ok: false, reason: "semantic-mismatch", work };
+  if (preserveProtected) {
+    const expected = [];
+    let index = 0;
+    for (const old of base.verifiedBase.protectedSources) {
+      while (index < pieces.length && pieces[index].beforeTo <= old.sourceFrom) index++;
+      const piece = pieces[index];
+      if (!piece || piece.generated || piece.beforeFrom > old.sourceFrom || piece.beforeTo < old.sourceTo)
+        return { ok: false, reason: "unsupported-step", work };
+      const delta = piece.afterFrom - piece.beforeFrom, sourceFrom = old.sourceFrom + delta, sourceTo = old.sourceTo + delta;
+      if (source.slice(sourceFrom, sourceTo) !== base.verifiedBase.source.slice(old.sourceFrom, old.sourceTo))
+        return { ok: false, reason: "unsupported-step", work };
+      expected.push({ ...old, sourceFrom, sourceTo });
+    }
+    if (!sameMetadata(expected, parsed.value.protectedSources)) return { ok: false, reason: "unsupported-step", work };
+  }
   work.environmentChanged = !sameMetadata(foldDefinitionEvents(base.cache.tokens.definitions), foldDefinitionEvents(parsed.cache.definitions));
   const environmentVersion = base.cache.environmentVersion + Number(work.environmentChanged);
   const next = makeSession(source, parsed.value, base.verifiedBase.revision + 1);
@@ -8211,24 +8565,62 @@ function applySourceTextTransactionWithEdit(base, tr, context) {
   if (!tr.before.eq(base.doc)) return { ok: false, reason: "stale-document" };
   if (tr.steps.length !== 1) return { ok: false, reason: "unsupported-step" };
   if (tr.storedMarksSet) return { ok: false, reason: "unsupported-step" };
-  const step = tr.steps[0].toJSON();
-  if (step.stepType !== "replace" || step.structure) return { ok: false, reason: "unsupported-step" };
+  const actual = tr.steps[0];
+  if (Object.getPrototypeOf(actual) !== ReplaceStep2.prototype || tr.docs.length !== 1 || !tr.docs[0].eq(base.doc)) return { ok: false, reason: "unsupported-step" };
+  const applied = actual.apply(base.doc);
+  if (applied.failed || !applied.doc?.eq(tr.doc)) return { ok: false, reason: "unsupported-step" };
+  const step = actual;
+  if (step.structure) return { ok: false, reason: "unsupported-step" };
   const work = context?.work ?? emptyFileParseWork();
   const verified = context?.verified ?? prepareVerifiedFileBase(base, work);
   if ("ok" in verified) return verified;
   base = verified.verifiedBase;
-  const { from, to } = step;
+  let { from, to } = step;
+  let textOnly = true;
+  step.slice.content.forEach((node) => {
+    if (!node.isText) textOnly = false;
+  });
+  const owner = base.roots.find((root) => root.pmFrom <= from && root.pmTo >= to);
+  if (!owner || !sourceRootHasClosedFences(owner)) return { ok: false, reason: "unsupported-step" };
   const $from = base.doc.resolve(from), $to = base.doc.resolve(to);
-  if ($from.depth !== 1 || !$from.sameParent($to) || $from.parent.type.name !== "paragraph" || to < from || step.slice?.openStart || step.slice?.openEnd || step.slice?.content?.some((node) => node.type !== "text")) {
+  if (!$from.sameParent($to) || !["paragraph", "heading", "code_block", "frontmatter", "html_block"].includes($from.parent.type.name) || to < from || step.slice.openStart || step.slice.openEnd || !textOnly) {
     return { ok: false, reason: "unsupported-step" };
   }
   if (splitsTextAt(base.doc, from) || splitsTextAt(base.doc, to)) {
     return { ok: false, reason: "unmapped-range" };
   }
-  const spans = base.textSpans.filter((span) => from === to ? span.pmFrom <= from && span.pmTo >= to : span.pmTo > from && span.pmFrom < to);
+  let spans = base.textSpans.filter((span) => from === to ? span.pmFrom <= from && span.pmTo >= to : span.pmTo > from && span.pmFrom < to);
   if (!spans.length) return { ok: false, reason: "unmapped-range" };
   if (from < to && (spans[0].pmFrom > from || spans[spans.length - 1].pmTo < to || spans.some((span, i) => i > 0 && spans[i - 1].pmTo !== span.pmFrom))) {
     return { ok: false, reason: "unmapped-range" };
+  }
+  let insert = "";
+  step.slice.content.forEach((node) => {
+    insert += node.text;
+  });
+  const literal = ["code_block", "frontmatter", "html_block"].includes($from.parent.type.name);
+  let plain = literal;
+  step.slice.content.forEach((node) => {
+    if (node.marks.length) plain = false;
+  });
+  if (plain) base.doc.nodesBetween(from, to, (node) => {
+    if (node.isText && node.marks.length) plain = false;
+  });
+  if (plain && from < to) {
+    const originalFrom = boundary(spans[0], from), originalTo = boundary(spans[spans.length - 1], to);
+    if (originalFrom === void 0 || originalTo === void 0 || overlapsProtectedSource(base, originalFrom, originalTo))
+      return { ok: false, reason: "unmapped-range" };
+    const before = base.doc.textBetween(from, to);
+    let prefix = 0, suffix = 0;
+    while (prefix < before.length && prefix < insert.length && before[prefix] === insert[prefix]) prefix++;
+    while (splitsSurrogate(before, prefix) || splitsSurrogate(insert, prefix)) prefix--;
+    while (suffix < before.length - prefix && suffix < insert.length - prefix && before[before.length - 1 - suffix] === insert[insert.length - 1 - suffix]) suffix++;
+    while (splitsSurrogate(before, before.length - suffix) || splitsSurrogate(insert, insert.length - suffix)) suffix--;
+    from += prefix;
+    to -= suffix;
+    insert = insert.slice(prefix, insert.length - suffix);
+    spans = base.textSpans.filter((span) => from === to ? span.pmFrom <= from && span.pmTo >= to : span.pmTo > from && span.pmFrom < to);
+    if (!spans.length) return { ok: false, reason: "unmapped-range" };
   }
   if (from === to && spans.some((span) => boundary(span, from) !== boundary(spans[0], from))) {
     return { ok: false, reason: "unmapped-range" };
@@ -8239,9 +8631,8 @@ function applySourceTextTransactionWithEdit(base, tr, context) {
     return { ok: false, reason: "unmapped-range" };
   }
   if (overlapsProtectedSource(base, sourceFrom, sourceTo)) return { ok: false, reason: "unsupported-step" };
-  const insert = (step.slice?.content ?? []).map((node) => node.text).join("");
   context?.verifyEdit?.({ from: sourceFrom, to: sourceTo, text: insert });
-  const result = prepareCandidate(verified, [{
+  const result = preparePreservingSourceCandidate(verified, [{
     from: sourceFrom,
     to: sourceTo,
     removed: base.source.slice(sourceFrom, sourceTo),
@@ -8466,6 +8857,29 @@ function applySourceEdits(base, edits, ids, ownership) {
   chunks.push(base.source.slice(at));
   return chunks.join("");
 }
+function plainMarkBody(base, tr) {
+  if (tr.steps.length !== 1) return void 0;
+  const step = tr.steps[0];
+  if (!(step instanceof AddMarkStep2 || step instanceof RemoveMarkStep2) || !["strong", "em"].includes(step.mark.type.name)) return void 0;
+  const from = base.doc.resolve(step.from), to = base.doc.resolve(step.to);
+  if (!from.sameParent(to) || !["paragraph", "heading"].includes(from.parent.type.name)) return void 0;
+  const plain = (node) => {
+    let ok = true;
+    node.forEach((child) => {
+      if (!child.isText || child.marks.some((mark) => !["strong", "em"].includes(mark.type.name))) ok = false;
+    });
+    return ok;
+  };
+  if (!plain(from.parent)) return void 0;
+  if (from.parentOffset !== 0 || to.parentOffset !== from.parent.content.size) return void 0;
+  const after = tr.doc.resolve(step.from), end = tr.doc.resolve(step.to);
+  if (!after.sameParent(end) || from.depth !== after.depth || !plain(after.parent)) throw new UnsupportedBlockTransaction();
+  for (let depth = 0; depth <= from.depth; depth++) if (!from.node(depth).sameMarkup(after.node(depth))) throw new UnsupportedBlockTransaction();
+  const body = capturedInlineBodies(base.source, base.doc, base.roots, base.layout)?.find((b) => b.pmFrom === step.from && b.pmTo === step.to);
+  if (!body) return void 0;
+  if (!body.singlePhysicalLine || overlapsProtectedSource(base, body.sourceFrom, body.sourceTo)) throw new UnsupportedBlockTransaction();
+  return { from: body.sourceFrom, to: body.sourceTo, text: serializeSourceInlineBody(after.parent) };
+}
 function applySourceBlockTransaction(base, tr) {
   if (!tr.before.eq(base.doc)) return { ok: false, reason: "stale-document" };
   try {
@@ -8475,6 +8889,7 @@ function applySourceBlockTransaction(base, tr) {
     const facts = capturedSourceLists(base.source, base.doc, base.roots, base.layout);
     if (!facts) throw new UnsupportedBlockTransaction();
     const authority = { facts };
+    if (tr.docs.length !== tr.steps.length) throw new UnsupportedBlockTransaction();
     const classification = classifyTransaction(base, tr);
     for (let i = 0; i < tr.steps.length; i++) {
       const before = tr.docs[i], after = tr.docs[i + 1] ?? tr.doc;
@@ -8506,6 +8921,7 @@ function applySourceBlockTransaction(base, tr) {
       if (!tr.doc.eq(base.doc)) return { ok: false, reason: "unsupported-step" };
       return { ...finishUnchangedFile(verified, work), mode: "unchanged", edits: [], changedRoots: [] };
     }
+    if (changedRoots.some((id) => !sourceRootHasClosedFences(ownership.rootById[id]))) throw new UnsupportedBlockTransaction();
     if (tr.steps.length === 1 && tr.steps[0] instanceof ReplaceStep2) {
       const replay = EditorState2.create({ doc: base.doc }).tr.step(tr.steps[0]);
       if (!replay.doc.eq(tr.doc)) return { ok: false, reason: "unsupported-step" };
@@ -8516,6 +8932,20 @@ function applySourceBlockTransaction(base, tr) {
         const edits2 = [exact.edit];
         return { ok: true, session: exact.session, file: exact.file, mode: "exact-text", edits: edits2, changedRoots };
       }
+      const step = tr.steps[0], from = base.doc.resolve(step.from), to = base.doc.resolve(step.to);
+      let ordinary = true;
+      step.slice.content.forEach((node) => {
+        if (!node.isText || !node.hasMarkup(node.type, null, from.marks())) ordinary = false;
+      });
+      const supportedMarks = from.marks().every((mark) => ["strong", "em", "link", "annotation", "html_mark", "highlight", "strike_through"].includes(mark.type.name));
+      if (from.sameParent(to) && ["paragraph", "heading", "code_block", "frontmatter", "html_block"].includes(from.parent.type.name) && ordinary && supportedMarks && (["code_block", "frontmatter", "html_block"].includes(from.parent.type.name) || exact.reason === "unmapped-range" || step.to - step.from <= 1 && step.slice.size <= 1)) return exact;
+    }
+    const fragment = plainMarkBody(base, tr);
+    if (fragment) {
+      applySourceEdits(base, [fragment], changedRoots, ownership);
+      const parsed2 = preparePreservingSourceCandidate(verified, [{ ...fragment, removed: base.source.slice(fragment.from, fragment.to) }], work, tr.doc);
+      if (!parsed2.ok) return { ok: false, reason: parsed2.reason };
+      return { ok: true, session: parsed2.session, file: parsed2.file, mode: "fragment-render", edits: [fragment], changedRoots };
     }
     const targets = [];
     tr.doc.forEach((node, pos, index) => {

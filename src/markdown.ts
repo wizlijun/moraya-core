@@ -2803,8 +2803,45 @@ function replayInlineEffects(labels: readonly string[], env: FileEnvironment, wo
   }
 }
 
-/** A conservative first admission: actual single-line paragraph/reference
- * checkpoints. All candidate rules still see the complete file and true EOF. */
+// Admit only complete actual top-level rule segments, never a synthetic nested
+// restart. Empty segments are real definition events between checkpoints.
+function closedWindowSegments(tokens: readonly ActualToken[], checkpoints: readonly FileCheckpoint[]): boolean {
+  const allowed = new Set(['paragraph', 'heading', 'blockquote', 'bullet_list', 'ordered_list',
+    'list_item', 'footnote_reference', 'table', 'thead', 'tbody', 'tr', 'th', 'td'])
+  if (checkpoints.length < 2) return false
+  for (let i = 1; i < checkpoints.length; i++) {
+    const left = checkpoints[i - 1]!, right = checkpoints[i]!, stack: string[] = []
+    if (left.state.level !== 0 || right.state.level !== 0) return false
+    for (const token of tokens.slice(left.tokenIndex, right.tokenIndex)) {
+      if (token.map && (token.map[0] < left.line || token.map[1] > right.line || token.map[0] > token.map[1])) return false
+      if (token.nesting === -1) {
+        if (!token.type.endsWith('_close') || stack.pop() !== token.type.slice(0, -6)) return false
+      }
+      if (token.level !== stack.length) return false
+      if (token.nesting === 1) {
+        const kind = token.type.slice(0, -5)
+        if (!token.type.endsWith('_open') || !allowed.has(kind)) return false
+        stack.push(kind)
+      } else if (token.nesting === 0 && token.type !== 'inline') return false
+    }
+    if (stack.length) return false
+  }
+  return true
+}
+
+// Only serializable facts belonging to these tokens participate in sentinel
+// equality. Collector/frame/PM references are deliberately not source facts.
+function windowTokenFacts(tokens: readonly ActualToken[]): unknown {
+  return tokens.map(token => {
+    const inline = inlineFacts.get(token), literal = literalFacts.get(token)
+    return { inline: inline ? { kind: inline.kind, trace: inline.trace } : undefined,
+      literal: literal ? { kind: literal.kind, trace: literal.trace } : undefined,
+      closed: capturedFenceClosed.get(token),
+      children: token.children ? windowTokenFacts(token.children) : undefined }
+  })
+}
+
+/** All candidate rules still see the complete file and true EOF. */
 export function captureFileWindow(cache: FileTokenCache, source: string,
   patches: readonly Readonly<{ from: number; to: number; text: string }>[], schema: Schema,
   work: FileWorkAccumulator, selection: Readonly<{ leftIndex: number; rightIndex: number }>): FileCaptureResult | null {
@@ -2817,10 +2854,7 @@ export function captureFileWindow(cache: FileTokenCache, source: string,
     const collector = newFileCollector(source, trace, work), file = collector.file!
     collector.lineStarts = lineStarts(source)
     const { leftIndex, rightIndex } = selection, left = cache.checkpoints[leftIndex]!
-    const oldRight = cache.checkpoints[rightIndex]!
-    const admitted = (tokens: readonly ActualToken[]) => tokens.every(t => ['paragraph_open', 'inline', 'paragraph_close'].includes(t.type)
-      && (!t.map || t.map[1] - t.map[0] <= 1))
-    if (!admitted(cache.blockTokens.slice(left.tokenIndex, oldRight.tokenIndex))) return null
+    if (!closedWindowSegments(cache.blockTokens, cache.checkpoints.slice(leftIndex, rightIndex + 1))) return null
     if (source.slice(0, left.offset) !== cache.source.slice(0, left.offset)) return null
     const delta = source.length - cache.source.length
     const tokens = cloneTokenBatch(cache.blockTokens.slice(0, left.tokenIndex), collector)
@@ -2841,7 +2875,8 @@ export function captureFileWindow(cache: FileTokenCache, source: string,
       if (previous && newPrevious && old.offset < cache.source.length) {
         const sentinelOld = cloneTokenBatch(cache.blockTokens.slice(previous.tokenIndex, old.tokenIndex), collector, delta, checkpoint.line - old.line)
         const sentinelNew = tokens.slice(newPrevious.tokenIndex, checkpoint.tokenIndex)
-        if (!sameTokenData(sentinelOld, sentinelNew)) return false
+        if (!sameTokenData(sentinelOld, sentinelNew)
+          || !sameTokenData(windowTokenFacts(sentinelOld), windowTokenFacts(sentinelNew))) return false
         const oldDefinitions = cache.definitions.filter(d => previous.offset <= d.sourceFrom && d.sourceFrom < old.offset)
           .map(d => ({ ...d, sourceFrom: d.sourceFrom + delta, sourceTo: d.sourceTo + delta }))
         const newDefinitions = file.definitions.filter(d => newPrevious.offset <= d.sourceFrom && d.sourceFrom < checkpoint.offset)
@@ -2851,7 +2886,7 @@ export function captureFileWindow(cache: FileTokenCache, source: string,
       return true
     }, work)
     work.blockWindows = [...work.blockWindows, { sourceFrom: left.offset, sourceTo: state.bMarks[state.line]! }]
-    if (!matched || !admitted(tokens.slice(left.tokenIndex))) return null
+    if (!matched || !closedWindowSegments(tokens, file.checkpoints)) return null
     const right = cache.checkpoints[matchedIndex]!, lineDelta = matched.line - right.line
     const tokenDelta = tokens.length - right.tokenIndex
     const windowEnd = tokens.length
