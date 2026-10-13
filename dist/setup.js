@@ -3014,20 +3014,32 @@ wrapCaptureRule(md.block.ruler, "reference", (original, state, startLine, endLin
 });
 wrapCaptureRule(md.block.ruler, "paragraph", (original, state, ...args) => {
   const collector = collectorFor(state);
-  if (!collector || state.level !== 0 || state.blkIndent !== 0) return original(state, ...args);
+  if (!collector) return original(state, ...args);
+  const top = state.level === 0 && state.blkIndent === 0, level = state.level;
   const originalGetLines = state.getLines;
   if (typeof originalGetLines !== "function" || !Array.isArray(state.bMarks) || !Array.isArray(state.eMarks)) throw new UnsupportedSourceCapture();
   const start = state.tokens.length;
   let capturedLines;
+  let terminal;
   state.getLines = function(begin, end, indent, keepLastLF) {
     const value = originalGetLines.call(this, begin, end, indent, keepLastLF);
-    if (indent !== 0) return value;
-    const from = this.bMarks[begin];
-    const to = keepLastLF ? Math.min(this.src.length, this.eMarks[end - 1] + 1) : this.eMarks[end - 1];
-    const part = sliceTrace(collector.trace, from, to);
-    if (part.text !== value) throw new UnsupportedSourceCapture();
+    const endOfLine = this.eMarks[end - 1];
+    let slashes = 0;
+    for (let i = value.length - 1; i >= 0 && value[i] === "\\"; i--) slashes++;
+    const restore = !keepLastLF && this.src[endOfLine] === "\n" && (value.endsWith("  ") || slashes % 2 === 1);
     const left = value.length - value.trimStart().length;
-    capturedLines = sliceTrace(part, left, left + value.trim().length);
+    if (restore) terminal = {
+      content: value.trimStart() + "\n",
+      from: this.bMarks[begin] + left,
+      to: endOfLine + 1
+    };
+    if (top) {
+      if (indent !== 0) throw new UnsupportedSourceCapture();
+      const from = this.bMarks[begin], to = keepLastLF ? Math.min(this.src.length, endOfLine + 1) : endOfLine;
+      const part = sliceTrace(collector.trace, from, to);
+      if (part.text !== value) throw new UnsupportedSourceCapture();
+      capturedLines = restore ? sliceTrace(collector.trace, terminal.from, terminal.to) : sliceTrace(part, left, left + value.trim().length);
+    }
     return value;
   };
   let result;
@@ -3037,12 +3049,15 @@ wrapCaptureRule(md.block.ruler, "paragraph", (original, state, ...args) => {
     state.getLines = originalGetLines;
   }
   if (result) for (const token of state.tokens.slice(start)) {
-    if (token.type !== "inline" || token.level !== 1) continue;
-    if (!capturedLines || capturedLines.text !== token.content || !Array.isArray(token.children)) {
-      throw new UnsupportedSourceCapture();
+    if (token.type !== "inline" || token.level !== level + 1) continue;
+    if (terminal) token.content = terminal.content;
+    if (top) {
+      if (!capturedLines || capturedLines.text !== token.content || !Array.isArray(token.children)) {
+        throw new UnsupportedSourceCapture();
+      }
+      owners.set(token.children, capturedLines);
+      tokenArrays.set(token, token.children);
     }
-    owners.set(token.children, capturedLines);
-    tokenArrays.set(token, token.children);
   }
   return result;
 });
@@ -3995,6 +4010,25 @@ var serializer = new MarkdownSerializer(
     strict: false
   }
 );
+var terminalStarts = /* @__PURE__ */ new WeakMap();
+var sourceRootSerializer = new MarkdownSerializer({
+  ...serializer.nodes,
+  hardbreak(state, node, parent, index) {
+    let start = terminalStarts.get(parent);
+    if (start === void 0) {
+      start = parent.childCount;
+      while (start > 0) {
+        const previous = parent.child(start - 1);
+        if (previous.type.name !== "hardbreak" || previous.attrs.isInline !== false) break;
+        start--;
+      }
+      terminalStarts.set(parent, start);
+    }
+    if (index >= start) state.write("\\\n");
+    else serializer.nodes.hardbreak(state, node, parent, index);
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+}, serializer.marks, { hardBreakNodeName: "hardbreak", strict: false });
 function renderTableRow(state, row) {
   const cells = [];
   const s = state;

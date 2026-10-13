@@ -1,7 +1,7 @@
 import { Fragment, type Node as PmNode, type ResolvedPos, type Schema } from 'prosemirror-model'
 import { EditorState, type Transaction } from 'prosemirror-state'
 import { AddMarkStep, RemoveMarkStep, ReplaceStep } from 'prosemirror-transform'
-import { parseDocumentWithSourceCapture, serializeMarkdown } from './markdown'
+import { parseDocumentWithSourceCapture, serializeSourceRootMarkdown } from './markdown'
 import type { SourceLayout } from './source-layout'
 import type { SourceRoot, SourceGap, SourceEdit, ProtectedSource } from './source-ownership'
 
@@ -218,18 +218,31 @@ function rootRenderNode(node: PmNode): PmNode {
   marks.splice(outer, 0, marks.splice(highlight, 1)[0]!)
   return rendered.mark(marks)
 }
+function endsInTerminalHardbreak(node:PmNode):boolean {
+ if(node.inlineContent){
+  const last=node.lastChild
+  return last?.type.name==='hardbreak'&&last.attrs.isInline===false
+ }
+ // Only container endings exercised through actual paragraph block rules.
+ if(!['doc','bullet_list','ordered_list','list_item','blockquote'].includes(node.type.name))return false
+ const last=node.lastChild;return !!last&&endsInTerminalHardbreak(last)
+}
 function renderChangedRoot(base:SourceSession,doc:PmNode,root:SourceRoot):string {
  if(overlapsProtectedSource(base,root.sourceFrom,root.sourceTo)||!renderableRoots.has(root.tokenType))throw new UnsupportedBlockTransaction()
  const nodes:PmNode[]=[]
  for(let i=root.childFrom;i<root.childTo;i++)nodes.push(rootRenderNode(doc.child(i)))
- let generated=serializeMarkdown(doc.type.create(doc.attrs,Fragment.fromArray(nodes)))
- const last=nodes[nodes.length-1]!
- if(last.type.name==='table') {
-  // Contract of the existing renderTableRow/table serializer, generated text only.
+ let generated=serializeSourceRootMarkdown(doc.type.create(doc.attrs,Fragment.fromArray(nodes)))
+ const last=nodes[nodes.length-1]!,tail=base.source.slice(root.tailFrom,root.sourceTo)
+ if(last.type.name==='table'){
   if(!generated.endsWith('\n')||generated.endsWith('\n\n'))throw new UnsupportedBlockTransaction()
   generated=generated.slice(0,-1)
+ }else if(endsInTerminalHardbreak(last)&&/^(?:\r\n|\r|\n)/.test(tail)){
+  if(!generated.endsWith('\n'))throw new UnsupportedBlockTransaction()
+  // This one generated EOL represents the same final physical content-line
+  // terminator already held by the original root tail. Keep original bytes.
+  generated=generated.slice(0,-1)
  }
- return generated+base.source.slice(root.tailFrom,root.sourceTo)
+ return generated+tail
 }
 function applySourceEdits(base:SourceSession,edits:readonly SourceEdit[],ids:readonly number[],ownership:RootIndex):string {
  const authorized=ids.map(id=>ownership.rootById[id]!)

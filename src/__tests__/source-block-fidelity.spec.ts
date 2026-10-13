@@ -206,7 +206,8 @@ it('rejects stale docs, root structure and attrs without source output',()=>{
 })
 it('keeps serializer limitations and partial surrogate edits fail closed',()=>{
  const b=open('A'),hardbreak=b.doc.type.schema.nodes.hardbreak!.create({isInline:false})
- reject(b,transaction(b).insert(2,hardbreak))
+ const terminal=accept(b,transaction(b).insert(2,hardbreak))
+ expect(terminal.session.source).toBe('A\\\n')
  const unclosed=open('~~~text\nA\n\n'),p=pos(unclosed.doc,'A')
  reject(unclosed,transaction(unclosed).insertText('Z',p,p+1))
  const empty=open('')

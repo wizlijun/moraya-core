@@ -1,6 +1,6 @@
 export { createSchema, getDocumentBaseDir, setDocumentBaseDir } from './schema.js';
-import { S as SourceRoot, a as SourceGap, P as ProtectedSource, b as SourceLayout, c as SourceEdit } from './markdown-0NNq-dvw.js';
-export { B as BlankLineUnit, F as FallbackEmpty, L as LayoutContainer, d as SyntheticEmission, p as parseMarkdown, e as parseMarkdownAsync, s as serializeMarkdown } from './markdown-0NNq-dvw.js';
+import { S as SourceRoot, a as SourceGap, P as ProtectedSource, b as SourceLayout, c as SourceEdit } from './markdown-D8Wa1GtD.js';
+export { B as BlankLineUnit, F as FallbackEmpty, L as LayoutContainer, d as SyntheticEmission, p as parseMarkdown, e as parseMarkdownAsync, s as serializeMarkdown } from './markdown-D8Wa1GtD.js';
 export { CreateEditorOptions, EditorPluginOptions, MorayaEditorInstance, createEditor, createEditorPlugins, preloadEnhancementPlugins } from './setup.js';
 export { insertHorizontalRule, insertImage, insertMathBlock, insertTable, setHeading, toggleBlockquote, toggleBold, toggleBulletList, toggleCode, toggleCodeBlock, toggleHighlight, toggleItalic, toggleLink, toggleOrderedList, toggleStrikethrough } from './commands.js';
 export { DocCache, createDocCache, djb2Hash } from './doc-cache.js';
