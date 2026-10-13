@@ -114,3 +114,20 @@ it('actual newline escape and footnote atoms remain read-only through repeated r
  for(const atom of facts.atoms){expect(applySourceBlockTransaction(b,EditorState.create({doc:b.doc}).tr.addMark(atom.pmFrom,atom.pmTo,b.doc.type.schema.marks.strong!.create())).ok).toBe(false);expect(applySourceBlockTransaction(b,EditorState.create({doc:b.doc}).tr.delete(atom.pmFrom,atom.pmTo)).ok).toBe(false)}cache=next;
  }
 });
+
+it.each([
+ ['A&amp;B A&amp;B _Keep_\r\n','A&amp;B `A&B` _Keep_\r\n','code'],
+ ['***{>>原注<<}***\r\n','','point'],
+ ['**{>>原注<<}A** **{>>原注<<}B**\r\n','**{>>原注<<}A** **B**\r\n','second-point'],
+] as const)('final I1/I2 actual context and point wrappers survive three cache replays: %s',(raw,expected,kind)=>{
+ const first=captureFilePipeline(raw);expect(first.ok).toBe(true);if(!first.ok)throw Error(first.reason);let cache=first;
+ const session=(v:typeof first.value):SourceSession=>({revision:0,source:raw,doc:v.doc,textSpans:v.textRuns,roots:v.roots,gaps:v.gaps,layout:v.layout,protectedSources:v.protectedSources});
+ const old=capturedInlineRecipeFacts(session(first.value))!;
+ for(let i=0;i<3;i++){
+  const next=replayFilePipeline(cache.cache);expect(next.ok).toBe(true);if(!next.ok)throw Error(next.reason);const b=session(next.value),facts=capturedInlineRecipeFacts(b)!;
+  const point=facts.critic[kind==='second-point'?1:0],tr=EditorState.create({doc:b.doc}).tr;
+  if(kind==='code')tr.addMark(5,8,b.doc.type.schema.marks.code!.create());else tr.delete(point!.pmFrom,point!.pmTo);
+  expect(open(expected).doc.eq(tr.doc)).toBe(true);expect(prepareInlineRecipe(b,tr,old).ok).toBe(false);
+  const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(true);if(r.ok){expect(r.session.source).toBe(expected);expect(r.session.doc.eq(tr.doc)).toBe(true)}expect(b.source).toBe(raw);cache=next;
+ }
+});

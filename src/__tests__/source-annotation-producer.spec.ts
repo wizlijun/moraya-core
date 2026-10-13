@@ -159,3 +159,43 @@ it.each([
 ] as const)('point-only root deletion consumes only its own whole terminal: %s',(raw,expected)=>{
  const b=open(raw),point=markdown.capturedInlineRecipeFacts(b)!.critic[0]!,r=apply(b,EditorState.create({doc:b.doc}).tr.delete(point.pmFrom,point.pmTo),expected);expect(r.edits).toHaveLength(2);
 });
+
+it.each([
+ ['**{>>原注<<}**\n',''],
+ ['**{>>原注<<}A**\n','**A**\n'],
+] as const)('final I2 actual marked point deletion: %s',(raw,expected)=>{
+ const b=open(raw),p=markdown.capturedInlineRecipeFacts(b)!.critic[0]!;
+ expect(b.doc.nodeAt(p.pmFrom)!.marks.map(m=>m.type.name)).toEqual(['strong']);
+ const tr=EditorState.create({doc:b.doc}).tr.delete(p.pmFrom,p.pmTo);
+ expect(open(expected).doc.eq(tr.doc)).toBe(true);apply(b,tr,expected);expect(b.source).toBe(raw);
+});
+
+it.each([
+ ['\uFEFF**{>>原注<<}**\r\n','\uFEFF'],
+ ['*{>>原注<<}*\n',''],
+ ['***{>>原注<<}***\n',''],
+ ['**_{>>原注<<}_!A**\n','**!A**\n'],
+ ['*{>>原注<<}A*\n','*A*\n'],
+ ['>**{>>原注<<}**\n','>\n'],
+ ['>**{>>原注<<}**\n>\n> [r]: /u\n','>\n> [r]: /u\n'],
+ ['> [r]: /u\n>\n>**{>>原注<<}**\n','> [r]: /u\n>\n>\n'],
+ ['> A\r\n>\r\n>\r\n>***{>>原注<<}***','> A\r\n>\r\n>'],
+ [header+'| A | **{>>原注<<}** |\n',header+'| A |  |\n'],
+ ['**{>>原注<<}**\n\nTail &amp;\n','\nTail &amp;\n'],
+] as const)('final I2 removes only actual empty enclosing wrappers: %s',(raw,expected)=>{
+ const b=open(raw),facts=markdown.capturedInlineRecipeFacts(b)!,p=facts.critic[0]!;
+ expect(b.doc.nodeAt(p.pmFrom)!.marks.length).toBeGreaterThan(0);
+ const tr=EditorState.create({doc:b.doc}).tr.delete(p.pmFrom,p.pmTo);expect(open(expected).doc.eq(tr.doc)).toBe(true);
+ const r=apply(b,tr,expected);expect(b.source).toBe(raw);
+ for(const [i,old] of b.protectedSources.entries()){const delta=r.edits.filter(e=>e.to<=old.sourceFrom).reduce((n,e)=>n+e.text.length-e.to+e.from,0);expect(r.session.protectedSources[i]).toEqual({...old,sourceFrom:old.sourceFrom+delta,sourceTo:old.sourceTo+delta})}
+ const after=open(r.session.source),at=pos(after.doc,after.doc.firstChild!.type.name==='blockquote'?[0,0]:after.doc.firstChild!.type.name==='table'?[0,1,1,0]:[0]);
+ const next=EditorState.create({doc:after.doc}).tr.insertText('Z',at),edited=applySourceBlockTransaction(after,next);if(expected==='>\n> [r]: /u\n'){expect(edited).toEqual({ok:false,reason:'semantic-mismatch'});expect(after.source).toBe(expected)}else{expect(edited.ok).toBe(true);if(edited.ok)expect(edited.session.doc.eq(next.doc)).toBe(true)}
+});
+it('final I2 code point spelling is text and wider or mixed leaf deletions stay atomic',()=>{
+ const literal=open('`{>>原注<<}`\n');expect(markdown.capturedInlineRecipeFacts(literal)!.critic).toHaveLength(0);
+ const raw='**{>>原注<<}A**\n\n$x$\n',b=open(raw),p=markdown.capturedInlineRecipeFacts(b)!.critic[0]!,state=EditorState.create({doc:b.doc});
+ const atom=markdown.capturedInlineRecipeFacts(b)!.atoms.find(a=>a.node.type.name==='math_inline')!;
+ const wide=state.tr.delete(p.pmFrom,p.pmTo+1),mixed=state.tr.delete(p.pmFrom,p.pmTo);mixed.addMark(mixed.mapping.map(atom.pmFrom),mixed.mapping.map(atom.pmTo),b.doc.type.schema.marks.strong!.create());
+ expect(applySourceBlockTransaction(b,wide).ok).toBe(false);expect(applySourceBlockTransaction(b,mixed).ok).toBe(false);expect(b.source).toBe(raw);
+ expect(applySourceBlockTransaction(b,state.tr.delete(p.pmFrom,p.pmTo)).ok).toBe(true);
+});

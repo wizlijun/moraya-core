@@ -244,3 +244,56 @@ it.each([
 ] as const)('fix1 code stays innermost at exact nested and reverse boundaries %j',(raw,from,to,expected)=>{
  command(raw,[0],from,[0],to,s=>toggleMark(s.schema.marks.strong!),expected);
 });
+
+it.each([
+ ['A&amp;B _Keep_\n','`A&B` _Keep_\n'],
+ ['\\*A\\* _Keep_\n','`*A*` _Keep_\n'],
+ ['`*A*` _Keep_\n','\\*A\\* _Keep_\n'],
+] as const)('final I1 actual code toggle lexical context: %s',(raw,expected)=>{
+ command(raw,[0],0,[0],3,s=>(state,dispatch)=>toggleMark(s.schema.marks.code!)(state,tr=>{expect(open(expected).doc.eq(tr.doc)).toBe(true);dispatch?.(tr)}),expected);
+});
+
+it.each([
+ ['\\*AB\\* &amp; _Keep_\n',0,2,'`*A`B\\* &amp; _Keep_\n'],
+ ['`*AB*` &amp; _Keep_\n',0,2,'\\*A`B*` &amp; _Keep_\n'],
+ ['&#x1F600;&amp; _Keep_\n',0,3,'`😀&` _Keep_\n'],
+ ['&NotEqualTilde; _Keep_\n',0,2,'`≂̸` _Keep_\n'],
+ ['`&amp;` _Keep_\n',0,5,'&amp;amp; _Keep_\n'],
+ ['`A\nB` _Keep_\n',0,3,'A B _Keep_\n'],
+ ['`  A  `\n',0,3,'&#32;A&#32;\n'],
+ ['`  A  ` _Keep_\n',0,3,'&#32;A  _Keep_\n'],
+] as const)('final I1 partial and atomic code toggle: %s',(raw,from,to,expected)=>{
+ command(raw,[0],from,[0],to,s=>toggleMark(s.schema.marks.code!),expected);
+});
+it.each([
+ ['&#32;A&#32; _Keep_\n',3,'`  A  ` _Keep_\n'],
+ ['&#32;&#32; _Keep_\n',2,'`  ` _Keep_\n'],
+ ['A\\`B _Keep_\n',3,'``A`B`` _Keep_\n'],
+] as const)('final I1 native add code preserves actual boundary spaces: %s',(raw,size,expected)=>{
+ const b=open(raw),tr=EditorState.create({doc:b.doc}).tr.addMark(1,1+size,b.doc.type.schema.marks.code!.create());
+ expect(open(expected).doc.eq(tr.doc)).toBe(true);const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(true);if(r.ok){expect(r.session.source).toBe(expected);expect(r.session.doc.eq(tr.doc)).toBe(true)}
+});
+it('final I1 native multi-Step converts both directions and retains other code raw',()=>{
+ const raw='`*A*` A&amp;B `X\nY` &amp; _Keep_\n',b=open(raw),code=b.doc.type.schema.marks.code!;
+ const tr=EditorState.create({doc:b.doc}).tr.removeMark(1,4,code).addMark(5,8,code.create());expect(tr.steps).toHaveLength(2);
+ const expected='\\*A\\* `A&B` `X\nY` &amp; _Keep_\n';expect(open(expected).doc.eq(tr.doc)).toBe(true);
+ const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(true);if(r.ok){expect(r.session.source).toBe(expected);expect(r.session.doc.eq(tr.doc)).toBe(true)}expect(b.source).toBe(raw);
+});
+it.each([
+ ['A&#124;B','`A\\|B`'],
+ ['`A\\|B`','A&#124;B'],
+] as const)('final I1 actual table pipe context: %s',(raw,expected)=>{
+ command('| H | J |\n| --- | --- |\n| '+raw+' | &amp; _Keep_ |\n',[0,1,0,0],0,[0,1,0,0],3,s=>toggleMark(s.schema.marks.code!),
+ '| H | J |\n| --- | --- |\n| '+expected+' | &amp; _Keep_ |\n');
+});
+it.each(['&#x1F600;','😀','&NotEqualTilde;'])('final I1 split scalar or atomic entity is rejected: %s',raw=>{
+ const b=open(raw+' &amp; _Keep_\n'),tr=EditorState.create({doc:b.doc}).tr.addMark(1,2,b.doc.type.schema.marks.code!.create());
+ expect(applySourceBlockTransaction(b,tr).ok).toBe(false);expect(b.source).toBe(raw+' &amp; _Keep_\n');
+});
+
+it.each([
+ ['# A','\\# A'],['---','\\-\\-\\-'],['1. A','1\\. A'],['1) A','1\\) A'],['+ A','\\+ A'],['$x$','\\$x\\$'],
+] as const)('final I1 removal protects exposed Markdown syntax: %s',(text,encoded)=>{
+ const raw='`'+text+'`\n',expected=encoded+'\n';
+ command(raw,[0],0,[0],text.length,s=>(state,dispatch)=>toggleMark(s.schema.marks.code!)(state,tr=>{expect(open(expected).doc.eq(tr.doc)).toBe(true);dispatch?.(tr)}),expected);
+});

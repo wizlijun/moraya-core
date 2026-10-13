@@ -88,12 +88,16 @@ export function prepareClosedFenceRecipe(base:SourceSession,tr:Transaction,facts
 }
 type InlinePiece=Readonly<{kind:'retained';beforeFrom:number;beforeTo:number;afterFrom:number;afterTo:number}|{kind:'inserted';afterFrom:number;afterTo:number;step:number}>
 type BodyWork={body:number;beforeFrom:number;beforeTo:number;afterFrom:number;afterTo:number;pieces:InlinePiece[];dirtyEdges:number[]}
-type Unit={text:string;before?:number;step?:number;leaf?:PmNode;atom?:InlineAtomOccurrence;marks:readonly Mark[];raw?:InlineRawRange}
+type Unit={text:string;before?:number;beforeCode?:boolean;step?:number;leaf?:PmNode;atom?:InlineAtomOccurrence;marks:readonly Mark[];raw?:InlineRawRange}
 type Envelope={from:number;to:number;mark:Mark;old?:InlineEdge;open:string;close:string;keep:boolean;index:number}
 type Output={raw:InlineRawRange}|{text:string}
 const sameMarks=(a:readonly Mark[],b:readonly Mark[])=>a.length===b.length&&a.every((m,i)=>m.eq(b[i]!))
-function escapeText(text:string,cell:boolean):string {
- return text.replace(/[\\`*_[\]{}<>~^=&|]/g,c=>c==='&'?'&amp;':c==='|'?(cell?'&#124;':'\\|'):'\\'+c)
+function escapeText(text:string,cell:boolean,fromCode=false):string {
+ return text.replace(fromCode?/[\\`*_[\]{}<>~^=&|#$+.)-]/g:/[\\`*_[\]{}<>~^=&|]/g,c=>c==='&'?'&amp;':c==='|'?(cell?'&#124;':'\\|'):'\\'+c)
+}
+function encodeCodeContext(text:string,code:boolean,cell:boolean):string {
+ // Leaving code also exposes block markers and math delimiters.
+ return code?(cell?text.replace(/\|/g,'\\|'):text):escapeText(text,cell,true)
 }
 function editsFromOutput(base:SourceSession,body:InlineOccurrence,output:Output[]):SourceEdit[]|undefined {
  let cursor=body.sourceFrom,pending='',edits:SourceEdit[]=[]
@@ -128,7 +132,12 @@ function preparePointRecipe(base:SourceSession,tr:Transaction,facts:InlineRecipe
   const old=base.doc.nodeAt(step.from)!
   if(!canonicalNote(old))return no
   if(!step.slice.size){
-   const body=facts.bodies.find(b=>b.body===fact.body)!,edits:SourceEdit[]=[{from:fact.syntaxFrom,to:fact.syntaxTo,text:''}]
+   const body=facts.bodies.find(b=>b.body===fact.body)!
+   // These actual wrappers covered only the deleted leaf, so none of their
+   // content survives. Wrappers shared with neighbouring content stay intact.
+   const emptyEdges=facts.edges.filter(e=>e.body===fact.body&&e.pmFrom===fact.pmFrom&&e.pmTo===fact.pmTo&&e.marks.some(m=>m.type.name===e.family&&m.isInSet(old.marks)))
+   const edits:SourceEdit[]=[{from:fact.syntaxFrom,to:fact.syntaxTo,text:''},...emptyEdges.flatMap(e=>[{...e.open,text:''},{...e.close,text:''}])]
+   const contentTo=Math.max(fact.syntaxTo,...emptyEdges.map(e=>e.close.to))
    if(body.pmFrom===fact.pmFrom&&body.pmTo===fact.pmTo&&a.parent.type.name==='paragraph'){
     const separator=facts.separators.find(s=>s.right===fact.body)??facts.separators.find(s=>s.left===fact.body)
     const definitionSeparator=facts.definitionSeparators.find(s=>s.body===fact.body&&s.side==='after')
@@ -136,7 +145,7 @@ function preparePointRecipe(base:SourceSession,tr:Transaction,facts:InlineRecipe
     else if(definitionSeparator)edits.push({...definitionSeparator.range,text:''})
     // A top-level paragraph owns this exact terminal EOL. Once its only
     // leaf is gone, retaining that EOL would introduce another empty paragraph.
-    const root=base.roots.find(r=>r.tokenType==='paragraph_open'&&r.pmFrom+1===body.pmFrom&&r.pmTo-1===body.pmTo&&r.tailFrom===body.sourceTo&&fact.syntaxTo===r.tailFrom)
+    const root=base.roots.find(r=>r.tokenType==='paragraph_open'&&r.pmFrom+1===body.pmFrom&&r.pmTo-1===body.pmTo&&r.tailFrom===body.sourceTo&&contentTo===r.tailFrom)
     if(root&&/^(?:\r\n|\r|\n)$/.test(base.source.slice(root.tailFrom,root.sourceTo)))edits.push({from:root.tailFrom,to:root.sourceTo,text:''})
    }
    edits.sort((x,y)=>x.from-y.from);return {ok:true,edits,changedBodies:[fact.body]}
@@ -165,7 +174,7 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
      const before=b.pmFrom+offset+i
      const span=base.textSpans.find(s=>s.pmFrom<=before&&s.pmTo>before)
      const from=span&&point(span,before),to=span&&point(span,before+1)
-     list.push({text:node.isText?node.text![i]!:'',before,marks:node.marks,...(atom?{atom}:{}),...(from!==undefined&&to!==undefined?{raw:{from,to}}:{})})
+     list.push({text:node.isText?node.text![i]!:'',before,beforeCode:node.marks.some(m=>m.type.name==='code'),marks:node.marks,...(atom?{atom}:{}),...(from!==undefined&&to!==undefined?{raw:{from,to}}:{})})
     }
    });units.set(b.body,list)
   }
@@ -336,8 +345,8 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     for(let g=0;g<gaps.length;g++)if(!emittedGaps.has(g)&&(at===list.length||list[at]!.before!==undefined&&gaps[g]!.before<=list[at]!.before!)){output.push({raw:gaps[g]!.raw});emittedGaps.add(g)}
     for(const r of ordered.filter(r=>r.from===at))output.push(r.keep?{raw:r.old!.open}:{text:r.open})
     if(at===list.length)break
-    const u=list[at]!,code=u.marks.some(m=>m.type.name==='code')
-    const edgeSpace=!code&&/^[ \t]$/.test(u.text)&&((u.before===undefined&&(list.slice(list.slice(0,at).map(x=>x.text).lastIndexOf('\n')+1,at+1).every(x=>/^[ \t]$/.test(x.text))||list.slice(at,list.findIndex((x,i)=>i>at&&x.text==='\n')<0?undefined:list.findIndex((x,i)=>i>at&&x.text==='\n')).every(x=>/^[ \t]$/.test(x.text))))||ranges.some(r=>!r.keep&&['em','strong','strike_through','highlight'].includes(r.mark.type.name)&&r.from<=at&&at<r.to&&(list.slice(r.from,at+1).every(x=>/^[ \t]$/.test(x.text))||list.slice(at,r.to).every(x=>/^[ \t]$/.test(x.text)))))
+    const u=list[at]!,code=u.marks.some(m=>m.type.name==='code'),changedCode=u.before!==undefined&&u.beforeCode!==code
+    const edgeSpace=!code&&/^[ \t]$/.test(u.text)&&(((u.before===undefined||changedCode)&&(list.slice(list.slice(0,at).map(x=>x.text).lastIndexOf('\n')+1,at+1).every(x=>/^[ \t]$/.test(x.text))||list.slice(at,list.findIndex((x,i)=>i>at&&x.text==='\n')<0?undefined:list.findIndex((x,i)=>i>at&&x.text==='\n')).every(x=>/^[ \t]$/.test(x.text))))||ranges.some(r=>!r.keep&&['em','strong','strike_through','highlight'].includes(r.mark.type.name)&&r.from<=at&&at<r.to&&(list.slice(r.from,at+1).every(x=>/^[ \t]$/.test(x.text))||list.slice(at,r.to).every(x=>/^[ \t]$/.test(x.text)))))
     if(adjacentEntities.has(at)){
      const scalar=(u.text+(list[at+1]?.text??'')).codePointAt(0)!
      output.push({text:'&#'+scalar+';'})
@@ -357,8 +366,13 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
       if(!span)return unmapped
       const count=span.pmTo-span.pmFrom,group=list.slice(at,at+count)
       if(group.length!==count||group.some((x,i)=>x.before!==span.pmFrom+i||!sameMarks(x.marks,u.marks))||ranges.some(r=>r.from>at&&r.from<at+count||r.to>at&&r.to<at+count))return unmapped
-      output.push({raw:{from:span.sourceFrom,to:span.sourceTo}});at+=count-1
-     }else output.push({raw:u.raw})
+      const raw={from:span.sourceFrom,to:span.sourceTo},text=group.map(x=>x.text).join('')
+      const encoded=changedCode?encodeCodeContext(text,code,body.kind==='table-cell'):undefined
+      output.push(encoded!==undefined&&encoded!==base.source.slice(raw.from,raw.to)?{text:encoded}:{raw});at+=count-1
+     }else{
+      const encoded=changedCode?encodeCodeContext(u.text,code,body.kind==='table-cell'):undefined
+      output.push(encoded!==undefined&&encoded!==base.source.slice(u.raw.from,u.raw.to)?{text:encoded}:{raw:u.raw})
+     }
     }
     else if(u.leaf)output.push({text:u.leaf.attrs.isInline?'\n':'\\\n'})
     else output.push({text:code?(body.kind==='table-cell'?u.text.replace(/\|/g,'\\|'):u.text):escapeText(u.text,body.kind==='table-cell')})

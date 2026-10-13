@@ -8493,8 +8493,11 @@ function prepareClosedFenceRecipe(base, tr, facts) {
   return { ok: true, edits };
 }
 var sameMarks = (a, b) => a.length === b.length && a.every((m, i) => m.eq(b[i]));
-function escapeText2(text2, cell) {
-  return text2.replace(/[\\`*_[\]{}<>~^=&|]/g, (c2) => c2 === "&" ? "&amp;" : c2 === "|" ? cell ? "&#124;" : "\\|" : "\\" + c2);
+function escapeText2(text2, cell, fromCode = false) {
+  return text2.replace(fromCode ? /[\\`*_[\]{}<>~^=&|#$+.)-]/g : /[\\`*_[\]{}<>~^=&|]/g, (c2) => c2 === "&" ? "&amp;" : c2 === "|" ? cell ? "&#124;" : "\\|" : "\\" + c2);
+}
+function encodeCodeContext(text2, code2, cell) {
+  return code2 ? cell ? text2.replace(/\|/g, "\\|") : text2 : escapeText2(text2, cell, true);
 }
 function editsFromOutput(base, body, output) {
   let cursor = body.sourceFrom, pending = "", edits = [];
@@ -8536,13 +8539,16 @@ function preparePointRecipe(base, tr, facts) {
     const old = base.doc.nodeAt(step.from);
     if (!canonicalNote(old)) return no;
     if (!step.slice.size) {
-      const body2 = facts.bodies.find((b2) => b2.body === fact.body), edits = [{ from: fact.syntaxFrom, to: fact.syntaxTo, text: "" }];
+      const body2 = facts.bodies.find((b2) => b2.body === fact.body);
+      const emptyEdges = facts.edges.filter((e) => e.body === fact.body && e.pmFrom === fact.pmFrom && e.pmTo === fact.pmTo && e.marks.some((m) => m.type.name === e.family && m.isInSet(old.marks)));
+      const edits = [{ from: fact.syntaxFrom, to: fact.syntaxTo, text: "" }, ...emptyEdges.flatMap((e) => [{ ...e.open, text: "" }, { ...e.close, text: "" }])];
+      const contentTo = Math.max(fact.syntaxTo, ...emptyEdges.map((e) => e.close.to));
       if (body2.pmFrom === fact.pmFrom && body2.pmTo === fact.pmTo && a.parent.type.name === "paragraph") {
         const separator = facts.separators.find((s) => s.right === fact.body) ?? facts.separators.find((s) => s.left === fact.body);
         const definitionSeparator = facts.definitionSeparators.find((s) => s.body === fact.body && s.side === "after");
         if (separator) edits.push({ ...separator.range, text: "" });
         else if (definitionSeparator) edits.push({ ...definitionSeparator.range, text: "" });
-        const root = base.roots.find((r2) => r2.tokenType === "paragraph_open" && r2.pmFrom + 1 === body2.pmFrom && r2.pmTo - 1 === body2.pmTo && r2.tailFrom === body2.sourceTo && fact.syntaxTo === r2.tailFrom);
+        const root = base.roots.find((r2) => r2.tokenType === "paragraph_open" && r2.pmFrom + 1 === body2.pmFrom && r2.pmTo - 1 === body2.pmTo && r2.tailFrom === body2.sourceTo && contentTo === r2.tailFrom);
         if (root && /^(?:\r\n|\r|\n)$/.test(base.source.slice(root.tailFrom, root.sourceTo))) edits.push({ from: root.tailFrom, to: root.sourceTo, text: "" });
       }
       edits.sort((x, y) => x.from - y.from);
@@ -8572,7 +8578,7 @@ function prepareInlineRecipe(base, tr, facts) {
           const before = b.pmFrom + offset + i;
           const span = base.textSpans.find((s) => s.pmFrom <= before && s.pmTo > before);
           const from = span && point(span, before), to = span && point(span, before + 1);
-          list.push({ text: node.isText ? node.text[i] : "", before, marks: node.marks, ...atom ? { atom } : {}, ...from !== void 0 && to !== void 0 ? { raw: { from, to } } : {} });
+          list.push({ text: node.isText ? node.text[i] : "", before, beforeCode: node.marks.some((m) => m.type.name === "code"), marks: node.marks, ...atom ? { atom } : {}, ...from !== void 0 && to !== void 0 ? { raw: { from, to } } : {} });
         }
       });
       units.set(b.body, list);
@@ -8800,8 +8806,8 @@ function prepareInlineRecipe(base, tr, facts) {
         }
         for (const r2 of ordered.filter((r3) => r3.from === at)) output.push(r2.keep ? { raw: r2.old.open } : { text: r2.open });
         if (at === list.length) break;
-        const u = list[at], code2 = u.marks.some((m) => m.type.name === "code");
-        const edgeSpace = !code2 && /^[ \t]$/.test(u.text) && (u.before === void 0 && (list.slice(list.slice(0, at).map((x) => x.text).lastIndexOf("\n") + 1, at + 1).every((x) => /^[ \t]$/.test(x.text)) || list.slice(at, list.findIndex((x, i) => i > at && x.text === "\n") < 0 ? void 0 : list.findIndex((x, i) => i > at && x.text === "\n")).every((x) => /^[ \t]$/.test(x.text))) || ranges.some((r2) => !r2.keep && ["em", "strong", "strike_through", "highlight"].includes(r2.mark.type.name) && r2.from <= at && at < r2.to && (list.slice(r2.from, at + 1).every((x) => /^[ \t]$/.test(x.text)) || list.slice(at, r2.to).every((x) => /^[ \t]$/.test(x.text)))));
+        const u = list[at], code2 = u.marks.some((m) => m.type.name === "code"), changedCode = u.before !== void 0 && u.beforeCode !== code2;
+        const edgeSpace = !code2 && /^[ \t]$/.test(u.text) && ((u.before === void 0 || changedCode) && (list.slice(list.slice(0, at).map((x) => x.text).lastIndexOf("\n") + 1, at + 1).every((x) => /^[ \t]$/.test(x.text)) || list.slice(at, list.findIndex((x, i) => i > at && x.text === "\n") < 0 ? void 0 : list.findIndex((x, i) => i > at && x.text === "\n")).every((x) => /^[ \t]$/.test(x.text))) || ranges.some((r2) => !r2.keep && ["em", "strong", "strike_through", "highlight"].includes(r2.mark.type.name) && r2.from <= at && at < r2.to && (list.slice(r2.from, at + 1).every((x) => /^[ \t]$/.test(x.text)) || list.slice(at, r2.to).every((x) => /^[ \t]$/.test(x.text)))));
         if (adjacentEntities.has(at)) {
           const scalar = (u.text + (list[at + 1]?.text ?? "")).codePointAt(0);
           output.push({ text: "&#" + scalar + ";" });
@@ -8825,9 +8831,14 @@ function prepareInlineRecipe(base, tr, facts) {
             if (!span) return unmapped;
             const count = span.pmTo - span.pmFrom, group = list.slice(at, at + count);
             if (group.length !== count || group.some((x, i) => x.before !== span.pmFrom + i || !sameMarks(x.marks, u.marks)) || ranges.some((r2) => r2.from > at && r2.from < at + count || r2.to > at && r2.to < at + count)) return unmapped;
-            output.push({ raw: { from: span.sourceFrom, to: span.sourceTo } });
+            const raw = { from: span.sourceFrom, to: span.sourceTo }, text2 = group.map((x) => x.text).join("");
+            const encoded = changedCode ? encodeCodeContext(text2, code2, body.kind === "table-cell") : void 0;
+            output.push(encoded !== void 0 && encoded !== base.source.slice(raw.from, raw.to) ? { text: encoded } : { raw });
             at += count - 1;
-          } else output.push({ raw: u.raw });
+          } else {
+            const encoded = changedCode ? encodeCodeContext(u.text, code2, body.kind === "table-cell") : void 0;
+            output.push(encoded !== void 0 && encoded !== base.source.slice(u.raw.from, u.raw.to) ? { text: encoded } : { raw: u.raw });
+          }
         } else if (u.leaf) output.push({ text: u.leaf.attrs.isInline ? "\n" : "\\\n" });
         else output.push({ text: code2 ? body.kind === "table-cell" ? u.text.replace(/\|/g, "\\|") : u.text : escapeText2(u.text, body.kind === "table-cell") });
       }
