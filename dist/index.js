@@ -10189,7 +10189,7 @@ function splitsInlineText(position) {
   const node = position.parent.child(position.index());
   return node.isText && splitsSurrogate(node.text, position.textOffset);
 }
-function authorizeStepRoots(before, step, ownership, authorized) {
+function authorizeStepRoots(before, step, ownership, authorized, base, after) {
   const { from, to } = step;
   if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to < from || to > before.content.size)
     throw new UnsupportedBlockTransaction();
@@ -10209,7 +10209,12 @@ function authorizeStepRoots(before, step, ownership, authorized) {
   if (first < 0 || last < first || last >= before.childCount) throw new UnsupportedBlockTransaction();
   for (let child = first; child <= last; child++) {
     const root = ownership.ownerByChild[child];
-    if (!root) throw new UnsupportedBlockTransaction();
+    if (!root) {
+      const covers = (e) => e.childFrom <= child && child < e.childTo;
+      const known = base.gaps.some((g) => g.synthetic.some(covers)) || base.layout.blankLines.some((u) => u.role === "empty-paragraph" && covers(u.emission)) || !!base.layout.fallback && covers(base.layout.fallback.emission);
+      if (step instanceof ReplaceStep4 || !known || after.childCount !== before.childCount || !before.child(child).eq(base.doc.child(child)) || !after.child(child).eq(before.child(child))) throw new UnsupportedBlockTransaction();
+      continue;
+    }
     authorized.add(root.id);
   }
 }
@@ -10221,7 +10226,7 @@ function changedNaturalRoots(base, tr, ownership) {
       throw new UnsupportedBlockTransaction();
     const before = tr.docs[i];
     if (before.childCount !== base.doc.childCount) throw new UnsupportedBlockTransaction();
-    authorizeStepRoots(before, step, ownership, authorized);
+    authorizeStepRoots(before, step, ownership, authorized, base, tr.docs[i + 1] ?? tr.doc);
   }
   if (!base.doc.sameMarkup(tr.doc) || base.doc.childCount !== tr.doc.childCount)
     throw new UnsupportedBlockTransaction();

@@ -22,7 +22,7 @@ it('invalid delta is rejected before becoming a history event',()=>{
  expect(()=>new SourceHistoryStep([])).toThrow()
 })
 
-import {Mapping} from 'prosemirror-transform'
+import {Mapping,StepMap} from 'prosemirror-transform'
 import {TableLayoutStep,withSourceHistoryAttempt,type RawDelta} from '../source-history'
 it('keeps invertible adjacent edits and rejects colliding inverse anchors and cancelling groups',()=>{
  const d=delta(),adjacent=[{from:0,to:1,removed:'a',text:'A'},{from:1,to:2,removed:'b',text:'B'}]
@@ -41,8 +41,8 @@ it('multi-delta ABA preserves events and binding transitions in reverse order',(
  const s=new SourceHistoryStep([a,b]);expect(s.deltas).toHaveLength(2)
  expect(s.invert().deltas.map(d=>d.beforeLineage)).toEqual(['c','b'])
  expect(s.invert().invert().toJSON()).toEqual(s.toJSON())
- const mapped:Step=s;expect(mapped.map(new Mapping())!.toJSON()).toEqual(s.toJSON())
- expect(mapped.map(new Mapping())).not.toBe(s)
+ const mapping=new Mapping([new StepMap([0,0,20])]);expect(s.map(mapping).toJSON()).toEqual(s.toJSON())
+ expect(s.map(mapping)).not.toBe(s)
  expect(Object.isFrozen(s.deltas[0]!.bindings!.before.roots[0])).toBe(true)
 })
 it.each([
@@ -67,7 +67,7 @@ it('JSON envelope is strict and copies large arrays without argument spread',()=
 it('table layout only changes its reversible data and refuses malformed images',()=>{
  const doc=defaultSchema.topNodeType.createAndFill()!,s=new TableLayoutStep([{id:'t',before:null,after:{position:0,columns:2,widths:[null,30]}}])
  expect(s.apply(doc).doc).toBe(doc);expect(Step.fromJSON(defaultSchema,s.toJSON()).toJSON()).toEqual(s.toJSON())
- expect(s.invert().invert().toJSON()).toEqual(s.toJSON());expect(s.map().toJSON()).toEqual(s.toJSON());expect(s.merge()).toBeNull()
+ expect(s.invert().invert().toJSON()).toEqual(s.toJSON());expect(s.map(new Mapping([new StepMap([0,0,20])])).toJSON()).toEqual(s.toJSON());expect(s.merge()).toBeNull()
  for(const after of [null,{position:-1,columns:1,widths:[10]},{position:0,columns:0,widths:[]},{position:0,columns:1,widths:[Infinity]},{position:0,columns:2,widths:[5]}])expect(()=>new TableLayoutStep([{id:'t',before:null,after}])).toThrow()
  expect(()=>new TableLayoutStep([s.deltas[0]!,s.deltas[0]!])).toThrow()
  expect(()=>TableLayoutStep.fromJSON(defaultSchema,{...s.toJSON(),v:0})).toThrow()

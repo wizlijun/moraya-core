@@ -1,5 +1,5 @@
 import type {Node, Schema} from 'prosemirror-model'
-import {Step, StepMap, StepResult} from 'prosemirror-transform'
+import {Step, StepMap, StepResult, type Mappable} from 'prosemirror-transform'
 
 export type RawEdit = Readonly<{from:number;to:number;removed:string;text:string}>
 export type RootIdRow = Readonly<{rootOrdinal:number;id:string}>
@@ -112,14 +112,14 @@ export class SourceHistoryStep extends Step {
   return Object.freeze(result)
  }
  apply(doc:Node):StepResult {try{rawDeltas(this.deltas);return StepResult.ok(doc)}catch{failActiveHistoryAttempts();return StepResult.fail('Invalid source history payload')}}
- invert():SourceHistoryStep {
+ invert(_doc?:Node):SourceHistoryStep {
   const result:RawDelta[]=[]
   for(let i=this.deltas.length-1;i>=0;i--){const d=this.deltas[i]!;result.push({beforeLineage:d.afterLineage,afterLineage:d.beforeLineage,beforeHash:d.afterHash,afterHash:d.beforeHash,edits:SourceHistoryStep.invertEdits(d.edits),...(d.bindings?{bindings:{before:d.bindings.after,after:d.bindings.before}}:{})})}
   return new SourceHistoryStep(result)
  }
  getMap():StepMap{return StepMap.empty}
- map():SourceHistoryStep{return new SourceHistoryStep(this.deltas)}
- merge():null{return null}
+ map(_mapping?:Mappable):SourceHistoryStep{return new SourceHistoryStep(this.deltas)}
+ merge(_other?:Step):null{return null}
  toJSON(){return {stepType:'morayaSourceHistoryV1',v:1,deltas:rawDeltas(this.deltas)}}
  static fromJSON(_schema:Schema,json:unknown):SourceHistoryStep{return new SourceHistoryStep(rawDeltas(envelope(json,'morayaSourceHistoryV1')))}
 }
@@ -127,10 +127,10 @@ export class TableLayoutStep extends Step {
  readonly deltas:readonly TableDelta[]
  constructor(deltas:readonly TableDelta[]){super();this.deltas=tableDeltas(deltas);Object.freeze(this)}
  apply(doc:Node):StepResult {try{tableDeltas(this.deltas);return StepResult.ok(doc)}catch{failActiveHistoryAttempts();return StepResult.fail('Invalid table layout payload')}}
- invert():TableLayoutStep {const result:TableDelta[]=[];for(let i=this.deltas.length-1;i>=0;i--){const d=this.deltas[i]!;result.push({id:d.id,before:d.after,after:d.before})}return new TableLayoutStep(result)}
+ invert(_doc?:Node):TableLayoutStep {const result:TableDelta[]=[];for(let i=this.deltas.length-1;i>=0;i--){const d=this.deltas[i]!;result.push({id:d.id,before:d.after,after:d.before})}return new TableLayoutStep(result)}
  getMap():StepMap{return StepMap.empty}
- map():TableLayoutStep{return new TableLayoutStep(this.deltas)}
- merge():null{return null}
+ map(_mapping?:Mappable):TableLayoutStep{return new TableLayoutStep(this.deltas)}
+ merge(_other?:Step):null{return null}
  toJSON(){return {stepType:'morayaTableLayoutV1',v:1,deltas:tableDeltas(this.deltas)}}
  static fromJSON(_schema:Schema,json:unknown):TableLayoutStep{return new TableLayoutStep(tableDeltas(envelope(json,'morayaTableLayoutV1')))}
 }

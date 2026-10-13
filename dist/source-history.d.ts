@@ -1,5 +1,5 @@
 import { Node, Schema } from 'prosemirror-model';
-import { Step, StepResult, StepMap } from 'prosemirror-transform';
+import { Step, StepResult, StepMap, Mappable } from 'prosemirror-transform';
 
 type RawEdit = Readonly<{
     from: number;
@@ -48,10 +48,10 @@ declare class SourceHistoryStep extends Step {
     static canonicalEdits(input: readonly RawEdit[]): readonly RawEdit[];
     static invertEdits(input: readonly RawEdit[]): readonly RawEdit[];
     apply(doc: Node): StepResult;
-    invert(): SourceHistoryStep;
+    invert(_doc?: Node): SourceHistoryStep;
     getMap(): StepMap;
-    map(): SourceHistoryStep;
-    merge(): null;
+    map(_mapping?: Mappable): SourceHistoryStep;
+    merge(_other?: Step): null;
     toJSON(): {
         stepType: string;
         v: number;
@@ -73,10 +73,10 @@ declare class TableLayoutStep extends Step {
     readonly deltas: readonly TableDelta[];
     constructor(deltas: readonly TableDelta[]);
     apply(doc: Node): StepResult;
-    invert(): TableLayoutStep;
+    invert(_doc?: Node): TableLayoutStep;
     getMap(): StepMap;
-    map(): TableLayoutStep;
-    merge(): null;
+    map(_mapping?: Mappable): TableLayoutStep;
+    merge(_other?: Step): null;
     toJSON(): {
         stepType: string;
         v: number;

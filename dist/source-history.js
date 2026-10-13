@@ -176,7 +176,7 @@ var SourceHistoryStep = class _SourceHistoryStep extends Step {
       return StepResult.fail("Invalid source history payload");
     }
   }
-  invert() {
+  invert(_doc) {
     const result = [];
     for (let i = this.deltas.length - 1; i >= 0; i--) {
       const d = this.deltas[i];
@@ -187,10 +187,10 @@ var SourceHistoryStep = class _SourceHistoryStep extends Step {
   getMap() {
     return StepMap.empty;
   }
-  map() {
+  map(_mapping) {
     return new _SourceHistoryStep(this.deltas);
   }
-  merge() {
+  merge(_other) {
     return null;
   }
   toJSON() {
@@ -216,7 +216,7 @@ var TableLayoutStep = class _TableLayoutStep extends Step {
       return StepResult.fail("Invalid table layout payload");
     }
   }
-  invert() {
+  invert(_doc) {
     const result = [];
     for (let i = this.deltas.length - 1; i >= 0; i--) {
       const d = this.deltas[i];
@@ -227,10 +227,10 @@ var TableLayoutStep = class _TableLayoutStep extends Step {
   getMap() {
     return StepMap.empty;
   }
-  map() {
+  map(_mapping) {
     return new _TableLayoutStep(this.deltas);
   }
-  merge() {
+  merge(_other) {
     return null;
   }
   toJSON() {

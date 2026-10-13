@@ -108,13 +108,21 @@ it.each([12,24,48,80,160])('production addMark across %i roots produces per-root
  expect(inspectedTopChildren).toBeLessThanOrEqual(count*12+32)
  expect(wholeDocumentComparisons).toBeLessThanOrEqual(1)
 })
-it('allows production multi-step marks around a synthetic gap but rejects a step that claims it',()=>{
+it('allows production and single wide marks across a known unchanged synthetic gap',()=>{
  const base=open('A\n\n\nB'),strong=base.doc.type.schema.marks.strong!.create()
  const actual=transaction(base).addMark(1,base.doc.content.size-1,strong)
  expect(actual.steps).toHaveLength(2)
  const accepted=accept(base,actual)
  expect(accepted.session.source).toBe('**A**\n\n\n**B**')
- reject(base,transaction(base).step(new AddMarkStep(1,base.doc.content.size-1,strong)))
+ const step=new AddMarkStep(1,base.doc.content.size-1,strong),wide=transaction(base).step(step),before=fingerprint(base),docs=[...wide.docs]
+ const result=accept(base,wide)
+ expect(result.session.source).toBe('**A**\n\n\n**B**')
+ expect(result.edits).toEqual([{from:0,to:0,text:'**'},{from:1,to:1,text:'**'},{from:4,to:4,text:'**'},{from:5,to:5,text:'**'}])
+ expect(wide.steps).toEqual([step]);expect(wide.steps[0]).toBe(step);expect(wide.docs).toEqual(docs)
+ expect([step.from,step.to]).toEqual([1,base.doc.content.size-1])
+ expect(result.session.doc.child(1).eq(base.doc.child(1))).toBe(true)
+ expect(result.session.protectedSources).toEqual(base.protectedSources)
+ expect(fingerprint(base)).toBe(before)
 })
 it('rejects a custom step subclass even if its JSON says addMark',()=>{
  class DisguisedMarkStep extends AddMarkStep {

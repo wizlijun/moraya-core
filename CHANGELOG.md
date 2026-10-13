@@ -4,7 +4,7 @@ All notable changes to `@moraya/core` are documented here. SemVer.
 
 ## Unreleased
 
-- Add the isolated `source-history` entry with reversible raw/binding and table-layout Steps, strict JSON payloads, and synchronous failure scopes. Rich list commands can prepare exact boundary comments before source validation, including nested list seams. / 新增独立历史载荷入口与严格可逆校验；富文本列表操作可在保真校验前补充必要边界注释（含嵌套列表）。文件控制器与界面接线后续实现。
+- Add the isolated `source-history` entry with reversible raw/binding and table-layout Steps, strict JSON payloads, and synchronous failure scopes. Rich list commands can prepare exact boundary comments before source validation, including nested list seams. / 新增独立历史载荷入口与严格可逆校验；富文本列表操作可在保真校验前补充必要边界注释（含嵌套列表）。文件控制器与界面接线后续实现。 Single wide mark Steps may cross certified unchanged synthetic blank paragraphs without shrinking their original range. / 单个宽范围格式步骤可跨越已证明未变的空段，仍完整审计原范围。
 
 - Existing math block commands use the actual editor schema and source-save canonical empty blocks as `$$ $$`. Real math InputRules and whole inline math insertion/deletion preserve neighbouring source spelling; mathematical payload editing remains in Source mode. Structural math permissions follow complete original step witnesses before rendering.
 

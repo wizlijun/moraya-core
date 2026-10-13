@@ -7,7 +7,7 @@ import { EditorState, type Transaction } from 'prosemirror-state'
 import { AddMarkStep, RemoveMarkStep, ReplaceStep, Mapping } from 'prosemirror-transform'
 import { serializeSourceRootMarkdown, serializeSourceInlineBody, capturedInlineBodies, capturedEmptyBodies, sourceRootHasClosedFences, capturedSourceLists, type SourceListStyle, type FileWorkAccumulator } from './markdown'
 import type { SourceLayout, SourceListLexeme } from './source-layout'
-import type { SourceRoot, SourceGap, SourceEdit, ProtectedSource } from './source-ownership'
+import type { SourceRoot, SourceGap, SourceEdit, ProtectedSource, SyntheticEmission } from './source-ownership'
 import {classifyTransaction,applyStructuralTransaction,UnsupportedSourceStructure,type StructuralRendered} from './source-structure'
 
 export type TextSourceSpan = Readonly<{
@@ -298,7 +298,7 @@ function splitsInlineText(position:ResolvedPos):boolean {
  return node.isText&&splitsSurrogate(node.text!,position.textOffset)
 }
 function authorizeStepRoots(before:PmNode,step:AddMarkStep|RemoveMarkStep|ReplaceStep,
- ownership:RootIndex,authorized:Set<number>):void {
+ ownership:RootIndex,authorized:Set<number>,base:SourceSession,after:PmNode):void {
  const {from,to}=step
  if(!Number.isInteger(from)||!Number.isInteger(to)||from<0||to<from||to>before.content.size)
   throw new UnsupportedBlockTransaction()
@@ -317,7 +317,17 @@ function authorizeStepRoots(before:PmNode,step:AddMarkStep|RemoveMarkStep|Replac
  if(first<0||last<first||last>=before.childCount)throw new UnsupportedBlockTransaction()
  for(let child=first;child<=last;child++) {
   const root=ownership.ownerByChild[child]
-  if(!root)throw new UnsupportedBlockTransaction()
+  if(!root){
+   const covers=(e:SyntheticEmission)=>e.childFrom<=child&&child<e.childTo
+   const known=base.gaps.some(g=>g.synthetic.some(covers))
+    ||base.layout.blankLines.some(u=>u.role==='empty-paragraph'&&covers(u.emission))
+    ||!!base.layout.fallback&&covers(base.layout.fallback.emission)
+   // Exact mark steps preserve child positions and cannot authorize editing
+   // layout content. Check this actual step, not merely the final document.
+   if(step instanceof ReplaceStep||!known||after.childCount!==before.childCount
+    ||!before.child(child).eq(base.doc.child(child))||!after.child(child).eq(before.child(child)))throw new UnsupportedBlockTransaction()
+   continue
+  }
   authorized.add(root.id)
  }
 }
@@ -331,7 +341,7 @@ function changedNaturalRoots(base:SourceSession,tr:Transaction,ownership:RootInd
    throw new UnsupportedBlockTransaction()
   const before=tr.docs[i]!
   if(before.childCount!==base.doc.childCount)throw new UnsupportedBlockTransaction()
-  authorizeStepRoots(before,step as ReplaceStep|AddMarkStep|RemoveMarkStep,ownership,authorized)
+  authorizeStepRoots(before,step as ReplaceStep|AddMarkStep|RemoveMarkStep,ownership,authorized,base,tr.docs[i+1]??tr.doc)
  }
  // Standard mark steps preserve structure. A same-inline-parent ReplaceStep
  // with a closed inline slice preserves all top-child boundaries by induction.
