@@ -4,6 +4,8 @@ All notable changes to `@moraya/core` are documented here. SemVer.
 
 ## Unreleased
 
+- Source inline formatting splits crossing mark envelopes into valid nesting, keeps code spans inside other marks, and preserves certified untouched math occurrences in the same body without granting formula editing permission.
+
 - Source transactions preserve original inline syntax during partial and cross-body mark commands, actual inline InputRules, editable code spans, and marked/link first input in certified empty bodies. Closed top-level code fences grow only the necessary markers on collisions. Source and consumer tests are committed; compiled artifacts and installed-host acceptance follow in the annotation integration task.
 
 - Source-preserving ordinary first input now materializes certified empty paragraphs, headings, list/quote/footnote bodies, table cells and closed code/frontmatter bodies while retaining untouched bytes. Restores installed fence interruption rules. Source capture also preserves actual nested blank paragraphs and supports consecutive Enter/first-input transactions, including closed-code newlines and first input beside protected reference definitions. Compiled artifacts and installed-host command coverage accompany this foundation; full file UI/history integration follows separately.

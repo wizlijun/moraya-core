@@ -37,3 +37,32 @@ it('actual annotation and paired HTML retain outer edge facts',()=>{
  const tr=EditorState.create({doc:b.doc}).tr.addMark(7,11,b.doc.type.schema.marks.strong!.create()),r=applySourceBlockTransaction(b,tr);
  expect(r.ok).toBe(true);if(!r.ok)throw Error(r.reason);expect(r.session.source).toBe('{==Alpha **Beta**==}{>>keep<<} <span>Tail</span>\n');expect(r.session.doc.eq(tr.doc)).toBe(true);
 });
+import {prepareInlineRecipe} from '../source-inline-recipe';
+it('fix1 actual math occurrences retain identity across three replay generations',()=>{
+ const raw='> Alpha $x$ $$x$$ $x$\r\n',first=captureFilePipeline(raw);expect(first.ok).toBe(true);if(!first.ok)throw Error(first.reason);
+ const session=(v:typeof first.value):SourceSession=>({revision:0,source:raw,doc:v.doc,textSpans:v.textRuns,roots:v.roots,gaps:v.gaps,layout:v.layout,protectedSources:v.protectedSources});
+ const original=session(first.value),facts=capturedInlineRecipeFacts(original)!,ranges=facts.atoms.map(a=>({body:a.body,from:a.pmFrom,to:a.pmTo,raw:raw.slice(a.sourceFrom,a.sourceTo),node:a.node.toJSON()}));
+ expect(ranges.map(a=>a.raw)).toEqual(['$x$','$$x$$','$x$']);expect(new Set(facts.atoms.map(a=>a.pmFrom)).size).toBe(3);
+ let cached=first;
+ for(let i=0;i<3;i++){
+  const replay=replayFilePipeline(cached.cache);expect(replay.ok).toBe(true);if(!replay.ok)throw Error(replay.reason);
+  const base=session(replay.value),next=capturedInlineRecipeFacts(base)!;
+  expect(next.atoms.map(a=>({body:a.body,from:a.pmFrom,to:a.pmTo,raw:raw.slice(a.sourceFrom,a.sourceTo),node:a.node.toJSON()}))).toEqual(ranges);
+  for(const a of next.atoms)expect(base.doc.nodeAt(a.pmFrom)).toBe(a.node);
+  expect(next.atoms[0]!.node).not.toBe(facts.atoms[0]!.node);
+  const at=pos(base.doc,[0,0]),tr=EditorState.create({doc:base.doc}).tr.addMark(at,at+2,base.doc.type.schema.marks.strong!.create());
+  expect(prepareInlineRecipe(base,tr,facts).ok).toBe(false);
+  const r=applySourceBlockTransaction(base,tr);expect(r.ok).toBe(true);if(r.ok)expect(r.session.source).toBe('> **Al**pha $x$ $$x$$ $x$\r\n');cached=replay;
+ }
+});
+it('fix1 raw line deltas and foreign recapture preserve only the actual math occurrences',()=>{
+ const raw='A\n\n> Alpha $x$ $$x$$\n',initial=open(raw),moved=prepareFileSourceEdits(initial,{expectedRevision:initial.revision,edits:[{from:0,to:1,removed:'A',text:'Long\n\nPrefix'}]});
+ expect(moved.ok).toBe(true);if(!moved.ok)throw Error(moved.reason);const base=moved.session,facts=capturedInlineRecipeFacts(base)!,before=capturedInlineRecipeFacts(initial)!;
+ for(const [i,a] of facts.atoms.entries()){expect(a.sourceFrom-before.atoms[i]!.sourceFrom).toBe(11);expect(base.source.slice(a.sourceFrom,a.sourceTo)).toBe(i?'$$x$$':'$x$')}
+ const from=pos(base.doc,[2,0]),tr=EditorState.create({doc:base.doc}).tr.addMark(from,from+2,base.doc.type.schema.marks.strong!.create());
+ const foreign={...base,layout:JSON.parse(JSON.stringify(base.layout)) as typeof base.layout};expect(capturedInlineRecipeFacts(foreign)).toBeUndefined();
+ const r=applySourceBlockTransaction(foreign,tr);expect(r.ok).toBe(true);if(!r.ok)throw Error(r.reason);expect(r.session.source).toBe('Long\n\nPrefix\n\n> **Al**pha $x$ $$x$$\n');expect(r.session.doc.eq(tr.doc)).toBe(true);
+ const forgedFacts={...facts,atoms:facts.atoms.map(a=>({...a,sourceFrom:a.sourceFrom+1}))};expect(prepareInlineRecipe(base,tr,forgedFacts).ok).toBe(false);
+ const corrupt={...foreign,textSpans:foreign.textSpans.map((s,i)=>i?s:{...s,sourceFrom:s.sourceFrom+1})};expect(applySourceBlockTransaction(corrupt,tr).ok).toBe(false);
+ expect(applySourceBlockTransaction(base,tr).ok).toBe(true);expect(base.source).toBe('Long\n\nPrefix\n\n> Alpha $x$ $$x$$\n');
+});

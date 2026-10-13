@@ -1,4 +1,4 @@
-import type {InlineRecipeFacts,InlineEdge,ClosedFenceBody} from './source-inline-recipe'
+import type {InlineRecipeFacts,InlineEdge,ClosedFenceBody,InlineAtomOccurrence} from './source-inline-recipe'
 import type {SourceSession} from './source-fidelity'
 /**
  * Markdown ↔ ProseMirror Doc roundtrip for `@moraya/core`.
@@ -444,7 +444,7 @@ type SourceRun = { text: string; kind?: undefined; trace?: undefined }
   | { text: string; kind: 'linear' | 'atomic'; trace: SourceTrace }
 type Capture = {
   file?: FileCaptureState
-  edges:InlineEdge[]; fences:ClosedFenceBody[]; emptyBodies: EmptyBody[]; bodies: InlineBody[]; emissions: InlineEmission[]
+  atoms:InlineAtomOccurrence[]; edges:InlineEdge[]; fences:ClosedFenceBody[]; emptyBodies: EmptyBody[]; bodies: InlineBody[]; emissions: InlineEmission[]
   source: string; blankLines: BlankDraft[]; fallback?: FallbackEmpty; lists: ListDraft[]
   trace: SourceTrace; lineStarts: number[]; protectedSources: ProtectedSource[]; runs: CapturedTextRun[]; roots: SourceRoot[]
   synthetic: { gapIndex: number; emission: SyntheticEmission }[]
@@ -455,7 +455,7 @@ type InlineBody = Readonly<{
   pmFrom:number; pmTo:number; sourceFrom:number; sourceTo:number
   kind:'paragraph'|'heading'|'table-cell'; singlePhysicalLine:boolean
 }>
-type InlineEmission = {from:number;to:number;kind:string;runFrom:number;runTo:number;node?:PmNode;body?:InlineBody;empty?:EmptyPlace;edgeFrom?:number;edgeTo?:number;fence?:ClosedFenceBody}
+type InlineEmission = {from:number;to:number;kind:string;runFrom:number;runTo:number;node?:PmNode;body?:InlineBody;empty?:EmptyPlace;edgeFrom?:number;edgeTo?:number;atomFrom?:number;atomTo?:number;fence?:ClosedFenceBody}
 const inlineFrames=new WeakMap<object,InlineEmission>()
 const inlineCloseStates=new WeakSet<object>()
 const inlineFacts = new WeakMap<object, {collector:Capture;trace?:SourceTrace;kind?:InlineBody['kind'];empty?:EmptyPlace;trimEnd?:number}>()
@@ -467,6 +467,7 @@ const inlineStateOwners = new WeakMap<object, SourceTrace>()
 const tokenSources = new WeakMap<object, { collector: Capture; runs: SourceRun[] }>()
 const pendingSources = new WeakMap<object, SourceRun[]>()
 type EdgeToken={open:{from:number;to:number};close:{from:number;to:number};side:'open'|'close'|'code'}
+const atomTokenRanges=new WeakMap<object,{from:number;to:number}>()
 const htmlTokenRanges=new WeakMap<object,{from:number;to:number}>()
 const edgeTokens=new WeakMap<object,EdgeToken>()
 const fenceTokens=new WeakMap<object,Omit<ClosedFenceBody,'pmFrom'|'pmTo'|'contentFrom'|'contentTo'>>()
@@ -1121,6 +1122,18 @@ for(const name of ['emphasis','strikethrough','mark'])wrapCaptureRule(md.inline.
  }
  return result
 })
+// Read-only whole occurrence authority from the installed successful rule.
+// No math delimiters or payload are parsed again, and no text span is granted.
+for(const name of ['math_inline','math_inline_double'])wrapCaptureRule(md.inline.ruler,name,(original,state,silent)=>{
+ const from=state.pos,result=original(state,silent),trace=inlineStateOwners.get(state)
+ if(result&&!silent&&trace){
+  const token=state.tokens.at(-1),view=sliceTrace(trace,from,state.pos)
+  if(token?.type===name&&view.pieces.length&&view.pieces.every((p,i)=>p.kind!=='generated'&&(!i||view.pieces[i-1]!.sourceTo===p.sourceFrom))){
+   const raw=rawRange(trace,from,state.pos);if(raw)atomTokenRanges.set(token,raw)
+  }
+ }
+ return result
+})
 wrapCaptureRule(md.inline.ruler,'html_inline',(original,state,silent)=>{
  const start=state.pos,result=original(state,silent),trace=inlineStateOwners.get(state)
  if(result&&!silent&&trace){const token=state.tokens.at(-1),range=rawRange(trace,start,state.pos);if(token?.type==='html_inline'&&range)htmlTokenRanges.set(token,range)}
@@ -1233,6 +1246,16 @@ function captureText(state: any, token: any, delegate: () => void) {
   if (captureCursor(state) !== pos) throw new UnsupportedSourceCapture()
 }
 
+function captureAtomEmission(state:any,token:any,delegate:()=>void):void {
+ const raw=atomTokenRanges.get(token),collector=currentInlineCollector.get(state)
+ if(!raw||!collector){delegate();return}
+ const frame=state.stack.at(-1),slot=frame.content.length,pmFrom=captureCursor(state)
+ delegate()
+ const node:PmNode|undefined=frame.content[slot],pmTo=captureCursor(state)
+ if(state.stack.at(-1)!==frame||frame.content.length!==slot+1||!node||node.type.name!=='math_inline'||!node.isAtom||node.nodeSize!==pmTo-pmFrom)return
+ collector.atoms.push({body:-1,pmFrom,pmTo,sourceFrom:raw.from,sourceTo:raw.to,node})
+}
+
 function captureEdgeEmission(state:any,token:any,delegate:()=>void):void {
  const edge=edgeTokens.get(token),collector=currentInlineCollector.get(state)
  if(!edge){delegate();return}
@@ -1312,12 +1335,12 @@ function captureInlineEmission(state:any,token:any,delegate:()=>void):void {
   }
   const frame=state.stack[state.stack.length-1],from=captureCursor(state),runFrom=fact.collector.runs.length
   currentInlineCollector.set(state,fact.collector)
-  const edgeFrom=fact.collector.edges.length
+  const edgeFrom=fact.collector.edges.length,atomFrom=fact.collector.atoms.length
   delegate()
-  const edgeTo=fact.collector.edges.length,to=captureCursor(state)
+  const edgeTo=fact.collector.edges.length,atomTo=fact.collector.atoms.length,to=captureCursor(state)
   if(state.stack[state.stack.length-1]!==frame)throw new UnsupportedSourceCapture()
   if(!['paragraph','heading'].includes(frame.type.name))return
-  const emission:InlineEmission={from,to,edgeFrom,edgeTo,kind:frame.type.name,runFrom,runTo:fact.collector.runs.length,...(fact.empty?{empty:fact.empty}:{})}
+  const emission:InlineEmission={from,to,edgeFrom,edgeTo,atomFrom,atomTo,kind:frame.type.name,runFrom,runTo:fact.collector.runs.length,...(fact.empty?{empty:fact.empty}:{})}
   fact.collector.emissions.push(emission);inlineFrames.set(frame,emission)
   if(fact.trace&&fact.kind){
     const pieces=fact.trace.pieces
@@ -2066,7 +2089,7 @@ class MorayaMarkdownParser extends MarkdownParser {
     h['inline']=(state,tok,tokens,i)=>captureInlineEmission(state,tok,()=>defaultInline(state,tok,tokens,i))
     for(const key of Object.keys(h)){
       const delegate=h[key]!
-      h[key]=(state,tok,tokens,i)=>captureEdgeEmission(state,tok,()=>delegate(state,tok,tokens,i))
+      h[key]=(state,tok,tokens,i)=>captureAtomEmission(state,tok,()=>captureEdgeEmission(state,tok,()=>delegate(state,tok,tokens,i)))
     }
     for (const key of Object.keys(h)) {
       const delegate = h[key]!
@@ -2852,6 +2875,11 @@ function finalizeCapturedDocument(collector: Capture, doc: PmNode): CapturedDocu
         if(emission.body){
           const body=collector.bodies.length
           collector.bodies.push({...emission.body,pmFrom:from,pmTo:from+parent.content.size})
+          for(let i=emission.atomFrom??0;i<(emission.atomTo??0);i++){
+            const atom=collector.atoms[i]!,pmFrom=atom.pmFrom+delta,pmTo=atom.pmTo+delta
+            if(pmFrom<from||pmTo>from+parent.content.size||doc.nodeAt(pmFrom)!==atom.node||pmTo-pmFrom!==atom.node.nodeSize)throw new UnsupportedSourceCapture()
+            collector.atoms[i]={...atom,body,pmFrom,pmTo}
+          }
           for(let i=emission.edgeFrom??0;i<(emission.edgeTo??0);i++){
             const edge=collector.edges[i]!
             collector.edges[i]={...edge,body,pmFrom:edge.pmFrom+delta,pmTo:edge.pmTo+delta}
@@ -2898,7 +2926,7 @@ function finalizeCapturedDocument(collector: Capture, doc: PmNode): CapturedDocu
     }
     for(const u of layout.blankLines)if(u.role==='empty-paragraph')layoutBody(u.emission.pmFrom,{kind:'layout',origin:{kind:'blank',id:u.id}})
     if(layout.fallback)layoutBody(layout.fallback.emission.pmFrom,{kind:'layout',origin:{kind:'fallback'}})
-    capturedListLayouts.set(layout, { recipe:Object.freeze({bodies:Object.freeze(collector.bodies.map((b,body)=>Object.freeze({...b,body}))),edges:Object.freeze(collector.edges.filter(e=>e.body>=0).map(e=>Object.freeze(e))),fences:Object.freeze(collector.fences.map(f=>Object.freeze(f)))}),emptyBodies:Object.freeze(collector.emptyBodies.map(f=>Object.freeze(f))), source, doc, roots: collector.roots, lists, bodies:Object.freeze(collector.bodies.map(body=>Object.freeze(body))) })
+    capturedListLayouts.set(layout, { recipe:Object.freeze({atoms:Object.freeze(collector.atoms.filter(a=>a.body>=0).map(a=>Object.freeze(a))),bodies:Object.freeze(collector.bodies.map((b,body)=>Object.freeze({...b,body}))),edges:Object.freeze(collector.edges.filter(e=>e.body>=0).map(e=>Object.freeze(e))),fences:Object.freeze(collector.fences.map(f=>Object.freeze(f)))}),emptyBodies:Object.freeze(collector.emptyBodies.map(f=>Object.freeze(f))), source, doc, roots: collector.roots, lists, bodies:Object.freeze(collector.bodies.map(body=>Object.freeze(body))) })
     return { doc, textRuns: collector.runs,
       protectedSources: Object.freeze(collector.protectedSources),
       layout,
@@ -2973,7 +3001,7 @@ export function preprocessFileSource(source: string): SourceTrace {
 }
 
 function newFileCollector(source: string, trace: SourceTrace, work: FileWorkAccumulator): Capture {
-  return { source, trace, edges:[], fences:[], emptyBodies:[], bodies: [], emissions: [], lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [], lists: [],
+  return { source, trace, atoms:[], edges:[], fences:[], emptyBodies:[], bodies: [], emissions: [], lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [], lists: [],
     file: { work, checkpoints: [], definitions: [], blockTokens: [], effects: [] } }
 }
 
@@ -3037,6 +3065,7 @@ function cloneTokenBatch(tokens: readonly ActualToken[], collector: Capture, raw
     if(pending)nestedBlanks.set(copy,pending.map(p=>({...p,line:p.line+lineDelta,place:shiftEmpty(p.place,rawDelta,lineDelta)})))
     const edge=edgeTokens.get(token)
     const shift=(r:{from:number;to:number})=>({from:r.from+rawDelta,to:r.to+rawDelta})
+    const atom=atomTokenRanges.get(token);if(atom)atomTokenRanges.set(copy,shift(atom))
     const html=htmlTokenRanges.get(token);if(html)htmlTokenRanges.set(copy,shift(html))
     if(edge)edgeTokens.set(copy,{...edge,open:shift(edge.open),close:shift(edge.close)})
     const fence=fenceTokens.get(token)

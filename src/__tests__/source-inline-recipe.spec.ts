@@ -195,3 +195,52 @@ it.each([['strong','**A\\|B**'],['code','`A\\|B`']] as const)('empty table %s es
  toggleMark(state.schema.marks[name]!)(state,tr=>{state=state.apply(tr)});const tr=state.tr.insertText('A|B'),r=applySourceBlockTransaction(b,tr);
  expect(r.ok).toBe(true);if(!r.ok)throw Error(r.reason);expect(r.session.source).toBe('| H | J |\n| --- | --- |\n| A |'+body+' |\n');expect(r.session.doc.eq(tr.doc)).toBe(true);
 });
+it('fix1 real toggle splits crossing envelopes while retaining the old em shell',()=>{
+ const {r}=command('_Alpha Beta_ Gamma\n',[0],6,[0],16,s=>toggleMark(s.schema.marks.strong!),'_Alpha **Beta**_**&#32;Gamma**\n');
+ expect(r.edits).toEqual([{from:7,to:7,text:'**'},{from:11,to:11,text:'**'},{from:12,to:13,text:'**&#32;'},{from:18,to:18,text:'**'}]);
+});
+it('fix1 real toggle formats text without touching the adjacent math occurrence',()=>{
+ const {r}=command('Alpha $x$\n',[0],0,[0],2,s=>toggleMark(s.schema.marks.strong!),'**Al**pha $x$\n');
+ expect(r.edits).toEqual([{from:0,to:0,text:'**'},{from:2,to:2,text:'**'}]);
+});
+it.each([
+ ['Alpha _Beta Gamma_\n',0,10,'**Alpha&#32;**_**Beta** Gamma_\n'],
+ ['_Alpha Beta_ Gamma\n',1,4,'_A**lph**a Beta_ Gamma\n'],
+ ['_Alpha_ Beta\n',6,10,'_Alpha_ **Beta**\n'],
+] as const)('fix1 reverse crossing nested and adjacent %j',(raw,from,to,expected)=>{
+ command(raw,[0],from,[0],to,s=>toggleMark(s.schema.marks.strong!),expected);
+});
+it('fix1 math occurrence keeps raw and full node through a shifting Replace plus mark chain',()=>{
+ const b=open('$x$ Alpha $x$\n'),a=pos(b.doc,[0],4),tr=EditorState.create({doc:b.doc}).tr.insertText('Z ',a).addMark(a+2,a+4,b.doc.type.schema.marks.strong!.create());
+ const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(true);if(!r.ok)throw Error(r.reason);
+ expect(r.session.source).toBe('$x$ Z **Al**pha $x$\n');expect(r.session.doc.eq(tr.doc)).toBe(true);
+ expect(r.session.doc.child(0).child(0).eq(b.doc.child(0).child(0))).toBe(true);expect(r.session.doc.child(0).lastChild!.eq(b.doc.child(0).lastChild!)).toBe(true);
+});
+it('fix1 unchanged math grants no edit or selected atom mark permission',()=>{
+ const raw='Alpha $x$ Beta\n',b=open(raw),state=EditorState.create({doc:b.doc}),start=pos(b.doc,[0],6),atom=b.doc.nodeAt(start)!;
+ expect(atom.type.name).toBe('math_inline');const mark=b.doc.type.schema.marks.strong!.create();
+ const internal=state.tr.addMark(1,3,mark).insertText('y',start+1,start+2);
+ const selected=state.tr.addMark(1,3,mark).addMark(start,start+atom.nodeSize,mark);
+ const replaced=state.tr.addMark(1,3,mark).replaceWith(start,start+atom.nodeSize,atom.type.create(atom.attrs,b.doc.type.schema.text('y'),atom.marks));
+ for(const tr of [internal,selected,replaced]){const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(false);expect(r).not.toHaveProperty('session')}
+ expect(b.source).toBe(raw);
+ const retry=applySourceBlockTransaction(b,state.tr.addMark(1,3,mark));expect(retry.ok).toBe(true);if(retry.ok)expect(retry.session.source).toBe('**Al**pha $x$ Beta\n');
+});
+it('fix1 failed unrecognized atom keeps the whole mixed transaction atomic',()=>{
+ const b=open('Alpha ![x](/u)\n'),tr=EditorState.create({doc:b.doc}).tr.addMark(1,3,b.doc.type.schema.marks.strong!.create()),r=applySourceBlockTransaction(b,tr);
+ expect(r.ok).toBe(false);expect(r).not.toHaveProperty('session');expect(b.source).toBe('Alpha ![x](/u)\n');
+});
+
+it('fix1 real toggle splits code so crossing strong stays outside opaque syntax',()=>{
+ const {r}=command('`Alpha Beta` Gamma\n',[0],6,[0],16,s=>toggleMark(s.schema.marks.strong!),'`Alpha `**`Beta` Gamma**\n');
+ expect(r.edits).toEqual([{from:7,to:7,text:'`**`'},{from:18,to:18,text:'**'}]);
+});
+
+it.each([
+ ['`Alpha Beta`\n',0,10,'**`Alpha Beta`**\n'],
+ ['`Alpha Beta`\n',6,10,'`Alpha `**`Beta`**\n'],
+ ['`Alpha Beta`\n',2,4,'`Al`**`ph`**`a Beta`\n'],
+ ['Alpha `Beta Gamma`\n',0,10,'**Alpha `Beta`**` Gamma`\n'],
+] as const)('fix1 code stays innermost at exact nested and reverse boundaries %j',(raw,from,to,expected)=>{
+ command(raw,[0],from,[0],to,s=>toggleMark(s.schema.marks.strong!),expected);
+});

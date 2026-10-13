@@ -10,7 +10,8 @@ export type InlineRawRange=Readonly<{from:number;to:number}>
 export type InlineEdge=Readonly<{id:number;body:number;family:string;pmFrom:number;pmTo:number;open:InlineRawRange;close:InlineRawRange;marks:readonly Mark[]}>
 export type InlineOccurrence=Readonly<{body:number;pmFrom:number;pmTo:number;sourceFrom:number;sourceTo:number;kind:'paragraph'|'heading'|'table-cell'}>
 export type ClosedFenceBody=Readonly<{pmFrom:number;pmTo:number;sourceFrom:number;sourceTo:number;open:InlineRawRange;close:InlineRawRange;character:'`'|'~';openLength:number;closeLength:number;contentFrom:number;contentTo:number;eol:'\n'|'\r\n'|'\r';contiguousTopLevel:boolean}>
-export type InlineRecipeFacts=Readonly<{bodies:readonly InlineOccurrence[];edges:readonly InlineEdge[];fences:readonly ClosedFenceBody[]}>
+export type InlineAtomOccurrence=Readonly<{body:number;pmFrom:number;pmTo:number;sourceFrom:number;sourceTo:number;node:PmNode}>
+export type InlineRecipeFacts=Readonly<{atoms:readonly InlineAtomOccurrence[];bodies:readonly InlineOccurrence[];edges:readonly InlineEdge[];fences:readonly ClosedFenceBody[]}>
 export type InlineRecipeResult={ok:true;edits:readonly SourceEdit[];changedBodies:readonly number[]}|{ok:false;reason:'unsupported-step'|'unmapped-range'}
 export type EmptyInlineContent=Readonly<{kind:'ready';body:string}>|Readonly<{kind:'unsupported';reason:string}>
 const families=['em','strong','strike_through','highlight','code','link']
@@ -81,7 +82,7 @@ export function prepareClosedFenceRecipe(base:SourceSession,tr:Transaction,facts
 }
 type InlinePiece=Readonly<{kind:'retained';beforeFrom:number;beforeTo:number;afterFrom:number;afterTo:number}|{kind:'inserted';afterFrom:number;afterTo:number;step:number}>
 type BodyWork={body:number;beforeFrom:number;beforeTo:number;afterFrom:number;afterTo:number;pieces:InlinePiece[];dirtyEdges:number[]}
-type Unit={text:string;before?:number;step?:number;leaf?:PmNode;marks:readonly Mark[];raw?:InlineRawRange}
+type Unit={text:string;before?:number;step?:number;leaf?:PmNode;atom?:InlineAtomOccurrence;marks:readonly Mark[];raw?:InlineRawRange}
 type Envelope={from:number;to:number;mark:Mark;old?:InlineEdge;open:string;close:string;keep:boolean;index:number}
 type Output={raw:InlineRawRange}|{text:string}
 const sameMarks=(a:readonly Mark[],b:readonly Mark[])=>a.length===b.length&&a.every((m,i)=>m.eq(b[i]!))
@@ -109,11 +110,12 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
   for(const b of facts.bodies){
    const list:Unit[]=[]
    base.doc.resolve(b.pmFrom).parent.forEach((node,offset)=>{
+    const atom=facts.atoms.find(a=>a.body===b.body&&a.pmFrom===b.pmFrom+offset&&a.pmTo===b.pmFrom+offset+node.nodeSize&&a.node===node)
     for(let i=0;i<node.nodeSize;i++){
      const before=b.pmFrom+offset+i
      const span=base.textSpans.find(s=>s.pmFrom<=before&&s.pmTo>before)
      const from=span&&point(span,before),to=span&&point(span,before+1)
-     list.push({text:node.isText?node.text![i]!:'',before,marks:node.marks,...(from!==undefined&&to!==undefined?{raw:{from,to}}:{})})
+     list.push({text:node.isText?node.text![i]!:'',before,marks:node.marks,...(atom?{atom}:{}),...(from!==undefined&&to!==undefined?{raw:{from,to}}:{})})
     }
    });units.set(b.body,list)
   }
@@ -132,7 +134,7 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     })
     if(!valid)return no
     const list=units.get(body.body)!,start=step.from-body.afterFrom,end=step.to-body.afterFrom
-    if(list.slice(start,end).some(u=>!u.text))return no
+    if(list.slice(start,end).some(u=>!u.text)||start===end&&list[start]?.atom&&list[start]?.atom===list[start-1]?.atom)return no
     list.splice(start,end-start,...inserted);changed.add(body.body)
     const map=step.getMap()
     for(const w of work){
@@ -170,7 +172,7 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
    // Verify every projected unit against the actual final document, including
    // full Mark objects and attributes, before constructing source events.
    let offset=0,valid=true
-   target.forEach(n=>{for(let j=0;j<n.nodeSize;j++,offset++){const u=list[offset];if(!u||u.text!==(n.isText?n.text![j]!:u.leaf?.eq(n)?'\n':'')||!sameMarks(u.marks,n.marks))valid=false}})
+   target.forEach(n=>{for(let j=0;j<n.nodeSize;j++,offset++){const u=list[offset];if(!u||u.atom&&!u.atom.node.eq(n)||u.text!==(n.isText?n.text![j]!:u.leaf?.eq(n)?'\n':'')||!sameMarks(u.marks,n.marks))valid=false}})
    if(!valid)return no
    const ranges:Envelope[]=[]
    for(let at=0;at<list.length;at++)for(const mark of list[at]!.marks){
@@ -195,17 +197,6 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
       case 'code':break
      }
     }
-    if(mark.type.name==='code'){
-     const text=list.slice(at,end).map(u=>u.text).join(''),node=target.type.schema.text(text,[mark])
-     const generatedOpen=sourceCodeDelimiter(node,true),generatedClose=sourceCodeDelimiter(node,false)
-     const currentLength=/^`+/.exec(open)?.[0].length??0,max=Math.max(0,...(text.match(/`+/g)??[]).map(r=>r.length))
-     if(!currentLength||max>=currentLength){open=generatedOpen;close=generatedClose;keep=false}
-     else{
-      const left=open.slice(currentLength),right=close.slice(0,close.length-currentLength)
-      const decoded=(left+text+right).replace(/\n/g,' ').replace(/^ (.+) $/,'$1')
-      if(decoded!==text){const padding=generatedOpen.endsWith(' ')?' ':'';open='`'.repeat(currentLength)+padding;close=padding+'`'.repeat(currentLength);keep=false}
-     }
-    }
     if(!keep&&/^_+$/.test(open)&&(!/^[ \t]/.test(list[at]!.text)&&at>0&&/[\p{L}\p{N}]/u.test(list[at-1]!.text)||!/[ \t]$/.test(list[end-1]!.text)&&end<list.length&&/[\p{L}\p{N}]/u.test(list[end]!.text))){open=close='*'.repeat(open.length)}
     ranges.push({from:at,to:end,mark,...(ancestor?{old:ancestor}:{}),open,close,keep,index:ranges.length})
    }
@@ -224,8 +215,44 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
      ranges.splice(i,1,...parts.map(p=>({...r,from:p.from,to:p.last+1,old:p.e,keep:true,open:base.source.slice(p.e.open.from,p.e.open.to),close:base.source.slice(p.e.close.from,p.e.close.to)})))
     }
    }
+   // Code is lexically opaque: other marks must wrap each code segment,
+   // never emit delimiters inside it. Only actual mark boundaries split it.
+   for(let i=ranges.length-1;i>=0;i--){
+    const r=ranges[i]!;if(r.mark.type.name!=='code')continue
+    const cuts=[...new Set(ranges.filter(other=>other!==r).flatMap(other=>[other.from,other.to]).filter(at=>r.from<at&&at<r.to))].sort((a,b)=>a-b)
+    if(cuts.length){const points=[r.from,...cuts,r.to];ranges.splice(i,1,...points.slice(0,-1).map((from,j)=>({...r,from,to:points[j+1]!,keep:false})))}
+   }
+   // A Markdown wrapper must be nested or disjoint, never crossing. Keep
+   // an unchanged source wrapper intact and split the changed envelope at
+   // that actual boundary. Every split reduces crossings at fixed endpoints.
+   let crossing=true
+   while(crossing){
+    crossing=false;ranges.sort((a,b)=>a.from-b.from||b.to-a.to)
+    outer:for(let i=0;i<ranges.length;i++)for(let j=i+1;j<ranges.length;j++){
+     const a=ranges[i]!,b=ranges[j]!
+     if(!(a.from<b.from&&b.from<a.to&&a.to<b.to))continue
+     if(a.keep&&b.keep)return no
+     const split=b.keep?a:b,cut=b.keep?b.from:a.to,index=ranges.indexOf(split)
+     if(!families.includes(split.mark.type.name))return no
+     ranges.splice(index,1,{...split,to:cut,keep:false},{...split,from:cut,keep:false})
+     crossing=true;break outer
+    }
+   }
+   for(const r of ranges)if(r.mark.type.name==='code'){
+     let {open,close,keep}=r;const {mark}=r
+     const text=list.slice(r.from,r.to).map(u=>u.text).join(''),node=target.type.schema.text(text,[mark])
+     const generatedOpen=sourceCodeDelimiter(node,true),generatedClose=sourceCodeDelimiter(node,false)
+     const currentLength=/^`+/.exec(open)?.[0].length??0,max=Math.max(0,...(text.match(/`+/g)??[]).map(r=>r.length))
+     if(!currentLength||max>=currentLength){open=generatedOpen;close=generatedClose;keep=false}
+     else{
+      const left=open.slice(currentLength),right=close.slice(0,close.length-currentLength)
+      const decoded=(left+text+right).replace(/\n/g,' ').replace(/^ (.+) $/,'$1')
+      if(decoded!==text){const padding=generatedOpen.endsWith(' ')?' ':'';open='`'.repeat(currentLength)+padding;close=padding+'`'.repeat(currentLength);keep=false}
+     }
+     r.open=open;r.close=close;r.keep=keep
+   }
    w.dirtyEdges=old.filter(e=>!ranges.some(r=>r.keep&&r.old===e)).map(e=>e.id)
-   const claimed=[...old.flatMap(e=>[e.open,e.close]),...list.flatMap(u=>u.raw?[u.raw]:[]),...base.textSpans.filter(s=>s.pmFrom>=body.pmFrom&&s.pmTo<=body.pmTo).map(s=>({from:s.sourceFrom,to:s.sourceTo}))].sort((a,b)=>a.from-b.from)
+   const claimed=[...facts.atoms.filter(a=>a.body===id).map(a=>({from:a.sourceFrom,to:a.sourceTo})),...old.flatMap(e=>[e.open,e.close]),...list.flatMap(u=>u.raw?[u.raw]:[]),...base.textSpans.filter(s=>s.pmFrom>=body.pmFrom&&s.pmTo<=body.pmTo).map(s=>({from:s.sourceFrom,to:s.sourceTo}))].sort((a,b)=>a.from-b.from)
    const gaps:{raw:InlineRawRange;before:number}[]=[];let cursor=body.sourceFrom
    for(const raw of claimed){if(raw.from>cursor){const next=base.textSpans.find(s=>s.sourceFrom>=raw.from&&s.pmFrom>=body.pmFrom&&s.pmTo<=body.pmTo);gaps.push({raw:{from:cursor,to:raw.from},before:next?.pmFrom??body.pmTo})}cursor=Math.max(cursor,raw.to)}
    if(cursor<body.sourceTo)gaps.push({raw:{from:cursor,to:body.sourceTo},before:body.pmTo})
@@ -234,14 +261,14 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     // Encoding an inner boundary space ends in ';' (punctuation). The
     // installed delimiter flanking rule then also needs an outer punctuation
     // neighbour. Encode exactly that adjacent scalar, retaining its PM marks.
-    if(/^[ \t]$/.test(list[r.to-1]!.text)&&r.to<list.length&&!/[\s\p{P}\p{S}]/u.test(list[r.to]!.text))adjacentEntities.add(r.to)
-    if(/^[ \t]$/.test(list[r.from]!.text)&&r.from>0&&!/[\s\p{P}\p{S}]/u.test(list[r.from-1]!.text)){
+    if(!ranges.some(other=>other!==r&&other.from===r.to)&&/^[ \t]$/.test(list[r.to-1]!.text)&&r.to<list.length&&!/[\s\p{P}\p{S}]/u.test(list[r.to]!.text))adjacentEntities.add(r.to)
+    if(!ranges.some(other=>other!==r&&other.to===r.from)&&/^[ \t]$/.test(list[r.from]!.text)&&r.from>0&&!/[\s\p{P}\p{S}]/u.test(list[r.from-1]!.text)){
      let at=r.from-1;if(/[\uDC00-\uDFFF]/.test(list[at]!.text)&&at>0&&/[\uD800-\uDBFF]/.test(list[at-1]!.text))at--
      adjacentEntities.add(at)
     }
    }
    const output:Output[]=[],emittedGaps=new Set<number>()
-   const nesting=(a:Envelope,b:Envelope)=>a.from-b.from||b.to-a.to||(a.old&&b.old?a.old.open.from-b.old.open.from:Object.keys(target.type.schema.marks).indexOf(a.mark.type.name)-Object.keys(target.type.schema.marks).indexOf(b.mark.type.name))
+   const nesting=(a:Envelope,b:Envelope)=>a.from-b.from||b.to-a.to||(Number(a.mark.type.name==='code')-Number(b.mark.type.name==='code'))||(a.old&&b.old?a.old.open.from-b.old.open.from:Object.keys(target.type.schema.marks).indexOf(a.mark.type.name)-Object.keys(target.type.schema.marks).indexOf(b.mark.type.name))
    const ordered=ranges.slice().sort(nesting)
    for(let at=0;at<=list.length;at++){
     for(const r of ordered.filter(r=>r.to===at).reverse())output.push(r.keep?{raw:r.old!.close}:{text:r.close})
@@ -258,6 +285,12 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     }
     if(edgeSpace){output.push({text:u.text===' '?'&#32;':'&#9;'});continue}
     if(u.before!==undefined){
+     if(u.atom){
+      const atom=u.atom,count=atom.pmTo-atom.pmFrom,group=list.slice(at,at+count)
+      if(u.before!==atom.pmFrom||group.length!==count||group.some((x,i)=>x.atom!==atom||x.before!==atom.pmFrom+i||!sameMarks(x.marks,atom.node.marks))
+        ||ranges.some(r=>r.from>at&&r.from<at+count||r.to>at&&r.to<at+count))return unmapped
+      output.push({raw:{from:atom.sourceFrom,to:atom.sourceTo}});at+=count-1;continue
+     }
      if(!u.raw){
       const span=base.textSpans.find(s=>s.kind==='atomic'&&s.pmFrom===u.before)
       if(!span)return unmapped
