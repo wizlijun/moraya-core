@@ -155,7 +155,7 @@ it('maps each step in its actual doc and keeps nonadjacent edits separate',()=>{
  expect(r.edits.every(e=>e.to<=middle.sourceFrom||e.from>=middle.sourceTo)).toBe(true)
 })
 it('preserves opaque references and their synthetic paragraphs',()=>{
- const raw='[Alpha][ref]\n\n[ref]: /url "T"\n\nTail',b=open(raw),p=pos(b.doc,'Alpha')
+ const raw='[Alpha][ref]\n\n\n[ref]: /url "T"\n\nTail',b=open(raw),p=pos(b.doc,'Alpha')
  const r=accept(b,transaction(b).addMark(p,p+5,b.doc.type.schema.marks.strong!.create()))
  expect(r.session.source).toContain('[ref]: /url "T"')
  const synthetic=b.gaps[1]!.synthetic[0]!

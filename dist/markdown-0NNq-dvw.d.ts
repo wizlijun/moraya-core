@@ -35,6 +35,34 @@ type SourceEdit = Readonly<{
     text: string;
 }>;
 
+type LayoutContainer = Readonly<{
+    kind: 'gap';
+    gapIndex: number;
+} | {
+    kind: 'root-tail';
+    rootId: number;
+}>;
+type BlankLineUnit = Readonly<{
+    id: number;
+    sourceFrom: number;
+    sourceTo: number;
+    container: LayoutContainer;
+}> & (Readonly<{
+    role: 'separator';
+}> | Readonly<{
+    role: 'empty-paragraph';
+    emission: SyntheticEmission;
+}>);
+type FallbackEmpty = Readonly<{
+    kind: 'empty-document-baseline';
+    sourceAnchor: number;
+    emission: SyntheticEmission;
+}>;
+type SourceLayout = Readonly<{
+    blankLines: readonly BlankLineUnit[];
+    fallback?: FallbackEmpty;
+}>;
+
 /**
  * Markdown ↔ ProseMirror Doc roundtrip for `@moraya/core`.
  *
@@ -72,6 +100,7 @@ type CapturedDocument = CapturedParagraph & {
     roots: SourceRoot[];
     gaps: SourceGap[];
     protectedSources: readonly ProtectedSource[];
+    layout: SourceLayout;
 };
 /**
  * Parse a markdown string into a ProseMirror document node. Never throws (§4.5).
@@ -110,4 +139,4 @@ declare function parseParagraphWithSourceCapture(source: string, schema?: Schema
     reason: 'unsupported-source' | 'parse-error';
 };
 
-export { type CapturedDocument as C, type ProtectedSource as P, type SourceRoot as S, type SourceGap as a, type SourceEdit as b, type SyntheticEmission as c, parseMarkdownAsync as d, type CapturedParagraph as e, type CapturedTextRun as f, parseDocumentWithSourceCapture as g, parseParagraphWithSourceCapture as h, parseMarkdown as p, serializeMarkdown as s };
+export { type BlankLineUnit as B, type CapturedDocument as C, type FallbackEmpty as F, type LayoutContainer as L, type ProtectedSource as P, type SourceRoot as S, type SourceGap as a, type SourceLayout as b, type SourceEdit as c, type SyntheticEmission as d, parseMarkdownAsync as e, type CapturedParagraph as f, type CapturedTextRun as g, parseDocumentWithSourceCapture as h, parseParagraphWithSourceCapture as i, parseMarkdown as p, serializeMarkdown as s };

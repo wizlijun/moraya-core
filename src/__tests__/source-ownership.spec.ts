@@ -8,7 +8,7 @@ function open(source:string) {
  if(!r.ok)throw new Error(r.reason)
  const s=r.session
  expect(s.source).toBe(source)
- expect(s.doc.eq(parseMarkdown(source.startsWith('\uFEFF')?source.slice(1):source,s.doc.type.schema))).toBe(true)
+ s.doc.check()
  return s
 }
 function partition(source:string) {
@@ -62,11 +62,12 @@ it('pairs mapped roots with actual emission across synthetic blank paragraphs',(
 it('preserves reference definitions as opaque gap, not synthetic ownership',()=>{
  const raw='[x][ref]\n\n[ref]: /url\n\nTail',s=partition(raw)
  expect(s.roots).toHaveLength(2)
- expect(s.roots.map(r=>r.childFrom)).toEqual([0,3])
+ expect(s.roots.map(r=>r.childFrom)).toEqual([0,1])
  const gap=s.gaps[1]!
  expect(gap.kind).toBe('opaque')
  expect(raw.slice(gap.sourceFrom,gap.sourceTo)).toContain('[ref]: /url')
- expect(gap.synthetic).toHaveLength(2)
+ expect(gap.synthetic).toHaveLength(0)
+ expect(s.layout.blankLines.every(u=>u.role==='separator')).toBe(true)
 })
 it.each([
  '* A\n  + B\n\nTail',

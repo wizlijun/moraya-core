@@ -2,6 +2,7 @@ import { Fragment, type Node as PmNode, type ResolvedPos, type Schema } from 'pr
 import { EditorState, type Transaction } from 'prosemirror-state'
 import { AddMarkStep, RemoveMarkStep, ReplaceStep } from 'prosemirror-transform'
 import { parseDocumentWithSourceCapture, serializeMarkdown } from './markdown'
+import type { SourceLayout } from './source-layout'
 import type { SourceRoot, SourceGap, SourceEdit, ProtectedSource } from './source-ownership'
 
 export type TextSourceSpan = Readonly<{
@@ -14,6 +15,7 @@ export type SourceSession = Readonly<{
   textSpans: readonly TextSourceSpan[]
   roots: readonly SourceRoot[]; gaps: readonly SourceGap[]
   protectedSources: readonly ProtectedSource[]
+  layout: SourceLayout
 }>
 export type FidelityFailure = Readonly<{
   ok: false
@@ -27,7 +29,7 @@ export function createSourceSession(source: string, schema?: Schema): FidelityRe
   const parsed = parseDocumentWithSourceCapture(source, schema)
   if (!parsed.ok) return parsed
   return { ok: true, session: { revision: 0, source, doc: parsed.value.doc, textSpans: parsed.value.textRuns,
-    roots: parsed.value.roots, gaps: parsed.value.gaps, protectedSources: parsed.value.protectedSources } }
+    roots: parsed.value.roots, gaps: parsed.value.gaps, protectedSources: parsed.value.protectedSources, layout: parsed.value.layout } }
 }
 
 function splitsSurrogate(text: string, offset: number): boolean {

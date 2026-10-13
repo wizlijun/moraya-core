@@ -2613,6 +2613,70 @@ function rendererTailStart(text2, from, to, tokenType) {
   return from;
 }
 
+// src/source-layout.ts
+function collectBlankDrafts(source, trace, starts, regions, protectedSources) {
+  const result = [];
+  const protectedOrder = protectedSources;
+  const referenceStarts = new Set(protectedOrder.filter((p) => p.scope === "top-level").map((p) => p.sourceFrom));
+  const referenceEnds = new Set(protectedOrder.filter((p) => p.scope === "top-level").map((p) => p.sourceTo));
+  let line = 0, protectedIndex = 0;
+  for (const region of regions) {
+    let run = [];
+    const flush = () => {
+      if (!run.length) return;
+      const first = run[0], last = run[run.length - 1];
+      const touches = referenceEnds.has(first.sourceFrom) || referenceStarts.has(last.sourceTo);
+      if (region.left && region.right || touches) first.role = "separator";
+      for (const unit of run) result.push(unit);
+      run = [];
+    };
+    while (line + 1 < starts.length && starts[line] < region.from) line++;
+    while (line + 1 < starts.length && starts[line + 1] <= region.to) {
+      const from = starts[line], to = starts[line + 1];
+      line++;
+      if (to <= from || !/^[ \t]*\n$/.test(trace.text.slice(from, to))) {
+        flush();
+        continue;
+      }
+      const piece = sliceTrace(trace, from, to);
+      if (piece.pieces.some((p) => p.kind === "generated")) {
+        flush();
+        continue;
+      }
+      const raw = rawRange(trace, from, to);
+      if (!raw || !/^[ \t]*(?:\r\n|\r|\n)$/.test(source.slice(raw.from, raw.to))) {
+        flush();
+        continue;
+      }
+      while (protectedIndex < protectedOrder.length && protectedOrder[protectedIndex].sourceTo <= raw.from) protectedIndex++;
+      const occupied = protectedOrder[protectedIndex];
+      if (occupied && occupied.sourceFrom < raw.to) {
+        flush();
+        continue;
+      }
+      const prev = region.previousRoot;
+      let container = { kind: "gap", gapIndex: region.gapIndex };
+      if (prev && raw.from < prev.sourceTo) {
+        if (raw.from < prev.tailFrom || raw.to > prev.sourceTo) throw new UnsupportedOwnership();
+        container = { kind: "root-tail", rootId: prev.id };
+      }
+      run.push({
+        id: 0,
+        sourceFrom: raw.from,
+        sourceTo: raw.to,
+        container,
+        role: "empty-paragraph",
+        insertBefore: region.insertBefore
+      });
+    }
+    flush();
+  }
+  result.forEach((u, i) => {
+    u.id = i;
+  });
+  return result;
+}
+
 // src/markdown.ts
 var md = new MarkdownIt({
   html: true,
@@ -2793,7 +2857,7 @@ function fixFootnoteDefMaps(tokens) {
     prevDefEnd = end;
   }
 }
-function preserveBlankLines(tokens, capture = false) {
+function preserveBlankLines(tokens) {
   function mkToken(type, tag, nesting, extra) {
     return {
       type,
@@ -2824,7 +2888,6 @@ function preserveBlankLines(tokens, capture = false) {
         const extra = gap - 1;
         for (let j = 0; j < extra; j++) {
           const open = mkToken("paragraph_open", "p", 1);
-          if (capture) syntheticTokens.add(open);
           result.push(
             open,
             mkToken("inline", "", 0, { level: 1, block: false, children: [] }),
@@ -3170,12 +3233,10 @@ function captureText(state, token, delegate) {
   delegate();
   if (captureCursor(state) !== pos) throw new UnsupportedSourceCapture();
 }
-var syntheticTokens = /* @__PURE__ */ new WeakSet();
 var rootStarts = /* @__PURE__ */ new WeakMap();
 var rootEnds = /* @__PURE__ */ new WeakMap();
 function prepareRootEvents(tokens, collector) {
   const starts = collector.lineStarts;
-  let natural = 0;
   const renderable = /* @__PURE__ */ new Set([
     "paragraph_open",
     "heading_open",
@@ -3193,48 +3254,106 @@ function prepareRootEvents(tokens, collector) {
     "math_block",
     "math_block_eqno"
   ]);
+  const flowTail = /* @__PURE__ */ new Set(["bullet_list_open", "ordered_list_open", "blockquote_open"]);
+  const natural = [];
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
-    const synthetic = syntheticTokens.has(token);
-    if (token.level !== 0 || token.nesting === -1 || !token.map && !synthetic) continue;
+    if (token.level !== 0 || token.nesting === -1 || !token.map) continue;
     let last = i;
     if (token.nesting === 1) {
       last = i + 1;
       while (last < tokens.length && !(tokens[last].level === 0 && tokens[last].nesting === -1)) last++;
       if (last === tokens.length) throw new UnsupportedSourceCapture();
     } else if (token.nesting !== 0) throw new UnsupportedSourceCapture();
-    let sourceFrom = 0, sourceTo = 0, tailFrom = 0;
-    if (!synthetic) {
-      const from = starts[token.map[0]], to = starts[token.map[1]];
-      if (from === void 0 || to === void 0 || to <= from) throw new UnsupportedSourceCapture();
-      const raw = rawRange(collector.trace, from, to);
-      if (!raw) throw new UnsupportedSourceCapture();
-      sourceFrom = raw.from;
-      sourceTo = raw.to;
-      tailFrom = sourceTo;
-      if (renderable.has(token.type)) {
-        const tail = rawRange(collector.trace, rendererTailStart(collector.trace.text, from, to, token.type), to);
-        if (tail) {
-          if (tail.to !== sourceTo) throw new UnsupportedSourceCapture();
-          tailFrom = tail.from;
-        }
+    const from = starts[token.map[0]], to = starts[token.map[1]];
+    if (from === void 0 || to === void 0 || to <= from) throw new UnsupportedSourceCapture();
+    const raw = rawRange(collector.trace, from, to);
+    if (!raw) throw new UnsupportedSourceCapture();
+    let tailFrom = raw.to, boundaryTo = to;
+    if (renderable.has(token.type)) {
+      const tailWork = rendererTailStart(collector.trace.text, from, to, token.type);
+      const tail = rawRange(collector.trace, tailWork, to);
+      if (tail) {
+        if (tail.to !== raw.to) throw new UnsupportedSourceCapture();
+        tailFrom = tail.from;
       }
+      if (flowTail.has(token.type) && collector.trace.text[tailWork] === "\n" && /^[ \t\n]*$/.test(collector.trace.text.slice(tailWork + 1, to))) boundaryTo = tailWork + 1;
     }
+    const id = natural.length;
     const draft = {
       collector,
-      kind: synthetic ? "synthetic" : "natural",
-      gapIndex: natural,
-      id: natural,
+      kind: "natural",
+      gapIndex: id,
+      id,
       tokenType: token.type,
-      sourceFrom,
-      sourceTo,
+      sourceFrom: raw.from,
+      sourceTo: raw.to,
       tailFrom
     };
-    if (!synthetic) natural++;
     rootStarts.set(token, draft);
     rootEnds.set(tokens[last], draft);
+    natural.push({ draft, first: i, last, from, to, boundaryTo });
     i = last;
   }
+  const regions = [];
+  for (let i = 0; i <= natural.length; i++) {
+    const previous = natural[i - 1], next = natural[i];
+    regions.push({
+      from: previous?.boundaryTo ?? 0,
+      to: next?.from ?? collector.trace.text.length,
+      insertBefore: next?.first ?? tokens.length,
+      gapIndex: i,
+      left: !!previous,
+      right: !!next,
+      ...previous ? { previousRoot: previous.draft } : {}
+    });
+  }
+  collector.blankLines = collectBlankDrafts(collector.source, collector.trace, starts, regions, collector.protectedSources);
+  const inserts = /* @__PURE__ */ new Map();
+  function emit(at, layout) {
+    const mk = (type, tag, nesting, extra = {}) => ({
+      type,
+      tag,
+      nesting,
+      content: "",
+      children: null,
+      attrs: null,
+      info: "",
+      meta: null,
+      map: null,
+      block: true,
+      hidden: false,
+      level: 0,
+      markup: "",
+      ...extra
+    });
+    const open = mk("paragraph_open", "p", 1), close = mk("paragraph_close", "p", -1);
+    const draft = {
+      collector,
+      kind: "synthetic",
+      gapIndex: 0,
+      id: -1,
+      tokenType: "paragraph_open",
+      sourceFrom: 0,
+      sourceTo: 0,
+      tailFrom: 0,
+      layout
+    };
+    rootStarts.set(open, draft);
+    rootEnds.set(close, draft);
+    const items = inserts.get(at) ?? [];
+    items.push(open, mk("inline", "", 0, { level: 1, block: false, children: [] }), close);
+    inserts.set(at, items);
+  }
+  if (!natural.length) emit(0, "fallback");
+  for (const unit of collector.blankLines) if (unit.role === "empty-paragraph") emit(unit.insertBefore, unit);
+  const result = [];
+  for (let i = 0; i <= tokens.length; i++) {
+    const before = inserts.get(i);
+    if (before) for (const token of before) result.push(token);
+    if (i < tokens.length) result.push(tokens[i]);
+  }
+  return result;
 }
 function rootCursor(state) {
   if (!Array.isArray(state.stack) || state.stack.length !== 1 || !Array.isArray(state.stack[0].content)) {
@@ -3256,8 +3375,20 @@ function captureRootEmission(state, token, delegate) {
       throw new UnsupportedSourceCapture();
     }
     const emission = { childFrom: end.childFrom, childTo: cursor.count, pmFrom: end.pmFrom, pmTo: cursor.pos };
-    if (end.kind === "synthetic") end.collector.synthetic.push({ gapIndex: end.gapIndex, emission });
-    else end.collector.roots.push({
+    if (end.kind === "synthetic") {
+      if (end.layout === "fallback") {
+        end.collector.fallback = {
+          kind: "empty-document-baseline",
+          sourceAnchor: end.collector.source.charCodeAt(0) === 65279 ? 1 : 0,
+          emission
+        };
+      } else {
+        const unit = end.layout;
+        if (!unit || unit.role !== "empty-paragraph" || unit.emission) throw new UnsupportedSourceCapture();
+        unit.emission = emission;
+        if (unit.container.kind === "gap") end.collector.synthetic.push({ gapIndex: unit.container.gapIndex, emission });
+      }
+    } else end.collector.roots.push({
       id: end.id,
       tokenType: end.tokenType,
       sourceFrom: end.sourceFrom,
@@ -3273,8 +3404,7 @@ md.parse = function(src, env) {
   tagPairedHtmlInline(tokens);
   fixFootnoteDefMaps(tokens);
   const collector = env?.[captureKey];
-  tokens = preserveBlankLines(tokens, !!collector);
-  if (collector) prepareRootEvents(tokens, collector);
+  tokens = collector ? prepareRootEvents(tokens, collector) : preserveBlankLines(tokens);
   return tokens;
 };
 var parserTokens = {

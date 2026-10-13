@@ -31,6 +31,7 @@ import type { Node as PmNode, Mark, Schema } from 'prosemirror-model'
 import { defaultSchema } from './schema'
 import { projectLineEndings } from './source-projection'
 import { rawRange, lineStarts, rendererTailStart, UnsupportedOwnership, type SourceRoot, type SourceGap, type SyntheticEmission, type ProtectedSource } from './source-ownership'
+import { collectBlankDrafts, finishSourceLayout, type BlankDraft, type FallbackEmpty, type SourceLayout, type LayoutRegion } from './source-layout'
 import { identityTrace, sliceTrace, editTrace, type SourceTrace, type TraceEdit } from './source-trace'
 
 // ── markdown-it instance ────────────────────────────────────────
@@ -319,7 +320,7 @@ function fixFootnoteDefMaps(tokens: InlineToken[]): void {
   }
 }
 
-function preserveBlankLines(tokens: InlineToken[], capture = false): InlineToken[] {
+function preserveBlankLines(tokens: InlineToken[]): InlineToken[] {
   function mkToken(type: string, tag: string, nesting: number, extra?: Partial<InlineToken>): InlineToken {
     return {
       type, tag, nesting, content: '', children: null, attrs: null, info: '',
@@ -343,7 +344,6 @@ function preserveBlankLines(tokens: InlineToken[], capture = false): InlineToken
         const extra = gap - 1
         for (let j = 0; j < extra; j++) {
           const open = mkToken('paragraph_open', 'p', 1)
-          if (capture) syntheticTokens.add(open)
           result.push(
             open,
             mkToken('inline', '', 0, { level: 1, block: false, children: [] }),
@@ -421,10 +421,11 @@ export type CapturedTextRun = {
   kind: 'linear' | 'atomic'
 }
 export type CapturedParagraph = { doc: PmNode; textRuns: CapturedTextRun[] }
-export type CapturedDocument = CapturedParagraph & { roots: SourceRoot[]; gaps: SourceGap[]; protectedSources: readonly ProtectedSource[] }
+export type CapturedDocument = CapturedParagraph & { roots: SourceRoot[]; gaps: SourceGap[]; protectedSources: readonly ProtectedSource[]; layout: SourceLayout }
 type SourceRun = { text: string; kind?: undefined; trace?: undefined }
   | { text: string; kind: 'linear' | 'atomic'; trace: SourceTrace }
 type Capture = {
+  source: string; blankLines: BlankDraft[]; fallback?: FallbackEmpty
   trace: SourceTrace; lineStarts: number[]; protectedSources: ProtectedSource[]; runs: CapturedTextRun[]; roots: SourceRoot[]
   synthetic: { gapIndex: number; emission: SyntheticEmission }[]
 }
@@ -731,49 +732,73 @@ function captureText(state: any, token: any, delegate: () => void) {
 type RootDraft = {
   collector: Capture; kind: 'natural' | 'synthetic'; gapIndex: number
   id: number; tokenType: string; sourceFrom: number; sourceTo: number; tailFrom: number
-  childFrom?: number; pmFrom?: number
+  childFrom?: number; pmFrom?: number; layout?: BlankDraft | 'fallback'
 }
-const syntheticTokens = new WeakSet<object>()
 const rootStarts = new WeakMap<object, RootDraft>()
 const rootEnds = new WeakMap<object, RootDraft>()
 
-function prepareRootEvents(tokens: InlineToken[], collector: Capture): void {
+function prepareRootEvents(tokens: InlineToken[], collector: Capture): InlineToken[] {
   const starts = collector.lineStarts
-  let natural = 0
   const renderable = new Set(['paragraph_open', 'heading_open', 'bullet_list_open', 'ordered_list_open',
     'blockquote_open', 'table_open', 'footnote_reference_open', 'dl_open', 'hr',
     'fence', 'code_block', 'front_matter', 'html_block', 'math_block', 'math_block_eqno'])
+  const flowTail = new Set(['bullet_list_open', 'ordered_list_open', 'blockquote_open'])
+  const natural: { draft: RootDraft; first: number; last: number; from: number; to: number; boundaryTo: number }[] = []
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i]!
-    const synthetic = syntheticTokens.has(token)
-    if (token.level !== 0 || token.nesting === -1 || (!token.map && !synthetic)) continue
+    if (token.level !== 0 || token.nesting === -1 || !token.map) continue
     let last = i
     if (token.nesting === 1) {
       last = i + 1
       while (last < tokens.length && !(tokens[last]!.level === 0 && tokens[last]!.nesting === -1)) last++
       if (last === tokens.length) throw new UnsupportedSourceCapture()
     } else if (token.nesting !== 0) throw new UnsupportedSourceCapture()
-    let sourceFrom = 0, sourceTo = 0, tailFrom = 0
-    if (!synthetic) {
-      const from = starts[token.map![0]], to = starts[token.map![1]]
-      if (from === undefined || to === undefined || to <= from) throw new UnsupportedSourceCapture()
-      const raw = rawRange(collector.trace, from, to)
-      if (!raw) throw new UnsupportedSourceCapture()
-      sourceFrom = raw.from; sourceTo = raw.to; tailFrom = sourceTo
-      if (renderable.has(token.type)) {
-        const tail = rawRange(collector.trace, rendererTailStart(collector.trace.text, from, to, token.type), to)
-        if (tail) {
-          if (tail.to !== sourceTo) throw new UnsupportedSourceCapture()
-          tailFrom = tail.from
-        }
-      }
+    const from = starts[token.map[0]], to = starts[token.map[1]]
+    if (from === undefined || to === undefined || to <= from) throw new UnsupportedSourceCapture()
+    const raw = rawRange(collector.trace, from, to)
+    if (!raw) throw new UnsupportedSourceCapture()
+    let tailFrom = raw.to, boundaryTo = to
+    if (renderable.has(token.type)) {
+      const tailWork = rendererTailStart(collector.trace.text, from, to, token.type)
+      const tail = rawRange(collector.trace, tailWork, to)
+      if (tail) { if (tail.to !== raw.to) throw new UnsupportedSourceCapture(); tailFrom = tail.from }
+      if (flowTail.has(token.type) && collector.trace.text[tailWork] === '\n'
+        && /^[ \t\n]*$/.test(collector.trace.text.slice(tailWork + 1, to))) boundaryTo = tailWork + 1
     }
-    const draft: RootDraft = { collector, kind: synthetic ? 'synthetic' : 'natural', gapIndex: natural,
-      id: natural, tokenType: token.type, sourceFrom, sourceTo, tailFrom }
-    if (!synthetic) natural++
+    const id = natural.length
+    const draft: RootDraft = { collector, kind: 'natural', gapIndex: id, id, tokenType: token.type,
+      sourceFrom: raw.from, sourceTo: raw.to, tailFrom }
     rootStarts.set(token, draft); rootEnds.set(tokens[last]!, draft)
-    i = last
+    natural.push({ draft, first: i, last, from, to, boundaryTo }); i = last
   }
+  const regions: LayoutRegion[] = []
+  for (let i = 0; i <= natural.length; i++) {
+    const previous = natural[i - 1], next = natural[i]
+    regions.push({ from: previous?.boundaryTo ?? 0, to: next?.from ?? collector.trace.text.length,
+      insertBefore: next?.first ?? tokens.length, gapIndex: i, left: !!previous, right: !!next,
+      ...(previous ? { previousRoot: previous.draft } : {}) })
+  }
+  collector.blankLines = collectBlankDrafts(collector.source, collector.trace, starts, regions, collector.protectedSources)
+  const inserts = new Map<number, InlineToken[]>()
+  function emit(at: number, layout: BlankDraft | 'fallback') {
+    const mk = (type: string, tag: string, nesting: number, extra: Partial<InlineToken> = {}): InlineToken => ({
+      type, tag, nesting, content: '', children: null, attrs: null, info: '', meta: null, map: null,
+      block: true, hidden: false, level: 0, markup: '', ...extra })
+    const open = mk('paragraph_open', 'p', 1), close = mk('paragraph_close', 'p', -1)
+    const draft: RootDraft = { collector, kind: 'synthetic', gapIndex: 0, id: -1, tokenType: 'paragraph_open',
+      sourceFrom: 0, sourceTo: 0, tailFrom: 0, layout }
+    rootStarts.set(open, draft); rootEnds.set(close, draft)
+    const items = inserts.get(at) ?? []
+    items.push(open, mk('inline', '', 0, { level: 1, block: false, children: [] }), close); inserts.set(at, items)
+  }
+  if (!natural.length) emit(0, 'fallback')
+  for (const unit of collector.blankLines) if (unit.role === 'empty-paragraph') emit(unit.insertBefore, unit)
+  const result: InlineToken[] = []
+  for (let i = 0; i <= tokens.length; i++) {
+    const before = inserts.get(i); if (before) for (const token of before) result.push(token)
+    if (i < tokens.length) result.push(tokens[i]!)
+  }
+  return result
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -798,8 +823,17 @@ function captureRootEmission(state: any, token: any, delegate: () => void): void
       throw new UnsupportedSourceCapture()
     }
     const emission = { childFrom: end.childFrom, childTo: cursor.count, pmFrom: end.pmFrom, pmTo: cursor.pos }
-    if (end.kind === 'synthetic') end.collector.synthetic.push({ gapIndex: end.gapIndex, emission })
-    else end.collector.roots.push({ id: end.id, tokenType: end.tokenType,
+    if (end.kind === 'synthetic') {
+      if (end.layout === 'fallback') {
+        end.collector.fallback = { kind: 'empty-document-baseline',
+          sourceAnchor: end.collector.source.charCodeAt(0) === 0xFEFF ? 1 : 0, emission }
+      } else {
+        const unit = end.layout
+        if (!unit || unit.role !== 'empty-paragraph' || unit.emission) throw new UnsupportedSourceCapture()
+        unit.emission = emission
+        if (unit.container.kind === 'gap') end.collector.synthetic.push({ gapIndex: unit.container.gapIndex, emission })
+      }
+    } else end.collector.roots.push({ id: end.id, tokenType: end.tokenType,
       sourceFrom: end.sourceFrom, sourceTo: end.sourceTo, tailFrom: end.tailFrom, ...emission })
   }
 }
@@ -838,8 +872,7 @@ md.parse = function (src: string, env: unknown) {
   tagPairedHtmlInline(tokens)
   fixFootnoteDefMaps(tokens)
   const collector = (env as { [captureKey]?: Capture } | undefined)?.[captureKey]
-  tokens = preserveBlankLines(tokens, !!collector)
-  if (collector) prepareRootEvents(tokens, collector)
+  tokens = collector ? prepareRootEvents(tokens, collector) : preserveBlankLines(tokens)
   return tokens as unknown as ReturnType<typeof _origMdParse>
 }
 
@@ -1849,7 +1882,7 @@ export function parseDocumentWithSourceCapture(source: string, schema?: Schema):
       trace = editTrace(trace, edits)
       if (trace.text !== after) throw new UnsupportedSourceCapture()
     })
-    const collector: Capture = { trace, lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [] }
+    const collector: Capture = { source, trace, lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [] }
     const doc = getParserFor(schema).parse(work, { [captureKey]: collector })
     // Build one independent PM index. Only actual top-level paragraph text
     // children qualify; atoms leave gaps, and paragraph identity is retained.
@@ -1887,6 +1920,7 @@ export function parseDocumentWithSourceCapture(source: string, schema?: Schema):
     }
     return { ok: true, value: { doc, textRuns: collector.runs,
       protectedSources: Object.freeze(collector.protectedSources),
+      layout: finishSourceLayout(collector.blankLines, collector.fallback),
       roots: collector.roots, gaps: buildSourceGaps(source, collector.roots, collector.synthetic) } }
   } catch (error) {
     return { ok: false, reason: error instanceof UnsupportedSourceCapture || error instanceof UnsupportedOwnership ? 'unsupported-source' : 'parse-error' }

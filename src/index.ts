@@ -82,3 +82,5 @@ export { projectLineEndings, sourceOffsetAt, viewOffsetAt } from './source-proje
 export type { EolChange, EolProjection } from './source-projection'
 
 export type { SourceRoot, SourceGap, SyntheticEmission, SourceEdit, ProtectedSource } from './source-ownership'
+
+export type { LayoutContainer, BlankLineUnit, FallbackEmpty, SourceLayout } from './source-layout'
