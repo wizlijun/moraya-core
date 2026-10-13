@@ -35,12 +35,17 @@ it('same actual table cell supports full-body strong fragment',()=>{
  const {r}=bold('| H |\n| :--- |\n|  Alpha  |\n',[0,1,0,0]);
  expect(r.ok).toBe(true);if(r.ok){expect(r.mode).toBe('fragment-render');expect(r.session.source).toBe('| H |\n| :--- |\n|  **Alpha**  |\n');}
 });
-it.each(['| H | J |\n| --- | --- |\n| 甲 |\n','| H | J |\n| --- | --- |\n| 甲 |   |\n'])('empty cell insert fails without table formatting %j',raw=>{
- const base=open(raw),p=at(base.doc,[0,1,1,0]);
+it.each([
+ ['| H | J |\n| --- | --- |\n| 甲 |\n','| H | J |\n| --- | --- |\n| 甲 |乙|\n','乙|'],
+ ['| H | J |\n| --- | --- |\n| 甲 |   |\n','| H | J |\n| --- | --- |\n| 甲 |乙   |\n','乙'],
+])('empty cell insert retains table formatting %j',(raw,expected,text)=>{
+ const base=open(raw!),p=at(base.doc,[0,1,1,0]);
  expect(base.doc.resolve(p).parent.content.size).toBe(0);
  expect(base.textSpans.some(s=>s.pmFrom<=p&&s.pmTo>=p)).toBe(false);
  const result=applySourceBlockTransaction(base,EditorState.create({doc:base.doc}).tr.insertText('乙',p));
- expect(result.ok).toBe(false);expect(base.source).toBe(raw);
+ expect(result.ok).toBe(true);if(!result.ok)throw Error(result.reason);
+ expect(result.session.source).toBe(expected);expect(base.source).toBe(raw);
+ expect(result.edits).toEqual([{from:29,to:29,text}]);
 });
 it('legacy raw BOM initialization differs from source capture',async()=>{
  const raw='\uFEFF---\r\ntitle: 甲\r\n---\r\n',container=document.createElement('div');

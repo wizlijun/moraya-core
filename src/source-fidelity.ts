@@ -1,8 +1,9 @@
+import {prepareEmptyBodyTransaction} from './source-empty-body'
 import { prepareRawFileSourceEdits, createFileSourceSession, emptyFileParseWork, prepareVerifiedFileBase, finishUnchangedFile, prepareCandidate, preparePreservingSourceCandidate, type VerifiedFileBase } from './source-file-cache'
 import { Fragment, type Node as PmNode, type ResolvedPos, type Schema } from 'prosemirror-model'
 import { EditorState, type Transaction } from 'prosemirror-state'
 import { AddMarkStep, RemoveMarkStep, ReplaceStep, Mapping } from 'prosemirror-transform'
-import { serializeSourceRootMarkdown, serializeSourceInlineBody, capturedInlineBodies, sourceRootHasClosedFences, capturedSourceLists, type SourceListStyle, type FileWorkAccumulator } from './markdown'
+import { serializeSourceRootMarkdown, serializeSourceInlineBody, capturedInlineBodies, capturedEmptyBodies, sourceRootHasClosedFences, capturedSourceLists, type SourceListStyle, type FileWorkAccumulator } from './markdown'
 import type { SourceLayout, SourceListLexeme } from './source-layout'
 import type { SourceRoot, SourceGap, SourceEdit, ProtectedSource } from './source-ownership'
 import {classifyTransaction,applyStructuralTransaction,UnsupportedSourceStructure,type StructuralRendered} from './source-structure'
@@ -457,6 +458,14 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
    if(result.failed||!result.doc||!result.doc.eq(after))throw new UnsupportedBlockTransaction()
   }
   tr.doc.check()
+  const empty=prepareEmptyBodyTransaction(base,tr,capturedEmptyBodies(base.source,base.doc,base.roots,base.layout)??[])
+  if(empty.kind==='unsupported')throw new UnsupportedBlockTransaction()
+  if(empty.kind==='ready'){
+   const edits=[...empty.recipe.edits],changedRoots=[...empty.recipe.changedRoots]
+   const parsed=preparePreservingSourceCandidate(verified,edits.map(edit=>({...edit,removed:base.source.slice(edit.from,edit.to)})),work,tr.doc)
+   if(!parsed.ok)return {ok:false,reason:parsed.reason}
+   return {ok:true,session:parsed.session,file:parsed.file,mode:'fragment-render',edits,changedRoots}
+  }
   if(classification==='structural'){
    const render=(nodes:PmNode[],positions:readonly number[]):StructuralRendered=>{
     const lists:{node:PmNode;style:SourceListStyle}[]=[],styles=transactionListStyles(tr,authority.facts,nodes.map((node,i)=>({node,pos:positions[i]!}))),rendered=nodes.map((node,i)=>rootRenderNode(node,positions[i]!,styles,lists)),doc=tr.doc.type.create(tr.doc.attrs,Fragment.fromArray(rendered))

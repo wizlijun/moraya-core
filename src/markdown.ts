@@ -34,8 +34,9 @@ import { defaultSchema } from './schema'
 import { projectLineEndings } from './source-projection'
 import { rawRange, lineStarts, rendererTailStart, UnsupportedOwnership, type SourceRoot, type SourceGap, type SyntheticEmission, type ProtectedSource } from './source-ownership'
 import { collectBlankDrafts, finishSourceLayout, type BlankDraft, type FallbackEmpty, type SourceLayout, type LayoutRegion, type SourceListLexeme, type ListMarker } from './source-layout'
+import type {EmptyBody,EmptyPlace,RawRange,SourcePrefix} from './source-empty-body'
 import { traceConsumedLines, traceTableRow, type LineRead } from './source-content-trace'
-import { identityTrace, sliceTrace, editTrace, type SourceTrace, type TraceEdit } from './source-trace'
+import { identityTrace, sliceTrace, editTrace, firstPiece, type SourceTrace, type TraceEdit } from './source-trace'
 
 // ── markdown-it instance ────────────────────────────────────────
 
@@ -413,7 +414,8 @@ md.block.ruler.before(
     const collector=collectorFor(state)
     if(collector){
       if(contentStart===undefined||contentEnd===undefined)throw new UnsupportedSourceCapture()
-      literalFacts.set(token,{collector,trace:sliceTrace(collector.trace,contentStart,contentEnd),kind:'front_matter'})
+      const empty=emptyLiteral(state,startLine,nextLine,0,token.content)
+      literalFacts.set(token,{collector,trace:sliceTrace(collector.trace,contentStart,contentEnd),kind:'front_matter',...(empty?{empty}:{})})
     }
 
     state.line = nextLine + 1
@@ -434,7 +436,7 @@ type SourceRun = { text: string; kind?: undefined; trace?: undefined }
   | { text: string; kind: 'linear' | 'atomic'; trace: SourceTrace }
 type Capture = {
   file?: FileCaptureState
-  bodies: InlineBody[]; emissions: InlineEmission[]
+  emptyBodies: EmptyBody[]; bodies: InlineBody[]; emissions: InlineEmission[]
   source: string; blankLines: BlankDraft[]; fallback?: FallbackEmpty; lists: ListDraft[]
   trace: SourceTrace; lineStarts: number[]; protectedSources: ProtectedSource[]; runs: CapturedTextRun[]; roots: SourceRoot[]
   synthetic: { gapIndex: number; emission: SyntheticEmission }[]
@@ -445,11 +447,11 @@ type InlineBody = Readonly<{
   pmFrom:number; pmTo:number; sourceFrom:number; sourceTo:number
   kind:'paragraph'|'heading'|'table-cell'; singlePhysicalLine:boolean
 }>
-type InlineEmission = {from:number;to:number;kind:string;runFrom:number;runTo:number;node?:PmNode;body?:InlineBody}
+type InlineEmission = {from:number;to:number;kind:string;runFrom:number;runTo:number;node?:PmNode;body?:InlineBody;empty?:EmptyPlace}
 const inlineFrames=new WeakMap<object,InlineEmission>()
 const inlineCloseStates=new WeakSet<object>()
-const inlineFacts = new WeakMap<object, {collector:Capture;trace?:SourceTrace;kind?:InlineBody['kind']}>()
-const literalFacts=new WeakMap<object,{collector:Capture;trace:SourceTrace;kind:string}>()
+const inlineFacts = new WeakMap<object, {collector:Capture;trace?:SourceTrace;kind?:InlineBody['kind'];empty?:EmptyPlace;trimEnd?:number}>()
+const literalFacts=new WeakMap<object,{collector:Capture;trace:SourceTrace;kind:string;empty?:EmptyPlace}>()
 const capturedTextParents=['paragraph','heading','code_block','frontmatter','html_block']
 const capturedTextMarks=['em','strong','link','annotation','html_mark','highlight','strike_through']
 const tokenArrays = new WeakMap<object, object>()
@@ -459,7 +461,7 @@ const pendingSources = new WeakMap<object, SourceRun[]>()
 const capturedFenceClosed = new WeakMap<object, boolean>()
 const capturedRootFencesClosed = new WeakMap<SourceRoot, boolean>()
 const capturedListLayouts = new WeakMap<SourceLayout, {
-  source: string; doc: PmNode; roots: readonly SourceRoot[]; lists: readonly SourceListLexeme[]; bodies: readonly InlineBody[]
+  source: string; doc: PmNode; roots: readonly SourceRoot[]; lists: readonly SourceListLexeme[]; emptyBodies:readonly EmptyBody[]; bodies: readonly InlineBody[]
 }>()
 let captureAvailable = true
 
@@ -475,6 +477,31 @@ export function capturedInlineBodies(source:string,doc:PmNode,roots:readonly Sou
   return bound&&bound.source===source&&bound.doc===doc&&bound.roots===roots&&bound.lists===layout.lists?bound.bodies:undefined
 }
 
+export function capturedEmptyBodies(source:string,doc:PmNode,roots:readonly SourceRoot[],layout:SourceLayout):readonly EmptyBody[]|undefined {
+ const bound=capturedListLayouts.get(layout)
+ return bound&&bound.source===source&&bound.doc===doc&&bound.roots===roots&&bound.lists===layout.lists?bound.emptyBodies:undefined
+}
+
+// Only copy boundaries and complete atomic endpoints have a raw insertion point.
+function rawPoint(trace:SourceTrace,at:number):number|undefined {
+ const points=new Set<number>()
+ const index=firstPiece(trace,at)
+ for(const p of [trace.pieces[index-1],trace.pieces[index]]){
+  if(!p)continue
+  if(p.kind==='generated')continue
+  if(p.kind==='copy'&&p.from<=at&&at<=p.to)points.add(p.sourceFrom+at-p.from)
+  else {if(p.from===at)points.add(p.sourceFrom);if(p.to===at)points.add(p.sourceTo)}
+ }
+ return points.size===1?[...points][0]:undefined
+}
+function emptyInline(collector:Capture,from:number,to=from,before='',after=''):EmptyPlace|undefined {
+ const a=rawPoint(collector.trace,from),b=rawPoint(collector.trace,to)
+ return a===undefined||b===undefined?undefined:{kind:'inline',range:{from:a,to:b},before,after}
+}
+function actualEol(collector:Capture,end:number):RawRange|undefined {
+ return collector.trace.text[end]==='\n'?rawRange(collector.trace,end,end+1):undefined
+}
+
 /** Internal source-render guard; a missing capture fact is not permission. */
 export function sourceRootHasClosedFences(root: SourceRoot): boolean {
   return capturedRootFencesClosed.get(root) === true
@@ -487,16 +514,126 @@ function wrapCaptureRule(ruler: any, name: string, wrapper: (original: any, ...a
   const original = ruler.__rules__?.find((rule: { name: string }) => rule.name === name)?.fn
   if (typeof original !== 'function') { captureAvailable = false; return }
   const alt = preserveAlternates ? ruler.__rules__.find((rule: { name: string }) => rule.name === name).alt.slice() : []
-  ruler.at(name, (...args: unknown[]) => wrapper(original, ...args), { alt })
+  ruler.at(name, (...args: any[]) => {
+    const [state,line,,silent]=args,frame=containerFrames.get(state)?.at(-1)
+    const read=ruler===md.block.ruler&&!silent&&frame?.kind==='list'?frame.current:undefined
+    const index=state.tokens?.length
+    const entry=read&&index===read.index+1?{from:state.bMarks[line]+state.tShift[line],end:state.eMarks[line]}:undefined
+    const result=wrapper(original,...args)
+    if(result&&entry&&state.tokens[index]&&state.tokens[index].map?.[0]===line){read!.body=entry.from;read!.e=entry.end}
+    return result
+  }, { alt })
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const collectorFor = (state: any): Capture | undefined => state.env?.[captureKey]
+type ContainerRead={token:any;index:number;line:number;b:number;t:number;e:number;body?:number;prefix?:SourcePrefix;first?:any}
+type ContainerFrame={kind:string;entryIndent:number;marker:number;prefix:SourcePrefix;reads:ContainerRead[];current?:ContainerRead}
+const containerFrames=new WeakMap<object,ContainerFrame[]>()
+const containerEnds=new WeakMap<object,{collector:Capture;place:EmptyPlace;kind:string}>()
+function activePrefix(state:any):SourcePrefix {
+ const frames=containerFrames.get(state),frame=frames?.[frames.length-1]
+ return frame?.current?.prefix??frame?.prefix??[]
+}
+// An instance-local facade observes the installed tokenizer exactly once.
+function observeContainerTokenize(state:any):void {
+ const engine=state.md,block=engine.block,facade=Object.create(engine),localBlock=Object.create(block)
+ localBlock.tokenize=function(actual:any,start:number,end:number,...rest:any[]){
+  const frames=containerFrames.get(actual),frame=frames?.[frames.length-1],collector=collectorFor(actual)
+  if(frame&&collector){
+   let read=frame.current
+   if(frame.kind==='footnote_def'){
+    const token=actual.tokens[actual.tokens.length-1]
+    if(token?.type!=='footnote_reference_open')throw new UnsupportedSourceCapture()
+    read={token,index:actual.tokens.length-1,line:start,b:actual.bMarks[start],t:actual.tShift[start],e:actual.eMarks[start]}
+    frame.reads.push(read);frame.current=read
+   }
+   if(read){
+    if(start!==read.line)throw new UnsupportedSourceCapture()
+    read.body=actual.bMarks[start]+actual.tShift[start]
+    if(frame.kind==='blockquote'){
+     const raw=rawRange(collector.trace,frame.marker,actual.bMarks[start])
+     if(raw)read.prefix=[...frame.prefix,raw]
+    }else read.prefix=[...frame.prefix,{spaces:actual.blkIndent-frame.entryIndent}]
+    const first=actual.tokens.length
+    const result=block.tokenize.call(block,actual,start,end,...rest)
+    read.first=actual.tokens[first]
+    return result
+   }
+  }
+  return block.tokenize.call(block,actual,start,end,...rest)
+ }
+ facade.block=localBlock;state.md=facade
+}
+for(const name of ['list','blockquote','footnote_def'])wrapCaptureRule(md.block.ruler,name,(original,state,startLine,endLine,silent)=>{
+ const collector=collectorFor(state)
+ if(!collector||silent)return original(state,startLine,endLine,silent)
+ let frames=containerFrames.get(state)
+ if(!frames){frames=[];containerFrames.set(state,frames)}
+ const frame:ContainerFrame={kind:name,entryIndent:state.blkIndent,marker:name==='blockquote'?state.bMarks[startLine]+state.tShift[startLine]:0,prefix:activePrefix(state),reads:[]}
+ const push=state.push,engine=state.md,outer=frames.length===0
+ if(outer)observeContainerTokenize(state)
+ frames.push(frame)
+ state.push=function(type:string,...args:any[]){
+  const token=push.call(this,type,...args)
+  if(frames![frames!.length-1]===frame&&((name==='list'&&type==='list_item_open')||(name==='blockquote'&&type==='blockquote_open'))){
+   const line=name==='blockquote'?startLine:this.line
+   const read:ContainerRead={token,index:this.tokens.length-1,line,b:this.bMarks[line],t:this.tShift[line],e:this.eMarks[line]}
+   frame.reads.push(read);frame.current=read
+  }
+  return token
+ }
+ let result
+ try{result=original(state,startLine,endLine,silent)}finally{state.push=push;frames.pop();if(outer)state.md=engine}
+ if(!result)return result
+ for(const read of frame.reads){
+  const token=read.token,index=read.index
+  if(name==='footnote_def')token.map=[startLine,state.line]
+  if(token.map?.[0]!==read.line||state.tokens[index]!==token)throw new UnsupportedSourceCapture()
+  let close=index+1,depth=1
+  for(;close<state.tokens.length;close++){depth+=state.tokens[close].nesting;if(depth===0)break}
+  const last=state.tokens[close]
+  if(last?.type!==token.type.replace('_open','_close'))throw new UnsupportedSourceCapture()
+  let place:EmptyPlace|undefined
+  if(close===index+1){
+   let from=read.b
+   if(name==='list'){
+    const marker=String(token.info??'')+token.markup,start=read.b+read.t
+    if(state.src.slice(start,start+marker.length)!==marker)throw new UnsupportedSourceCapture()
+    from=start+marker.length
+    const padding=state.src.slice(from,read.e)
+    if(!/^[ \t]*$/.test(padding))continue
+    if(padding[0]===' ')from++
+    place=emptyInline(collector,from,read.e,from===start+marker.length?' ':'')
+   }else{
+    from=name==='blockquote'?read.b:read.body??read.b
+    if(!/^[ \t]*$/.test(state.src.slice(from,read.e)))continue
+    place=emptyInline(collector,from,read.e)
+   }
+  }else if(name==='list'&&read.first&&read.first===state.tokens[index+1]&&read.first.type!=='paragraph_open'&&read.body!==undefined&&read.prefix){
+   const at=rawPoint(collector.trace,read.body)
+   if(at!==undefined)place={kind:'prepend',at,eol:actualEol(collector,read.e),continuation:read.prefix}
+  }
+  if(place)containerEnds.set(last,{collector,place,kind:name==='list'?'list_item':name==='blockquote'?'blockquote':'footnote_definition'})
+ }
+ return result
+},true)
+function captureContainerEmission(state:any,token:any,delegate:()=>void):void {
+ const fact=containerEnds.get(token)
+ if(!fact){delegate();return}
+ const outer=state.stack[state.stack.length-2],slot=outer?.content.length
+ delegate()
+ const node:PmNode|undefined=outer?.content[slot]
+ if(!node||node.type.name!==fact.kind)return
+ const parent=node.firstChild
+ if(!parent||parent.type.name!=='paragraph'||parent.content.size||!parent.hasMarkup(parent.type))return
+ fact.collector.emissions.push({from:0,to:0,kind:'paragraph',runFrom:fact.collector.runs.length,runTo:fact.collector.runs.length,node:parent,empty:fact.place})
+}
 wrapCaptureRule(md.block.ruler, 'fence', (original, state, startLine, endLine, silent) => {
   if (!collectorFor(state) || silent) return original(state, startLine, endLine, silent)
   const originalGetLines = state.getLines, descriptor = Object.getOwnPropertyDescriptor(state, 'getLines')
   if (typeof originalGetLines !== 'function' || descriptor?.configurable === false) throw new UnsupportedSourceCapture()
   const tokenStart = state.tokens.length
-  let contentEnd: number | undefined, bodyTrace:SourceTrace|undefined
+  let contentEnd: number | undefined, bodyTrace:SourceTrace|undefined,empty:EmptyPlace|undefined
   Object.defineProperty(state, 'getLines', {
     configurable: true, writable: true, enumerable: descriptor?.enumerable ?? false,
     value: function (this: unknown, begin: number, end: number, indent: number, keepLastLF: boolean) {
@@ -508,6 +645,7 @@ wrapCaptureRule(md.block.ruler, 'fence', (original, state, startLine, endLine, s
       })}
       const value=originalGetLines.call(this,begin,end,indent,keepLastLF)
       bodyTrace=traceConsumedLines(collectorFor(state)!.trace,read,value)
+      empty=emptyLiteral(state,startLine,end,indent,value)
       return value
     },
   })
@@ -522,10 +660,10 @@ wrapCaptureRule(md.block.ruler, 'fence', (original, state, startLine, endLine, s
       || token.map?.[0] !== startLine || token.map?.[1] !== state.line
       || (state.line !== contentEnd && state.line !== contentEnd + 1)) throw new UnsupportedSourceCapture()
     capturedFenceClosed.set(token, state.line === contentEnd + 1)
-    if(bodyTrace)literalFacts.set(token,{collector:collectorFor(state)!,trace:bodyTrace,kind:token.type})
+    if(bodyTrace)literalFacts.set(token,{collector:collectorFor(state)!,trace:bodyTrace,kind:token.type,...(state.line===contentEnd+1&&empty?{empty}:{})})
   } else if (contentEnd !== undefined) throw new UnsupportedSourceCapture()
   return result
-})
+},true)
 // Capture the installed literal getLines call while container line tables are active.
 for(const name of ['code','html_block'])wrapCaptureRule(md.block.ruler,name,(original,state,...args)=>{
   const collector=collectorFor(state)
@@ -562,7 +700,7 @@ wrapCaptureRule(md.block.ruler,'table',(original,state,...args)=>{
   for(let i=0;i<tokens.length;i++){
     const row=tokens[i]
     if(row.type!=='tr_open'||!row.map)continue
-    const slots=[]
+    const slots:InlineToken[]=[]
     let j=i+1
     for(;j<tokens.length&&tokens[j].type!=='tr_close';j+=3){
       if(!['th_open','td_open'].includes(tokens[j]?.type)||tokens[j+1]?.type!=='inline'
@@ -571,7 +709,13 @@ wrapCaptureRule(md.block.ruler,'table',(original,state,...args)=>{
     }
     if(tokens[j]?.type!=='tr_close')throw new UnsupportedSourceCapture()
     const line=row.map[0]
-    const projected=traceTableRow(collector.trace,state.bMarks[line]+state.tShift[line],state.eMarks[line],slots.map(t=>t.content))
+    const projected=traceTableRow(collector.trace,state.bMarks[line]+state.tShift[line],state.eMarks[line],slots.map(t=>t.content),slot=>{
+      const at=rawPoint(collector.trace,slot.missing?slot.rowEnd:slot.from)
+      if(at===undefined)return
+      const empty:EmptyPlace=slot.missing?{kind:'missing-cell',at,row:line,slot:slot.slot,present:slot.present,closingPipe:slot.closingPipe}
+        :{kind:'inline',range:{from:at,to:at},before:'',after:''}
+      inlineFacts.set(slots[slot.slot]!,{collector,empty})
+    })
     if(projected)slots.forEach((token,k)=>{const trace=projected[k];if(trace)bindInlineTrace(token,collector,trace,'table-cell')})
     i=j
   }
@@ -651,14 +795,14 @@ wrapCaptureRule(md.block.ruler, 'reference', function observeReferenceCandidate(
 function bindInlineTrace(token:any,collector:Capture,trace:SourceTrace,kind:InlineBody['kind']):void {
   if(trace.text!==token.content||!Array.isArray(token.children))throw new UnsupportedSourceCapture()
   owners.set(token.children,trace);tokenArrays.set(token,token.children)
-  inlineFacts.set(token,{collector,trace,kind})
+  inlineFacts.set(token,{...inlineFacts.get(token),collector,trace,kind})
 }
 for(const name of ['paragraph','lheading'])wrapCaptureRule(md.block.ruler,name,(original,state,...args)=>{
   const collector=collectorFor(state)
   if(!collector)return original(state,...args)
   const level=state.level,originalGetLines=state.getLines,start=state.tokens.length
   if(typeof originalGetLines!=='function'||!Array.isArray(state.bMarks)||!Array.isArray(state.eMarks))throw new UnsupportedSourceCapture()
-  let capturedLines:SourceTrace|undefined,terminal:string|undefined
+  let capturedLines:SourceTrace|undefined,terminal:string|undefined,trimEnd:number|undefined
   state.getLines=function(begin:number,end:number,indent:number,keepLastLF:boolean){
     const read:LineRead={begin,end,indent,keepLastLF,rows:Array.from({length:end-begin},(_,i)=>{
       const line=begin+i;return {b:this.bMarks[line],e:this.eMarks[line],t:this.tShift[line],bs:this.bsCount[line]}
@@ -667,6 +811,7 @@ for(const name of ['paragraph','lheading'])wrapCaptureRule(md.block.ruler,name,(
     let part=traceConsumedLines(collector.trace,read,value)
     if(!part)throw new UnsupportedSourceCapture()
     const endOfLine=read.rows[read.rows.length-1]?.e
+    if(endOfLine!==undefined)trimEnd=rawPoint(collector.trace,endOfLine)
     let slashes=0
     for(let i=value.length-1;i>=0&&value[i]==='\\';i--)slashes++
     const restore=name==='paragraph'&&!keepLastLF&&endOfLine!==undefined&&this.src[endOfLine]==='\n'
@@ -687,6 +832,7 @@ for(const name of ['paragraph','lheading'])wrapCaptureRule(md.block.ruler,name,(
     if(terminal!==undefined)token.content=terminal
     if(!capturedLines)throw new UnsupportedSourceCapture()
     bindInlineTrace(token,collector,capturedLines,name==='paragraph'?'paragraph':'heading')
+    if(trimEnd!==undefined)inlineFacts.set(token,{...inlineFacts.get(token)!,trimEnd})
   }
   return result
 },true)
@@ -707,6 +853,11 @@ wrapCaptureRule(md.block.ruler,'heading',(original,state,startLine,endLine,silen
     const end=charsEnd>from&&/[ \t]/.test(state.src[charsEnd-1])?charsEnd:spacesEnd
     const part=sliceTrace(collector.trace,from,end),left=part.text.length-part.text.trimStart().length
     bindInlineTrace(token,collector,sliceTrace(part,left,left+part.text.trim().length),'heading')
+    if(token.content===''){
+      const closing=charsEnd<spacesEnd,at=closing?Math.min(from+1,charsEnd):state.eMarks[startLine]
+      const empty=emptyInline(collector,at,at,at===from?' ':'',closing&&at===charsEnd?' ':'')
+      if(empty)inlineFacts.set(token,{...inlineFacts.get(token)!,empty})
+    }
   }
   return result
 },true)
@@ -902,6 +1053,20 @@ function captureText(state: any, token: any, delegate: () => void) {
   if (captureCursor(state) !== pos) throw new UnsupportedSourceCapture()
 }
 
+function emptyLiteral(state:any,start:number,end:number,indent:number,content:string):EmptyPlace|undefined {
+ const collector=collectorFor(state)!
+ if(content!==''&&content!=='\n')return undefined
+ const eol=actualEol(collector,state.eMarks[start]);if(!eol)return undefined
+ const prefix:SourcePrefix=[...activePrefix(state),...(indent>state.blkIndent?[{spaces:indent-state.blkIndent}]:[])]
+ if(content==='\n'){
+  const terminal=actualEol(collector,state.eMarks[start+1]),at=rawPoint(collector.trace,state.eMarks[start+1])
+  if(!terminal||at===undefined)return undefined
+  return {kind:'literal',at,terminal,eol,prefix,closed:true}
+ }
+ const at=rawPoint(collector.trace,collector.lineStarts[end]!)
+ return at===undefined?undefined:{kind:'literal',at,eol,prefix,closed:true}
+}
+
 // noCloseToken handlers addText directly, so observe their completed actual node.
 function captureLiteralEmission(state:any,token:any,delegate:()=>void):void {
   const fact=literalFacts.get(token)
@@ -918,7 +1083,7 @@ function captureLiteralEmission(state:any,token:any,delegate:()=>void):void {
   const trace=sliceTrace(fact.trace,0,text.length),runFrom=fact.collector.runs.length
   for(const p of trace.pieces)if(p.kind!=='generated')fact.collector.runs.push({sourceFrom:p.sourceFrom,sourceTo:p.sourceTo,
     pmFrom:from+p.from,pmTo:from+p.to,kind:p.kind==='copy'?'linear':'atomic'})
-  fact.collector.emissions.push({from,to:from+text.length,kind,runFrom,runTo:fact.collector.runs.length,node})
+  fact.collector.emissions.push({from,to:from+text.length,kind,runFrom,runTo:fact.collector.runs.length,node,...(fact.empty?{empty:fact.empty}:{})})
 }
 
 // Inline handlers emit into one actual open PM frame, including table cell paragraphs.
@@ -942,7 +1107,7 @@ function captureInlineEmission(state:any,token:any,delegate:()=>void):void {
   const to=captureCursor(state)
   if(state.stack[state.stack.length-1]!==frame)throw new UnsupportedSourceCapture()
   if(!['paragraph','heading'].includes(frame.type.name))return
-  const emission:InlineEmission={from,to,kind:frame.type.name,runFrom,runTo:fact.collector.runs.length}
+  const emission:InlineEmission={from,to,kind:frame.type.name,runFrom,runTo:fact.collector.runs.length,...(fact.empty?{empty:fact.empty}:{})}
   fact.collector.emissions.push(emission);inlineFrames.set(frame,emission)
   if(fact.trace&&fact.kind){
     const pieces=fact.trace.pieces
@@ -1275,7 +1440,10 @@ const parserTokens: Record<string, import('prosemirror-markdown').ParseSpec> = {
             const fact=inlineFacts.get(t)
             if(fact?.trace){
               if(fact.trace.text!==t.content)throw new UnsupportedSourceCapture()
-              inlineFacts.set(t,{...fact,trace:sliceTrace(fact.trace,match[0].length,fact.trace.text.length)})
+              const at=rawPoint(fact.trace,match[0].length)
+              const empty=match[0].length===fact.trace.text.length&&at!==undefined
+                ?{kind:'inline' as const,range:{from:fact.trimEnd??at,to:fact.trimEnd??at},before:(fact.trimEnd??at)>at||/\s$/.test(match[0])?'':' ',after:''}:undefined
+              inlineFacts.set(t,{...fact,trace:sliceTrace(fact.trace,match[0].length,fact.trace.text.length),...(empty?{empty}:{})})
             }
             t.content = t.content.slice(match[0].length)
             // Also update children if they exist
@@ -1680,7 +1848,7 @@ class MorayaMarkdownParser extends MarkdownParser {
     for (const key of Object.keys(h)) {
       const delegate = h[key]!
       h[key] = (state, tok, tokens, i) => captureRootEmission(state, tok,
-        () => captureListEmission(state, tok, () => delegate(state, tok, tokens, i)))
+        () => captureListEmission(state, tok, () => captureContainerEmission(state,tok,()=>delegate(state, tok, tokens, i))))
     }
   }
 }
@@ -2396,9 +2564,13 @@ function finalizeCapturedDocument(collector: Capture, doc: PmNode): CapturedDocu
       if(!emission.node||emitted.has(emission.node))throw new UnsupportedSourceCapture()
       emitted.set(emission.node,emission)
     }
+    const emptyParents=new Map<number,PmNode>();let rootIndex=0
     doc.descendants((parent,offset)=>{
       if(!capturedTextParents.includes(parent.type.name))return
       const from=offset+1,emission=emitted.get(parent)
+      if(parent.content.size===0)emptyParents.set(from,parent)
+      while(collector.roots[rootIndex]&&collector.roots[rootIndex]!.pmTo<=from)rootIndex++
+      const root=collector.roots[rootIndex]
       if(emission){
         emitted.delete(parent);occurrences.add(from)
         if(parent.content.size!==emission.to-emission.from||parent.type.name!==emission.kind)throw new UnsupportedSourceCapture()
@@ -2408,6 +2580,7 @@ function finalizeCapturedDocument(collector: Capture, doc: PmNode): CapturedDocu
           if(run.pmFrom<emission.from||run.pmTo>emission.to)throw new UnsupportedSourceCapture()
           run.pmFrom+=delta;run.pmTo+=delta
         }
+        if(emission.empty&&parent.content.size===0)collector.emptyBodies.push({pmAt:from,parent,place:emission.empty,...(root&&root.pmFrom<from&&from<root.pmTo?{rootId:root.id}:{})})
         if(emission.body)collector.bodies.push({...emission.body,pmFrom:from,pmTo:from+parent.content.size})
       }
       parent.forEach((node,inner)=>{if(node.isText)text.push({node,parentFrom:from,from:from+inner,to:from+inner+node.nodeSize})})
@@ -2442,7 +2615,14 @@ function finalizeCapturedDocument(collector: Capture, doc: PmNode): CapturedDocu
     }
     const lists = finishSourceLists(doc, collector)
     const layout = finishSourceLayout(collector.blankLines, collector.fallback, lists)
-    capturedListLayouts.set(layout, { source, doc, roots: collector.roots, lists, bodies:Object.freeze(collector.bodies.map(body=>Object.freeze(body))) })
+    const layoutBody=(pmFrom:number,place:EmptyPlace)=>{
+      const parent=emptyParents.get(pmFrom+1)
+      if(parent&&parent.type.name==='paragraph'&&parent.hasMarkup(parent.type)&&!parent.content.size)
+        collector.emptyBodies.push({pmAt:pmFrom+1,parent,place})
+    }
+    for(const u of layout.blankLines)if(u.role==='empty-paragraph')layoutBody(u.emission.pmFrom,{kind:'layout',origin:{kind:'blank',id:u.id}})
+    if(layout.fallback)layoutBody(layout.fallback.emission.pmFrom,{kind:'layout',origin:{kind:'fallback'}})
+    capturedListLayouts.set(layout, { emptyBodies:Object.freeze(collector.emptyBodies.map(f=>Object.freeze(f))), source, doc, roots: collector.roots, lists, bodies:Object.freeze(collector.bodies.map(body=>Object.freeze(body))) })
     return { doc, textRuns: collector.runs,
       protectedSources: Object.freeze(collector.protectedSources),
       layout,
@@ -2517,7 +2697,7 @@ export function preprocessFileSource(source: string): SourceTrace {
 }
 
 function newFileCollector(source: string, trace: SourceTrace, work: FileWorkAccumulator): Capture {
-  return { source, trace, bodies: [], emissions: [], lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [], lists: [],
+  return { source, trace, emptyBodies:[], bodies: [], emissions: [], lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [], lists: [],
     file: { work, checkpoints: [], definitions: [], blockTokens: [], effects: [] } }
 }
 
@@ -2541,6 +2721,18 @@ function shiftTrace(trace: SourceTrace, delta: number): SourceTrace {
     sourceFrom: p.sourceFrom + delta, sourceTo: p.sourceTo + delta })) }
 }
 
+function shiftEmpty(place:EmptyPlace,delta:number,lines:number):EmptyPlace {
+ const range=(r:RawRange):RawRange=>({from:r.from+delta,to:r.to+delta})
+ const prefix=(p:SourcePrefix):SourcePrefix=>p.map(r=>'spaces' in r?r:range(r))
+ switch(place.kind){
+  case 'inline':return {...place,range:range(place.range)}
+  case 'missing-cell':return {...place,at:place.at+delta,row:place.row+lines}
+  case 'literal':return {...place,at:place.at+delta,eol:range(place.eol),prefix:prefix(place.prefix),...(place.terminal?{terminal:range(place.terminal)}:{})}
+  case 'prepend':return {...place,at:place.at+delta,continuation:prefix(place.continuation),eol:place.eol?range(place.eol):undefined}
+  case 'nested-blank':return {...place,range:range(place.range),prefix:prefix(place.prefix),...(place.eol?{eol:range(place.eol)}:{})}
+  case 'layout':return place
+ }
+}
 function cloneTokenBatch(tokens: readonly ActualToken[], collector: Capture, rawDelta = 0, lineDelta = 0): ActualToken[] {
   const clone = (token: ActualToken): ActualToken => {
     const copy: ActualToken = Object.create(Object.getPrototypeOf(token))
@@ -2559,10 +2751,12 @@ function cloneTokenBatch(tokens: readonly ActualToken[], collector: Capture, raw
       ? { text: run.text, kind: run.kind, trace: shiftTrace(run.trace, rawDelta) } : { text: run.text }) })
     if(token.type==='inline'){
       const fact=inlineFacts.get(token)
-      inlineFacts.set(copy,{collector,...(fact?.kind?{kind:fact.kind}:{}),...(fact?.trace?{trace:shiftTrace(fact.trace,rawDelta)}:{})})
+      inlineFacts.set(copy,{collector,...(fact?.empty?{empty:shiftEmpty(fact.empty,rawDelta,lineDelta)}:{}),...(fact?.trimEnd!==undefined?{trimEnd:fact.trimEnd+rawDelta}:{}),...(fact?.kind?{kind:fact.kind}:{}),...(fact?.trace?{trace:shiftTrace(fact.trace,rawDelta)}:{})})
     }
     const literal=literalFacts.get(token)
-    if(literal)literalFacts.set(copy,{collector,trace:shiftTrace(literal.trace,rawDelta),kind:literal.kind})
+    if(literal)literalFacts.set(copy,{collector,trace:shiftTrace(literal.trace,rawDelta),kind:literal.kind,...(literal.empty?{empty:shiftEmpty(literal.empty,rawDelta,lineDelta)}:{})})
+    const container=containerEnds.get(token)
+    if(container)containerEnds.set(copy,{collector,kind:container.kind,place:shiftEmpty(container.place,rawDelta,lineDelta)})
     const closed = capturedFenceClosed.get(token)
     if (closed !== undefined) capturedFenceClosed.set(copy, closed)
     return copy

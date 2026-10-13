@@ -35,15 +35,17 @@ export function traceConsumedLines(trace:SourceTrace,read:LineRead,actual:string
   return text===actual?{text,pieces}:undefined
 }
 
+export type EmptyTableSlot={slot:number;from:number;to:number;missing:boolean;present:number;closingPipe:boolean;rowEnd:number}
+
 /** Project only a row already selected by the installed table rule. */
-export function traceTableRow(trace:SourceTrace,from:number,to:number,actual:readonly string[]):readonly (SourceTrace|undefined)[]|undefined {
+export function traceTableRow(trace:SourceTrace,from:number,to:number,actual:readonly string[],onEmpty?:(slot:EmptyTableSlot)=>void):readonly (SourceTrace|undefined)[]|undefined {
   const row=sliceTrace(trace,from,to),left=row.text.length-row.text.trimStart().length
   const trimmed=sliceTrace(row,left,left+row.text.trim().length)
-  const cells:SourceTrace[]=[]
+  const cells:SourceTrace[]=[],bounds:{from:number;to:number}[]=[]
   let start=0,escaped=false
   let edits:{from:number;to:number;text:string}[]=[]
   const append=(end:number)=>{
-    cells.push(editTrace(sliceTrace(trimmed,start,end),edits));edits=[]
+    bounds.push({from:from+left+start,to:from+left+end});cells.push(editTrace(sliceTrace(trimmed,start,end),edits));edits=[]
   }
   for(let i=0;i<trimmed.text.length;i++){
     const ch=trimmed.text[i]
@@ -54,8 +56,9 @@ export function traceTableRow(trace:SourceTrace,from:number,to:number,actual:rea
     escaped=ch==='\\'
   }
   append(trimmed.text.length)
-  if(cells[0]?.text==='')cells.shift()
-  if(cells[cells.length-1]?.text==='')cells.pop()
+  if(cells[0]?.text===''){cells.shift();bounds.shift()}
+  const closingPipe=cells[cells.length-1]?.text===''
+  if(closingPipe){cells.pop();bounds.pop()}
   const projected=actual.map((value,i)=>{
     const cell=cells[i]
     if(!cell)return undefined
@@ -63,5 +66,9 @@ export function traceTableRow(trace:SourceTrace,from:number,to:number,actual:rea
     return sliceTrace(cell,leading,leading+cell.text.trim().length)
   })
   if(projected.some((cell,i)=>(cell?.text??'')!==actual[i]))return undefined
+  for(let slot=0;slot<actual.length;slot++)if(actual[slot]===''){
+    const bound=bounds[slot],rowEnd=from+left+trimmed.text.length
+    onEmpty?.({slot,from:bound?.from??rowEnd,to:bound?.to??rowEnd,missing:!bound,present:cells.length,closingPipe,rowEnd})
+  }
   return projected
 }

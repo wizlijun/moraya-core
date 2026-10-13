@@ -4,6 +4,8 @@ All notable changes to `@moraya/core` are documented here. SemVer.
 
 ## Unreleased
 
+- Source-preserving ordinary first input now materializes certified empty paragraphs, headings, list/quote/footnote bodies, table cells and closed code/frontmatter bodies while retaining untouched bytes. Restores installed fence interruption rules. Source and tests only at this stage: rebuilt artifacts, nested blank/Enter closure and installed-host verification follow separately.
+
 - Source-preserving transactions now map actual nested prose, headings, table cells and supported literal bodies, retaining untouched Markdown bytes and protected definitions. Complete LF container windows can reparse locally with bounded block work and replay remote reference changes. File UI, history, native/IME integration and dedicated literal delimiter changes remain future work.
 
 ## [0.1.0] — 2026-05-07

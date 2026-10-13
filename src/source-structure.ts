@@ -491,3 +491,41 @@ export function applyStructuralTransaction(base:SourceSession,tr:Transaction,ren
  verifyRecipe(base,recipe)
  return {source:applyRecipe(base,recipe),edits:recipe.edits,changedRoots:recipe.changedRoots,unchanged:false}
 }
+
+/** Materialize one certified top-level empty origin without rendering any root. */
+export function prepareEmptyParagraphEdits(base:SourceSession,tr:Transaction,
+ origin:{kind:'blank';id:number}|{kind:'fallback'},body:string):readonly SourceEdit[] {
+ const ledger=createLedger(base),step=tr.steps[0];
+ if(tr.steps.length!==1||Object.getPrototypeOf(step)!==ReplaceStep.prototype)fail()
+ advanceLedger(ledger,base.doc,tr.doc,step as ReplaceStep,0);finishLedger(base,tr,ledger)
+ const components=ledger.components.filter(c=>c.parent===c.id),c=components[0]
+ if(components.length!==1||!c||c.origins.length!==1||!sameOrigin(c.origins[0]!,origin)
+  ||c.births.length||c.finalRuns.length!==1||c.finalRuns[0]!.to-c.finalRuns[0]!.from!==1)fail()
+ const slots=partitionSlots(base),span=originSpan(base,origin)
+ const chosen=origin.kind==='blank'?slots.find(s=>s.kind==='blank'&&s.id===origin.id):undefined
+ if(origin.kind==='blank'&&!chosen)fail()
+ const original=base.source.slice(span.from,span.to)
+ const eol=/(\r\n|\r|\n)$/.exec(original)?.[0]
+  ?? slots.map(s=>/(\r\n|\r|\n)$/.exec(base.source.slice(s.from,s.to))?.[0]).find(Boolean)??'\n'
+ const tail=base.source.slice(span.to),next=slots.find(s=>s.from>=span.to&&['body','protected'].includes(s.kind))
+ const between=next?base.source.slice(span.to,next.from):tail
+ const suffix=origin.kind==='blank'?(next&&!/[\r\n]/.test(between)?eol:''):
+  (tail?(next&&next.from===span.to?eol+eol:eol):'')
+ const claims:Claim[]=[{...span,kind:chosen?'blank':'anchor',step:0,...(chosen?{unitId:chosen.id}:{})}]
+ const pieces:Piece[]=[],kept:Kept[]=[]
+ const keep=(from:number,to:number)=>{
+  if(from===to)return
+  const identity:Kept={from,to,kind:'envelope',id:kept.length};kept.push(identity);pieces.push({kind:'raw',span:{from,to},identity})
+ }
+ keep(0,span.from)
+ pieces.push({kind:'generated',text:body})
+ if(chosen){
+  const terminal=/(\r\n|\r|\n)$/.exec(original)?.[0];if(!terminal)fail()
+  keep(span.to-terminal.length,span.to)
+ }
+ pieces.push({kind:'generated',text:suffix});keep(span.to,base.source.length)
+ // The second insertion is witnessed at the selected origin's terminal edge.
+ if(suffix&&chosen)claims.push({from:span.to,to:span.to,kind:'anchor',step:0})
+ const recipe:Recipe={claims,kept,pieces,edits:[],changedRoots:[],witnesses:c.witnesses}
+ verifyRecipe(base,recipe);return recipe.edits
+}
