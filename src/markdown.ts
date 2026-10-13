@@ -2543,6 +2543,10 @@ const sourceRootSerializer = new MarkdownSerializer({
   ...serializer.nodes,
   text: writeSourceText,
   code_block: sourceCodeNode,
+  math_block(state,node) {
+    if(node.type===node.type.schema.nodes.math_block&&node.hasMarkup(node.type)&&!node.content.size){state.write('$$ $$');state.closeBlock(node)}
+    else serializer.nodes.math_block!(state,node,node,0)
+  },
   blockquote(state,node) {
     state.wrapBlock('> ',null,node,()=>renderSourceContainerChildren(state,node,false))
   },

@@ -19,6 +19,10 @@ const families=['em','strong','strike_through','highlight','code','link','annota
 function canonicalNote(node:PmNode):boolean {
  return node.type===node.type.schema.nodes.note_anchor&&node.isLeaf&&node.nodeSize===1&&typeof node.attrs.note==='string'&&!/[\r\n]|<<}/.test(node.attrs.note)&&node.eq(node.type.create({note:node.attrs.note},null,node.marks))
 }
+function canonicalMath(node:PmNode):boolean {
+ return node.type===node.type.schema.nodes.math_inline&&node.hasMarkup(node.type)&&node.childCount===1
+  &&node.firstChild!.isText&&!node.firstChild!.marks.length&&!!node.textContent&&!/[\r\n$]/.test(node.textContent)
+}
 function canonicalAnnotation(mark:Mark):boolean {return mark.type.name!=='annotation'||typeof mark.attrs.note==='string'&&!/[\r\n]|<<}/.test(mark.attrs.note)&&mark.eq(mark.type.create({note:mark.attrs.note}))}
 function textOnly(node:PmNode):boolean {let ok=true;node.forEach(n=>{if(!n.isText||n.marks.some(m=>!families.includes(m.type.name)))ok=false});return ok}
 function audit(base:SourceSession,tr:Transaction):boolean {
@@ -88,7 +92,7 @@ export function prepareClosedFenceRecipe(base:SourceSession,tr:Transaction,facts
 }
 type InlinePiece=Readonly<{kind:'retained';beforeFrom:number;beforeTo:number;afterFrom:number;afterTo:number}|{kind:'inserted';afterFrom:number;afterTo:number;step:number}>
 type BodyWork={body:number;beforeFrom:number;beforeTo:number;afterFrom:number;afterTo:number;pieces:InlinePiece[];dirtyEdges:number[]}
-type Unit={text:string;before?:number;beforeCode?:boolean;step?:number;leaf?:PmNode;atom?:InlineAtomOccurrence;marks:readonly Mark[];raw?:InlineRawRange}
+type Unit={text:string;before?:number;beforeCode?:boolean;step?:number;leaf?:PmNode;math?:{node:PmNode};atom?:InlineAtomOccurrence;marks:readonly Mark[];raw?:InlineRawRange}
 type Envelope={from:number;to:number;mark:Mark;old?:InlineEdge;open:string;close:string;keep:boolean;index:number}
 type Output={raw:InlineRawRange}|{text:string}
 const sameMarks=(a:readonly Mark[],b:readonly Mark[])=>a.length===b.length&&a.every((m,i)=>m.eq(b[i]!))
@@ -187,13 +191,22 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     if(!body)return no
     let inserted:Unit[]=[],valid=true
     step.slice.content.forEach(n=>{
+     if(canonicalMath(n)){const math={node:n};for(let k=0;k<n.nodeSize;k++)inserted.push({text:'',math,marks:n.marks,step:i});return}
      if(n.type===n.type.schema.nodes.hardbreak&&typeof n.attrs.isInline==='boolean'&&!n.marks.length&&n.eq(n.type.create({isInline:n.attrs.isInline}))){inserted.push({text:'\n',leaf:n,marks:n.marks,step:i});return}
      if(!n.isText||n.marks.some(m=>!families.includes(m.type.name)))valid=false
      for(const text of (n.text??'').split(''))inserted.push({text,marks:n.marks,step:i})
     })
     if(!valid)return no
     const list=units.get(body.body)!,start=step.from-body.afterFrom,end=step.to-body.afterFrom
-    if(list.slice(start,end).some(u=>!u.text)||start===end&&list[start]?.atom&&list[start]?.atom===list[start-1]?.atom)return no
+    // Only whole mathematical occurrences may be removed; payload positions
+    // never acquire text authority, even for an atom born earlier in this chain.
+    for(let k=start;k<end;k++){
+     const u=list[k]!;if(u.text)continue
+     if(u.atom?.node.type.name!=='math_inline'&&!u.math)return no
+     const first=list.findIndex(x=>u.atom?x.atom===u.atom:x.math===u.math),size=u.atom?u.atom.pmTo-u.atom.pmFrom:u.math!.node.nodeSize
+     if(first<start||first+size>end)return no
+    }
+    if(start===end&&(list[start]?.atom&&list[start]!.atom===list[start-1]?.atom||list[start]?.math&&list[start]!.math===list[start-1]?.math))return no
     list.splice(start,end-start,...inserted);changed.add(body.body)
     const map=step.getMap()
     for(const w of work){
@@ -234,7 +247,7 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
    // Verify every projected unit against the actual final document, including
    // full Mark objects and attributes, before constructing source events.
    let offset=0,valid=true
-   target.forEach(n=>{for(let j=0;j<n.nodeSize;j++,offset++){const u=list[offset];if(!u||u.atom&&!u.atom.node.eq(n)||u.text!==(n.isText?n.text![j]!:u.leaf?.eq(n)?'\n':'')||!sameMarks(u.marks,n.marks))valid=false}})
+   target.forEach(n=>{for(let j=0;j<n.nodeSize;j++,offset++){const u=list[offset];if(!u||u.atom&&!u.atom.node.eq(n)||u.math&&!u.math.node.eq(n)||u.text!==(n.isText?n.text![j]!:u.leaf?.eq(n)?'\n':'')||!sameMarks(u.marks,n.marks))valid=false}})
    if(!valid)return no
    const ranges:Envelope[]=[]
    for(let at=0;at<list.length;at++)for(const mark of list[at]!.marks){
@@ -373,6 +386,11 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
       const encoded=changedCode?encodeCodeContext(u.text,code,body.kind==='table-cell'):undefined
       output.push(encoded!==undefined&&encoded!==base.source.slice(u.raw.from,u.raw.to)?{text:encoded}:{raw:u.raw})
      }
+    }
+    else if(u.math){
+     const math=u.math,count=math.node.nodeSize,group=list.slice(at,at+count)
+     if(group.length!==count||group.some(x=>x.math!==math)||ranges.some(r=>r.from>at&&r.from<at+count||r.to>at&&r.to<at+count))return no
+     output.push({text:'$'+(body.kind==='table-cell'?math.node.textContent.replace(/\|/g,'\\|'):math.node.textContent)+'$'});at+=count-1
     }
     else if(u.leaf)output.push({text:u.leaf.attrs.isInline?'\n':'\\\n'})
     else output.push({text:code?(body.kind==='table-cell'?u.text.replace(/\|/g,'\\|'):u.text):escapeText(u.text,body.kind==='table-cell')})

@@ -1183,7 +1183,7 @@ var insertHorizontalRule = (state, dispatch) => {
 };
 var insertTable = gfmTableCommand({ kind: "insert" });
 var insertMathBlock = (state, dispatch) => {
-  const mathBlock = schema.nodes.math_block;
+  const mathBlock = state.schema.nodes.math_block;
   if (!mathBlock) {
     if (dispatch) {
       dispatch(state.tr.insertText("\n$$\n\\\n$$\n"));

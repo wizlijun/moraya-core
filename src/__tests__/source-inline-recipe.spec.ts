@@ -216,13 +216,17 @@ it('fix1 math occurrence keeps raw and full node through a shifting Replace plus
  expect(r.session.source).toBe('$x$ Z **Al**pha $x$\n');expect(r.session.doc.eq(tr.doc)).toBe(true);
  expect(r.session.doc.child(0).child(0).eq(b.doc.child(0).child(0))).toBe(true);expect(r.session.doc.child(0).lastChild!.eq(b.doc.child(0).lastChild!)).toBe(true);
 });
-it('fix1 unchanged math grants no edit or selected atom mark permission',()=>{
+it('math rejects payload and selected marks; whole replacement has its own slice witness',()=>{
  const raw='Alpha $x$ Beta\n',b=open(raw),state=EditorState.create({doc:b.doc}),start=pos(b.doc,[0],6),atom=b.doc.nodeAt(start)!;
  expect(atom.type.name).toBe('math_inline');const mark=b.doc.type.schema.marks.strong!.create();
  const internal=state.tr.addMark(1,3,mark).insertText('y',start+1,start+2);
  const selected=state.tr.addMark(1,3,mark).addMark(start,start+atom.nodeSize,mark);
  const replaced=state.tr.addMark(1,3,mark).replaceWith(start,start+atom.nodeSize,atom.type.create(atom.attrs,b.doc.type.schema.text('y'),atom.marks));
- for(const tr of [internal,selected,replaced]){const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(false);expect(r).not.toHaveProperty('session')}
+ for(const tr of [internal,selected]){const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(false);expect(r).not.toHaveProperty('session')}
+ const replacement=applySourceBlockTransaction(b,replaced);expect(replacement.ok).toBe(true);if(!replacement.ok)throw Error(replacement.reason);
+ expect(replacement.session.source).toBe('**Al**pha $y$ Beta\n');expect(replacement.session.doc.eq(replaced.doc)).toBe(true);
+ expect(replacement.mode).toBe('fragment-render');expect(replacement.edits).toEqual([{from:0,to:0,text:'**'},{from:2,to:2,text:'**'},{from:6,to:9,text:'$y$'}]);
+ expect(replacement.session.protectedSources).toEqual(b.protectedSources);expect(b.revision).toBe(0);
  expect(b.source).toBe(raw);
  const retry=applySourceBlockTransaction(b,state.tr.addMark(1,3,mark));expect(retry.ok).toBe(true);if(retry.ok)expect(retry.session.source).toBe('**Al**pha $x$ Beta\n');
 });

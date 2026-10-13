@@ -5190,6 +5190,12 @@ var sourceRootSerializer = new MarkdownSerializer({
   ...serializer.nodes,
   text: writeSourceText,
   code_block: sourceCodeNode,
+  math_block(state, node) {
+    if (node.type === node.type.schema.nodes.math_block && node.hasMarkup(node.type) && !node.content.size) {
+      state.write("$$ $$");
+      state.closeBlock(node);
+    } else serializer.nodes.math_block(state, node, node, 0);
+  },
   blockquote(state, node) {
     state.wrapBlock("> ", null, node, () => renderSourceContainerChildren(state, node, false));
   },
@@ -6408,7 +6414,7 @@ var insertHorizontalRule = (state, dispatch) => {
 };
 var insertTable = gfmTableCommand({ kind: "insert" });
 var insertMathBlock = (state, dispatch) => {
-  const mathBlock = schema.nodes.math_block;
+  const mathBlock = state.schema.nodes.math_block;
   if (!mathBlock) {
     if (dispatch) {
       dispatch(state.tr.insertText("\n$$\n\\\n$$\n"));
@@ -8431,6 +8437,9 @@ var families = ["em", "strong", "strike_through", "highlight", "code", "link", "
 function canonicalNote(node) {
   return node.type === node.type.schema.nodes.note_anchor && node.isLeaf && node.nodeSize === 1 && typeof node.attrs.note === "string" && !/[\r\n]|<<}/.test(node.attrs.note) && node.eq(node.type.create({ note: node.attrs.note }, null, node.marks));
 }
+function canonicalMath(node) {
+  return node.type === node.type.schema.nodes.math_inline && node.hasMarkup(node.type) && node.childCount === 1 && node.firstChild.isText && !node.firstChild.marks.length && !!node.textContent && !/[\r\n$]/.test(node.textContent);
+}
 function canonicalAnnotation(mark) {
   return mark.type.name !== "annotation" || typeof mark.attrs.note === "string" && !/[\r\n]|<<}/.test(mark.attrs.note) && mark.eq(mark.type.create({ note: mark.attrs.note }));
 }
@@ -8613,6 +8622,11 @@ function prepareInlineRecipe(base, tr, facts) {
         if (!body) return no;
         let inserted = [], valid = true;
         step.slice.content.forEach((n) => {
+          if (canonicalMath(n)) {
+            const math = { node: n };
+            for (let k = 0; k < n.nodeSize; k++) inserted.push({ text: "", math, marks: n.marks, step: i });
+            return;
+          }
           if (n.type === n.type.schema.nodes.hardbreak && typeof n.attrs.isInline === "boolean" && !n.marks.length && n.eq(n.type.create({ isInline: n.attrs.isInline }))) {
             inserted.push({ text: "\n", leaf: n, marks: n.marks, step: i });
             return;
@@ -8622,7 +8636,14 @@ function prepareInlineRecipe(base, tr, facts) {
         });
         if (!valid) return no;
         const list = units.get(body.body), start = step.from - body.afterFrom, end = step.to - body.afterFrom;
-        if (list.slice(start, end).some((u) => !u.text) || start === end && list[start]?.atom && list[start]?.atom === list[start - 1]?.atom) return no;
+        for (let k = start; k < end; k++) {
+          const u = list[k];
+          if (u.text) continue;
+          if (u.atom?.node.type.name !== "math_inline" && !u.math) return no;
+          const first = list.findIndex((x) => u.atom ? x.atom === u.atom : x.math === u.math), size = u.atom ? u.atom.pmTo - u.atom.pmFrom : u.math.node.nodeSize;
+          if (first < start || first + size > end) return no;
+        }
+        if (start === end && (list[start]?.atom && list[start].atom === list[start - 1]?.atom || list[start]?.math && list[start].math === list[start - 1]?.math)) return no;
         list.splice(start, end - start, ...inserted);
         changed.add(body.body);
         const map = step.getMap();
@@ -8670,7 +8691,7 @@ function prepareInlineRecipe(base, tr, facts) {
       target.forEach((n) => {
         for (let j = 0; j < n.nodeSize; j++, offset++) {
           const u = list[offset];
-          if (!u || u.atom && !u.atom.node.eq(n) || u.text !== (n.isText ? n.text[j] : u.leaf?.eq(n) ? "\n" : "") || !sameMarks(u.marks, n.marks)) valid = false;
+          if (!u || u.atom && !u.atom.node.eq(n) || u.math && !u.math.node.eq(n) || u.text !== (n.isText ? n.text[j] : u.leaf?.eq(n) ? "\n" : "") || !sameMarks(u.marks, n.marks)) valid = false;
         }
       });
       if (!valid) return no;
@@ -8860,6 +8881,11 @@ function prepareInlineRecipe(base, tr, facts) {
             const encoded = changedCode ? encodeCodeContext(u.text, code2, body.kind === "table-cell") : void 0;
             output.push(encoded !== void 0 && encoded !== base.source.slice(u.raw.from, u.raw.to) ? { text: encoded } : { raw: u.raw });
           }
+        } else if (u.math) {
+          const math = u.math, count = math.node.nodeSize, group = list.slice(at, at + count);
+          if (group.length !== count || group.some((x) => x.math !== math) || ranges.some((r2) => r2.from > at && r2.from < at + count || r2.to > at && r2.to < at + count)) return no;
+          output.push({ text: "$" + (body.kind === "table-cell" ? math.node.textContent.replace(/\|/g, "\\|") : math.node.textContent) + "$" });
+          at += count - 1;
         } else if (u.leaf) output.push({ text: u.leaf.attrs.isInline ? "\n" : "\\\n" });
         else output.push({ text: code2 ? body.kind === "table-cell" ? u.text.replace(/\|/g, "\\|") : u.text : escapeText2(u.text, body.kind === "table-cell") });
       }
@@ -9149,7 +9175,44 @@ function partitionSlots(base) {
   if (at < base.source.length) result.push({ kind: "envelope", id: result.length, from: at, to: base.source.length });
   return result;
 }
-function makeRecipe(base, ledger, slots, render, rootHasClosedFences) {
+function mathWitnesses(base, tr) {
+  let occurrences = [];
+  base.doc.descendants((node, pos) => {
+    if (node.type.name !== "math_block") return;
+    const root = base.roots.find((r2) => r2.tokenType === "math_block" && r2.childTo === r2.childFrom + 1 && r2.pmFrom === pos && r2.pmTo === pos + node.nodeSize);
+    occurrences.push({ pos, node, born: false, ...root ? { root: root.id } : {} });
+    return false;
+  });
+  const removedRoots = /* @__PURE__ */ new Set();
+  for (let i = 0; i < tr.steps.length; i++) {
+    const step = tr.steps[i], before = tr.docs[i], range = stepRange(before, step), next = [];
+    for (const occurrence of occurrences) {
+      const end = occurrence.pos + occurrence.node.nodeSize;
+      const touched = range.from < end && range.to > occurrence.pos || range.from === range.to && occurrence.pos < range.from && range.from < end;
+      if (touched) {
+        if (!(step instanceof ReplaceStep2 || step instanceof ReplaceAroundStep) || range.from > occurrence.pos || range.to < end || step instanceof ReplaceAroundStep && step.gapFrom < end && step.gapTo > occurrence.pos || !occurrence.born && occurrence.root === void 0) fail();
+        if (occurrence.root !== void 0) removedRoots.add(occurrence.root);
+      } else next.push({ ...occurrence, pos: step.getMap().map(occurrence.pos, 1) });
+    }
+    if (step instanceof ReplaceStep2 || step instanceof ReplaceAroundStep) step.slice.content.descendants((node, pos) => {
+      if (node.type.name !== "math_block") return;
+      if (node.type !== before.type.schema.nodes.math_block || !node.hasMarkup(node.type) || node.content.size) fail();
+      if (step instanceof ReplaceAroundStep) {
+        const previous = tr.steps[i - 1], paragraph2 = before.nodeAt(step.from);
+        if (step.slice.openStart || step.slice.openEnd || step.slice.content.childCount !== 1 || pos !== 0 || step.insert !== 1 || step.gapFrom !== step.from + 1 || step.gapTo !== step.gapFrom || step.to !== step.from + 2 || !paragraph2 || !empty(paragraph2) || !paragraph2.hasMarkup(paragraph2.type) || !previous || Object.getPrototypeOf(previous) !== ReplaceStep2.prototype) fail();
+        const deletion = previous;
+        if (deletion.slice.size || deletion.from !== step.from + 1 || deletion.to !== deletion.from + 2 || tr.docs[i - 1].textBetween(deletion.from, deletion.to) !== "$$") fail();
+      }
+      const absolute = step.from + pos - step.slice.openStart, after = tr.docs[i + 1] ?? tr.doc;
+      if (!after.nodeAt(absolute)?.eq(node)) fail();
+      next.push({ pos: absolute, node, born: true });
+      return false;
+    });
+    occurrences = next;
+  }
+  return { births: new Set(occurrences.filter((o) => o.born).map((o) => o.pos)), removedRoots };
+}
+function makeRecipe(base, ledger, slots, math, render, rootHasClosedFences) {
   const claims = [], removed = /* @__PURE__ */ new Set(), insertions = /* @__PURE__ */ new Map(), changedRoots = [];
   const dirty = /* @__PURE__ */ new Map(), blankDirty = /* @__PURE__ */ new Map();
   const components = ledger.components.filter((c2) => c2.parent === c2.id).sort((a, b) => (a.finalRuns[0]?.from ?? Infinity) - (b.finalRuns[0]?.from ?? Infinity));
@@ -9210,7 +9273,7 @@ function makeRecipe(base, ledger, slots, render, rootHasClosedFences) {
       const r2 = base.roots[o.id];
       if (base.protectedSources.some((p) => p.sourceFrom < r2.sourceTo && p.sourceTo > r2.sourceFrom)) fail();
       if (!rootHasClosedFences(r2)) fail();
-      if (!["paragraph_open", "heading_open", "bullet_list_open", "ordered_list_open", "blockquote_open", "table_open", "hr", "fence"].includes(r2.tokenType) && !(r2.tokenType === "html_block" && r2.childTo === r2.childFrom + 1 && isSourceListBoundary(base.doc.child(r2.childFrom)))) fail();
+      if (!["paragraph_open", "heading_open", "bullet_list_open", "ordered_list_open", "blockquote_open", "table_open", "hr", "fence"].includes(r2.tokenType) && !(r2.tokenType === "math_block" && math.removedRoots.has(r2.id)) && !(r2.tokenType === "html_block" && r2.childTo === r2.childFrom + 1 && isSourceListBoundary(base.doc.child(r2.childFrom)))) fail();
     }
     const rootSlots = slots.filter((s) => (s.kind === "body" || s.kind === "terminator") && originIds.has(s.id));
     const terminal = rootSlots.filter((s) => s.kind === "terminator").at(-1);
@@ -9233,8 +9296,15 @@ function makeRecipe(base, ledger, slots, render, rootHasClosedFences) {
         if (finalIndex !== baseline) atoms2.push(generated("blank", "\n", anchor, stepOf(c2)));
         continue;
       }
-      const output = render([node], [ledger.children[finalIndex].from]);
-      if (output.family === "closed-literal" && node.type.name !== "code_block" && !isSourceListBoundary(node)) fail();
+      const position = ledger.children[finalIndex].from;
+      const allowMath = (n2, p) => {
+        if (n2.type.name === "math_block" && !math.births.has(p)) fail();
+      };
+      allowMath(node, position);
+      node.descendants((n2, p) => allowMath(n2, position + p + 1));
+      if (!["paragraph", "heading", "bullet_list", "ordered_list", "blockquote", "horizontal_rule", "table", "code_block"].includes(node.type.name) && !isSourceListBoundary(node) && !(node.type.name === "math_block" && math.births.has(position))) fail();
+      const output = render([node], [position]);
+      if (output.family === "closed-literal" && node.type.name !== "code_block" && !isSourceListBoundary(node) && !(node.type.name === "math_block" && math.births.has(position))) fail();
       let text2 = output.text;
       if (output.terminal === "content-eol") {
         if (!text2.endsWith(output.eol)) fail();
@@ -9426,6 +9496,7 @@ function applyStructuralTransaction(base, tr, render, rootHasClosedFences) {
   }
   tr.doc.check();
   finishLedger(base, tr, ledger);
+  const math = mathWitnesses(base, tr);
   if (tr.doc.eq(base.doc)) {
     const emission = (o) => {
       const e = o.kind === "root" ? base.roots[o.id] : o.kind === "fallback" ? base.layout.fallback.emission : base.layout.blankLines[o.id].role === "empty-paragraph" ? base.layout.blankLines[o.id].emission : fail();
@@ -9445,7 +9516,7 @@ function applyStructuralTransaction(base, tr, render, rootHasClosedFences) {
     });
     if (stable && cancelled) return { source: base.source, edits: [], changedRoots: [], unchanged: true };
   }
-  const recipe = makeRecipe(base, ledger, partitionSlots(base), render, rootHasClosedFences);
+  const recipe = makeRecipe(base, ledger, partitionSlots(base), math, render, rootHasClosedFences);
   verifyRecipe(base, recipe);
   return { source: applyRecipe(base, recipe), edits: recipe.edits, changedRoots: recipe.changedRoots, unchanged: false };
 }
@@ -10338,6 +10409,7 @@ function applySourceBlockTransaction(base, tr) {
     if (!needsInline) {
       const step = tr.steps[0], from = base.doc.resolve(step.from);
       if (["paragraph", "heading"].includes(from.parent.type.name)) {
+        if (inlineFacts2?.atoms.some((a) => a.node.type.name === "math_inline" && step.from < a.pmTo && step.to > a.pmFrom)) needsInline = true;
         if (inlineFacts2?.critic.some((c2) => c2.kind === "note_anchor" && step.from < c2.pmTo && step.to > c2.pmFrom)) needsInline = true;
         step.slice.content.forEach((n) => {
           if (!n.isText || !n.hasMarkup(n.type, null, step.from < step.to ? from.nodeAfter?.marks ?? from.marks() : from.marks())) needsInline = true;

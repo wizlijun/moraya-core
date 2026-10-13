@@ -248,7 +248,51 @@ function partitionSlots(base:SourceSession):Slot[] {
  if(at<base.source.length)result.push({kind:'envelope',id:result.length,from:at,to:base.source.length})
  return result
 }
-function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:PMNode[],positions:readonly number[])=>StructuralRendered,
+// Source generation for mathematical blocks requires an occurrence witness
+// from the actual complete step chain, before any component is serialized.
+function mathWitnesses(base:SourceSession,tr:Transaction):{births:Set<number>;removedRoots:Set<number>} {
+ type Occurrence={pos:number;node:PMNode;root?:number;born:boolean}
+ let occurrences:Occurrence[]=[]
+ base.doc.descendants((node,pos)=>{
+  if(node.type.name!=='math_block')return
+  const root=base.roots.find(r=>r.tokenType==='math_block'&&r.childTo===r.childFrom+1&&r.pmFrom===pos&&r.pmTo===pos+node.nodeSize)
+  occurrences.push({pos,node,born:false,...(root?{root:root.id}:{})});return false
+ })
+ const removedRoots=new Set<number>()
+ for(let i=0;i<tr.steps.length;i++){
+  const step=tr.steps[i] as Step,before=tr.docs[i]!,range=stepRange(before,step),next:Occurrence[]=[]
+  for(const occurrence of occurrences){
+   const end=occurrence.pos+occurrence.node.nodeSize
+   const touched=range.from<end&&range.to>occurrence.pos||range.from===range.to&&occurrence.pos<range.from&&range.from<end
+   if(touched){
+    if(!(step instanceof ReplaceStep||step instanceof ReplaceAroundStep)||range.from>occurrence.pos||range.to<end
+      ||step instanceof ReplaceAroundStep&&step.gapFrom<end&&step.gapTo>occurrence.pos
+      ||!occurrence.born&&occurrence.root===undefined)fail()
+    if(occurrence.root!==undefined)removedRoots.add(occurrence.root)
+   }else next.push({...occurrence,pos:step.getMap().map(occurrence.pos,1)})
+  }
+  if(step instanceof ReplaceStep||step instanceof ReplaceAroundStep)step.slice.content.descendants((node,pos)=>{
+   if(node.type.name!=='math_block')return
+   if(node.type!==before.type.schema.nodes.math_block||!node.hasMarkup(node.type)||node.content.size)fail()
+   if(step instanceof ReplaceAroundStep){
+    const previous=tr.steps[i-1],paragraph=before.nodeAt(step.from)
+    if(step.slice.openStart||step.slice.openEnd||step.slice.content.childCount!==1||pos!==0||step.insert!==1
+      ||step.gapFrom!==step.from+1||step.gapTo!==step.gapFrom||step.to!==step.from+2
+      ||!paragraph||!empty(paragraph)||!paragraph.hasMarkup(paragraph.type)
+      ||!previous||Object.getPrototypeOf(previous)!==ReplaceStep.prototype)fail()
+    const deletion=previous as ReplaceStep
+    if(deletion.slice.size||deletion.from!==step.from+1||deletion.to!==deletion.from+2
+      ||tr.docs[i-1]!.textBetween(deletion.from,deletion.to)!=='$$')fail()
+   }
+   const absolute=step.from+pos-step.slice.openStart,after=tr.docs[i+1]??tr.doc
+   if(!after.nodeAt(absolute)?.eq(node))fail()
+   next.push({pos:absolute,node,born:true});return false
+  })
+  occurrences=next
+ }
+ return {births:new Set(occurrences.filter(o=>o.born).map(o=>o.pos)),removedRoots}
+}
+function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],math:ReturnType<typeof mathWitnesses>,render:(nodes:PMNode[],positions:readonly number[])=>StructuralRendered,
  rootHasClosedFences:(root:SourceRoot)=>boolean):Recipe {
  const claims:Claim[]=[],removed=new Set<Slot>(),insertions=new Map<number,Atom[]>(),changedRoots:number[]=[]
  const dirty=new Map<number,Component>(),blankDirty=new Map<number,Component>()
@@ -301,6 +345,7 @@ function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:
   for(const o of origins){const r=base.roots[o.id]!;if(base.protectedSources.some(p=>p.sourceFrom<r.sourceTo&&p.sourceTo>r.sourceFrom))fail()
    if(!rootHasClosedFences(r))fail()
    if(!['paragraph_open','heading_open','bullet_list_open','ordered_list_open','blockquote_open','table_open','hr','fence'].includes(r.tokenType)
+    &&!(r.tokenType==='math_block'&&math.removedRoots.has(r.id))
     &&!(r.tokenType==='html_block'&&r.childTo===r.childFrom+1&&isSourceListBoundary(base.doc.child(r.childFrom))))fail()}
   const rootSlots=slots.filter(s=>(s.kind==='body'||s.kind==='terminator')&&originIds.has(s.id))
   const terminal=rootSlots.filter(s=>s.kind==='terminator').at(-1)
@@ -321,8 +366,13 @@ function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:
   for(let n=0;n<nodes.length;n++){
    const node=nodes[n]!,finalIndex=c.finalRuns[0]!.from+n
    if(empty(node)){if(finalIndex!==baseline)atoms.push(generated('blank','\n',anchor,stepOf(c)));continue}
-   const output=render([node],[ledger.children[finalIndex]!.from])
-   if(output.family==='closed-literal'&&node.type.name!=='code_block'&&!isSourceListBoundary(node))fail()
+   const position=ledger.children[finalIndex]!.from
+   const allowMath=(n:PMNode,p:number)=>{if(n.type.name==='math_block'&&!math.births.has(p))fail()}
+   allowMath(node,position);node.descendants((n,p)=>allowMath(n,position+p+1))
+   if(!['paragraph','heading','bullet_list','ordered_list','blockquote','horizontal_rule','table','code_block'].includes(node.type.name)
+     &&!isSourceListBoundary(node)&&!(node.type.name==='math_block'&&math.births.has(position)))fail()
+   const output=render([node],[position])
+   if(output.family==='closed-literal'&&node.type.name!=='code_block'&&!isSourceListBoundary(node)&&!(node.type.name==='math_block'&&math.births.has(position)))fail()
    let text=output.text
    if(output.terminal==='content-eol'){if(!text.endsWith(output.eol))fail();text=text.slice(0,-output.eol.length)}
    atoms.push({...generated('body',text,anchor,stepOf(c)),ownedBlank:!!output.ownedBlank,...(output.continuationIndent!==undefined?{continuationIndent:output.continuationIndent}:{})})
@@ -482,6 +532,7 @@ export function applyStructuralTransaction(base:SourceSession,tr:Transaction,ren
   advanceLedger(ledger,before,after,step,i)
  }
  tr.doc.check();finishLedger(base,tr,ledger)
+ const math=mathWitnesses(base,tr)
  if(tr.doc.eq(base.doc)){
   const emission=(o:Origin):ChildRange=>{
    const e=o.kind==='root'?base.roots[o.id]!:o.kind==='fallback'?base.layout.fallback!.emission:
@@ -500,7 +551,7 @@ export function applyStructuralTransaction(base:SourceSession,tr:Transaction,ren
   })
   if(stable&&cancelled)return {source:base.source,edits:[],changedRoots:[],unchanged:true}
  }
- const recipe=makeRecipe(base,ledger,partitionSlots(base),render,rootHasClosedFences)
+ const recipe=makeRecipe(base,ledger,partitionSlots(base),math,render,rootHasClosedFences)
  verifyRecipe(base,recipe)
  return {source:applyRecipe(base,recipe),edits:recipe.edits,changedRoots:recipe.changedRoots,unchanged:false}
 }

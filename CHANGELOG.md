@@ -4,6 +4,8 @@ All notable changes to `@moraya/core` are documented here. SemVer.
 
 ## Unreleased
 
+- Existing math block commands use the actual editor schema and source-save canonical empty blocks as `$$ $$`. Real math InputRules and whole inline math insertion/deletion preserve neighbouring source spelling; mathematical payload editing remains in Source mode. Structural math permissions follow complete original step witnesses before rendering.
+
 - First input in definition-only empty quote and list paragraphs now keeps the actual reference-definition separator, including marker-only list lines and continued input after deleting a point note. Protected definition bytes remain unchanged.
 
 - Source code-mark toggles now encode only selected text whose code context changes, retaining untouched entity/escape bytes. Deleting a marked point note removes only actual wrappers left without content, including its certified terminal EOL; wrappers covering surviving text remain.
