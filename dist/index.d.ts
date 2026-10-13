@@ -36,4 +36,19 @@ declare function createSourceSession(source: string, schema?: Schema): FidelityR
 /** Pure preparation: a failure never supplies output or mutates the base session. */
 declare function applySourceTextTransaction(base: SourceSession, tr: Transaction): FidelityResult;
 
-export { type FidelityFailure, type FidelityResult, type SourceSession, type TextSourceSpan, applySourceTextTransaction, createSourceSession };
+type EolChange = Readonly<{
+    sourceFrom: number;
+    sourceTo: number;
+    viewFrom: number;
+    viewTo: number;
+}>;
+type EolProjection = Readonly<{
+    text: string;
+    sourceLength: number;
+    changes: readonly EolChange[];
+}>;
+declare function projectLineEndings(source: string): EolProjection;
+declare function sourceOffsetAt(p: EolProjection, n: number): number;
+declare function viewOffsetAt(p: EolProjection, n: number, bias: -1 | 1): number;
+
+export { type EolChange, type EolProjection, type FidelityFailure, type FidelityResult, type SourceSession, type TextSourceSpan, applySourceTextTransaction, createSourceSession, projectLineEndings, sourceOffsetAt, viewOffsetAt };

@@ -5830,6 +5830,54 @@ function applySourceTextTransaction(base, tr) {
   if (!result.ok || !result.session.doc.eq(tr.doc)) return { ok: false, reason: "semantic-mismatch" };
   return { ok: true, session: { ...result.session, revision: base.revision + 1 } };
 }
+
+// src/source-projection.ts
+function check(n, max) {
+  if (!Number.isInteger(n) || n < 0 || n > max) throw new RangeError("offset");
+}
+function projectLineEndings(source) {
+  const chunks = [];
+  const changes = [];
+  let start = 0;
+  let view = 0;
+  for (let i = 0; i < source.length; i++) {
+    if (source.charCodeAt(i) !== 13) continue;
+    chunks.push(source.slice(start, i));
+    view += i - start;
+    const end = i + (source.charCodeAt(i + 1) === 10 ? 2 : 1);
+    changes.push({ sourceFrom: i, sourceTo: end, viewFrom: view, viewTo: view + 1 });
+    chunks.push("\n");
+    view++;
+    i = end - 1;
+    start = end;
+  }
+  chunks.push(source.slice(start));
+  return { text: chunks.join(""), sourceLength: source.length, changes };
+}
+function completed(p, n, key) {
+  let lo = 0;
+  let hi = p.changes.length;
+  while (lo < hi) {
+    const mid = lo + hi >>> 1;
+    if (p.changes[mid][key] <= n) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+function sourceOffsetAt(p, n) {
+  check(n, p.text.length);
+  const k = completed(p, n, "viewTo");
+  const c2 = p.changes[k - 1];
+  return n + (c2 ? c2.sourceTo - c2.viewTo : 0);
+}
+function viewOffsetAt(p, n, bias) {
+  check(n, p.sourceLength);
+  const k = completed(p, n, "sourceTo");
+  const next = p.changes[k];
+  const prev = p.changes[k - 1];
+  if (next && n > next.sourceFrom) return bias < 0 ? next.viewFrom : next.viewTo;
+  return n - (prev ? prev.sourceTo - prev.viewTo : 0);
+}
 export {
   applySourceTextTransaction,
   createDocCache,
@@ -5846,9 +5894,11 @@ export {
   parseMarkdown,
   parseMarkdownAsync,
   preloadEnhancementPlugins,
+  projectLineEndings,
   serializeMarkdown,
   setDocumentBaseDir,
   setHeading,
+  sourceOffsetAt,
   toggleBlockquote,
   toggleBold,
   toggleBulletList,
@@ -5858,6 +5908,7 @@ export {
   toggleItalic,
   toggleLink,
   toggleOrderedList,
-  toggleStrikethrough
+  toggleStrikethrough,
+  viewOffsetAt
 };
 //# sourceMappingURL=index.js.map
