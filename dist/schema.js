@@ -265,13 +265,13 @@ var code_block = {
   defining: true,
   code: true,
   attrs: {
-    language: { default: "text" }
+    language: { default: "" }
   },
   parseDOM: [{
     tag: "pre",
     preserveWhitespace: "full",
     getAttrs(dom) {
-      return { language: dom.dataset.language || "text" };
+      return { language: dom.dataset.language || "" };
     }
   }],
   toDOM(node) {
@@ -409,7 +409,7 @@ var html_block = {
   }
 };
 var table = {
-  content: "table_header_row table_row+",
+  content: "table_header_row table_row*",
   group: "block",
   tableRole: "table",
   isolating: true,

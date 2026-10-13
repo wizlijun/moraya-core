@@ -206,7 +206,9 @@ it('rejects stale docs and unsupported node attrs without source output',()=>{
  reject(table,transaction(table).setNodeMarkup(2,undefined,
   {...table.doc.firstChild!.firstChild!.firstChild!.attrs,colwidth:[100]}))
  const code=open('```text\nA\n```')
- reject(code,transaction(code).setNodeMarkup(0,undefined,{language:''}))
+ const cleared=accept(code,transaction(code).setNodeMarkup(0,undefined,{language:''}))
+ expect(cleared.session.source).toBe('```\nA\n```')
+ expect(cleared.session.doc.firstChild!.attrs).toEqual({language:''})
 })
 it('keeps serializer limitations and partial surrogate edits fail closed',()=>{
  const b=open('A'),hardbreak=b.doc.type.schema.nodes.hardbreak!.create({isInline:false})

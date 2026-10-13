@@ -137,11 +137,12 @@ export const wrapInTaskList: Command = (state, dispatch) => {
 }
 
 export const toggleCodeBlock: Command = (state, dispatch) => {
-  const cb = nodeType('code_block')
+  const { code_block: cb, paragraph } = state.schema.nodes
+  if (!cb || !paragraph) return false
   if (state.selection.$from.parent.type === cb) {
-    return setBlockType(nodeType('paragraph'))(state, dispatch)
+    return setBlockType(paragraph)(state, dispatch)
   }
-  return setBlockType(cb)(state, dispatch)
+  return setBlockType(cb, { language: '' })(state, dispatch)
 }
 
 export const insertHorizontalRule: Command = (state, dispatch) => {

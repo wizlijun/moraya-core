@@ -1000,14 +1000,14 @@ const parserTokens: Record<string, import('prosemirror-markdown').ParseSpec> = {
   code_block: {
     block: 'code_block',
     getAttrs() {
-      return { language: 'text' }
+      return { language: '' }
     },
     noCloseToken: true,
   },
   fence: {
     block: 'code_block',
     getAttrs(token) {
-      return { language: token.info.trim() || 'text' }
+      return { language: token.info.trim() }
     },
     noCloseToken: true,
   },
@@ -1145,7 +1145,7 @@ const parserTokens: Record<string, import('prosemirror-markdown').ParseSpec> = {
  *    for `paragraph+` cannot fit a bare text node, so createAndFill() returns null
  *    and the cell (and all its content) is silently dropped → empty table.
  *
- * 2. `table: content: 'table_header_row table_row+'` requires the first child to be
+ * 2. `table: content: 'table_header_row table_row*'` requires the first child to be
  *    a `table_header_row`, but the default `tr` handler always creates `table_row`.
  *    ProseMirror's createAndFill() then auto-inserts an empty `table_header_row`
  *    at the front, leaving the real header data in a wrongly-typed `table_row`.
@@ -1426,8 +1426,7 @@ const serializer = new MarkdownSerializer(
     },
     code_block(state, node) {
       const lang = (node.attrs.language as string) || ''
-      const fenceLang = lang === 'text' ? '' : lang
-      state.write(`\`\`\`${fenceLang}\n`)
+      state.write(`\`\`\`${lang}\n`)
       state.text(node.textContent, false)
       state.ensureNewLine()
       state.write('```')
@@ -1679,7 +1678,7 @@ function writeSourceText(state: MarkdownSerializerState, node: PmNode, parent: P
 function sourceCodeNode(state: MarkdownSerializerState, node: PmNode): void {
   const language = node.attrs.language
   if (typeof language !== 'string' || /[\r\n]/.test(language)) throw new UnsupportedSourceCapture()
-  const info = language === 'text' ? '' : language, character = info.includes('`') ? '~' : '`'
+  const info = language, character = info.includes('`') ? '~' : '`'
   const runs = node.textContent.match(character === '`' ? /`+/g : /~+/g) || []
   let length = 3
   for (const run of runs) length = Math.max(length, run.length + 1)
@@ -1784,18 +1783,23 @@ function renderTableRow(state: MarkdownSerializerState, row: PmNode) {
       //
       // IMPORTANT: prosemirror-markdown's text() calls write() for every line,
       // and write() calls flushClose() which resets this.closed. We must save
-      // and restore BOTH out AND closed so the pending block-separator (the
+      // and restore out, closed and the container delimiter. Cell inline
+      // content must not capture the surrounding quote/list prefix, while
+      // the pending block-separator (the
       // blank line between the preceding paragraph and this table) is not
       // accidentally consumed here — it must survive until state.write('| … |')
       // fires at the end of this function, where flushClose() will emit it.
       const savedOut: string = s.out
       const savedClosed = s.closed
+      const savedDelim = s.delim
+      s.delim = ''
       s.out = ''
       s.closed = null
       state.renderInline(para)
       const piece: string = (s.out as string).replace(/\n/g, ' ').trim()
       s.out = savedOut
       s.closed = savedClosed
+      s.delim = savedDelim
       parts.push(piece)
     })
     cells.push(parts.join(' '))

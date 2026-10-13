@@ -40,8 +40,11 @@ import {
 } from '@moraya/core'
 
 import { BrowserMediaResolver } from '@moraya/core/adapters/browser-media-resolver'
-import '@moraya/core/style'
 ```
+
+The core supplies editor logic only. Hosts must provide visual styles for
+`.moraya-editor` and ProseMirror nodes. The desktop host uses
+`src/styles/editor-base.css`; Editor Kit supplies its own Kit CSS.
 
 ## Consumer examples
 

@@ -1390,13 +1390,13 @@ var code_block = {
   defining: true,
   code: true,
   attrs: {
-    language: { default: "text" }
+    language: { default: "" }
   },
   parseDOM: [{
     tag: "pre",
     preserveWhitespace: "full",
     getAttrs(dom) {
-      return { language: dom.dataset.language || "text" };
+      return { language: dom.dataset.language || "" };
     }
   }],
   toDOM(node) {
@@ -1534,7 +1534,7 @@ var html_block = {
   }
 };
 var table = {
-  content: "table_header_row table_row+",
+  content: "table_header_row table_row*",
   group: "block",
   tableRole: "table",
   isolating: true,
@@ -3517,14 +3517,14 @@ var parserTokens = {
   code_block: {
     block: "code_block",
     getAttrs() {
-      return { language: "text" };
+      return { language: "" };
     },
     noCloseToken: true
   },
   fence: {
     block: "code_block",
     getAttrs(token) {
-      return { language: token.info.trim() || "text" };
+      return { language: token.info.trim() };
     },
     noCloseToken: true
   },
@@ -3841,8 +3841,7 @@ var serializer = new MarkdownSerializer(
     },
     code_block(state, node) {
       const lang = node.attrs.language || "";
-      const fenceLang = lang === "text" ? "" : lang;
-      state.write(`\`\`\`${fenceLang}
+      state.write(`\`\`\`${lang}
 `);
       state.text(node.textContent, false);
       state.ensureNewLine();
@@ -4073,7 +4072,7 @@ function writeSourceText(state, node, parent, index) {
 function sourceCodeNode(state, node) {
   const language = node.attrs.language;
   if (typeof language !== "string" || /[\r\n]/.test(language)) throw new UnsupportedSourceCapture();
-  const info = language === "text" ? "" : language, character = info.includes("`") ? "~" : "`";
+  const info = language, character = info.includes("`") ? "~" : "`";
   const runs = node.textContent.match(character === "`" ? /`+/g : /~+/g) || [];
   let length = 3;
   for (const run of runs) length = Math.max(length, run.length + 1);
@@ -4154,12 +4153,15 @@ function renderTableRow(state, row) {
       if (para.type.name !== "paragraph") return;
       const savedOut = s.out;
       const savedClosed = s.closed;
+      const savedDelim = s.delim;
+      s.delim = "";
       s.out = "";
       s.closed = null;
       state.renderInline(para);
       const piece = s.out.replace(/\n/g, " ").trim();
       s.out = savedOut;
       s.closed = savedClosed;
+      s.delim = savedDelim;
       parts.push(piece);
     });
     cells.push(parts.join(" "));

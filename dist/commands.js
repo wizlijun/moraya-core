@@ -265,13 +265,13 @@ var code_block = {
   defining: true,
   code: true,
   attrs: {
-    language: { default: "text" }
+    language: { default: "" }
   },
   parseDOM: [{
     tag: "pre",
     preserveWhitespace: "full",
     getAttrs(dom) {
-      return { language: dom.dataset.language || "text" };
+      return { language: dom.dataset.language || "" };
     }
   }],
   toDOM(node) {
@@ -409,7 +409,7 @@ var html_block = {
   }
 };
 var table = {
-  content: "table_header_row table_row+",
+  content: "table_header_row table_row*",
   group: "block",
   tableRole: "table",
   isolating: true,
@@ -1048,11 +1048,12 @@ var wrapInTaskList = (state, dispatch) => {
   return true;
 };
 var toggleCodeBlock = (state, dispatch) => {
-  const cb = nodeType("code_block");
+  const { code_block: cb, paragraph: paragraph2 } = state.schema.nodes;
+  if (!cb || !paragraph2) return false;
   if (state.selection.$from.parent.type === cb) {
-    return setBlockType(nodeType("paragraph"))(state, dispatch);
+    return setBlockType(paragraph2)(state, dispatch);
   }
-  return setBlockType(cb)(state, dispatch);
+  return setBlockType(cb, { language: "" })(state, dispatch);
 };
 var insertHorizontalRule = (state, dispatch) => {
   if (dispatch) {

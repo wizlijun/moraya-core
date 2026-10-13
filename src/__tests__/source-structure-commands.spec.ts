@@ -4,7 +4,7 @@ import StateBlock from 'markdown-it/lib/rules_block/state_block.mjs'
 import {EditorState,TextSelection,type Transaction,type Command} from 'prosemirror-state'
 import {wrapIn,lift,splitBlock} from 'prosemirror-commands'
 import {wrapInList,splitListItem,sinkListItem,liftListItem} from 'prosemirror-schema-list'
-import {addRowAfter,addColumnAfter,deleteColumn,goToNextCell} from 'prosemirror-tables'
+import {TableMap,addRowAfter,addColumnAfter,deleteColumn,goToNextCell} from 'prosemirror-tables'
 import {AttrStep,AddNodeMarkStep,RemoveNodeMarkStep,ReplaceAroundStep,DocAttrStep} from 'prosemirror-transform'
 import {createSourceSession,applySourceBlockTransaction} from '../source-fidelity'
 import {wrapInTaskList} from '../commands'
@@ -98,9 +98,12 @@ it.each(['right','center'])('unfixed %s aligned addRowAfter producer fails stric
  const b=open(table.replace('--- | ---',align==='right'?'---: | ---:':':---: | :---:')+tail)
  reject(b,command(state(b,text(b.doc,'X')),addRowAfter))
 })
-it('header-only invalid doc and colwidth attrs fail atomically',()=>{
+it('header-only deletion remains valid while colwidth attrs fail atomically',()=>{
  const b=open(table+tail),tr=state(b,text(b.doc,'X')).tr,root=b.doc.child(0)
- tr.delete(root.child(0).nodeSize+1,root.nodeSize-1);reject(b,tr)
+ tr.delete(root.child(0).nodeSize+1,root.nodeSize-1)
+ const r=accept(b,tr);expect(r.session.doc.child(0).childCount).toBe(1)
+ expect(TableMap.get(r.session.doc.child(0)).problems).toBeNull()
+ expect(r.session.source.endsWith(tail)).toBe(true)
  const cell=text(b.doc,'X')-2;reject(b,state(b,text(b.doc,'X')).tr.step(new AttrStep(cell,'colwidth',[120])))
 })
 it('selection-only table navigation does not revise source',()=>{
@@ -117,9 +120,10 @@ it('node marks on an inline image are representable',()=>{
  const removed=accept(added.session,EditorState.create({doc:added.session.doc}).tr.step(new RemoveNodeMarkStep(1,mark)))
  expect(removed.session.doc.eq(b.doc)).toBe(true);expect(removed.session.source.endsWith(tail)).toBe(true)
 })
-it('unrepresentable block mark, empty language and DocAttr never get ignored',()=>{
+it('empty language is preserved while unrepresentable block marks and DocAttr are rejected',()=>{
  const b=open('```js\nA\n```'+tail),tr=state(b,1).tr
- reject(b,tr.step(new AttrStep(0,'language','')))
+ const r=accept(b,tr.step(new AttrStep(0,'language','')))
+ expect(r.session.doc.child(0).attrs.language).toBe('');expect(r.session.source).toBe('```\nA\n```'+tail)
  const p=open('A'+tail);expect(()=>state(p,1).tr.step(new AddNodeMarkStep(0,p.doc.type.schema.marks.strong!.create()))).toThrow('Invalid content')
  reject(p,state(p,1).tr.step(new DocAttrStep('unsupported','x')))
 })

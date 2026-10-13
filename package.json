@@ -30,7 +30,6 @@
       "import": "./dist/types.js",
       "types": "./dist/types.d.ts"
     },
-    "./style": "./dist/style.css",
     "./plugins/*": {
       "import": "./dist/plugins/*.js",
       "types": "./dist/plugins/*.d.ts"
@@ -54,9 +53,7 @@
     "url": "git+https://github.com/zouwei/moraya-core.git"
   },
   "license": "PolyForm-Internal-Use-1.0.0",
-  "sideEffects": [
-    "./dist/style.css"
-  ],
+  "sideEffects": [],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",

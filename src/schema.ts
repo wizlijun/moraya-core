@@ -351,13 +351,13 @@ const code_block: NodeSpec = {
   defining: true,
   code: true,
   attrs: {
-    language: { default: 'text' },
+    language: { default: '' },
   },
   parseDOM: [{
     tag: 'pre',
     preserveWhitespace: 'full' as const,
     getAttrs(dom: HTMLElement) {
-      return { language: dom.dataset.language || 'text' }
+      return { language: dom.dataset.language || '' }
     },
   }],
   toDOM(node) {
@@ -501,7 +501,7 @@ const html_block: NodeSpec = {
 // ── Table NodeSpecs ─────────────────────────────────────────────
 
 const table: NodeSpec = {
-  content: 'table_header_row table_row+',
+  content: 'table_header_row table_row*',
   group: 'block',
   tableRole: 'table',
   isolating: true,
