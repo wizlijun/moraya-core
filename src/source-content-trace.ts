@@ -1,4 +1,4 @@
-import {sliceTrace,type SourceTrace,type TracePiece} from './source-trace'
+import {editTrace,sliceTrace,type SourceTrace,type TracePiece} from './source-trace'
 
 export type LineRead = Readonly<{
   begin:number; end:number; indent:number; keepLastLF:boolean
@@ -33,4 +33,35 @@ export function traceConsumedLines(trace:SourceTrace,read:LineRead,actual:string
   }
   const text=chunks.join('')
   return text===actual?{text,pieces}:undefined
+}
+
+/** Project only a row already selected by the installed table rule. */
+export function traceTableRow(trace:SourceTrace,from:number,to:number,actual:readonly string[]):readonly (SourceTrace|undefined)[]|undefined {
+  const row=sliceTrace(trace,from,to),left=row.text.length-row.text.trimStart().length
+  const trimmed=sliceTrace(row,left,left+row.text.trim().length)
+  const cells:SourceTrace[]=[]
+  let start=0,escaped=false
+  let edits:{from:number;to:number;text:string}[]=[]
+  const append=(end:number)=>{
+    cells.push(editTrace(sliceTrace(trimmed,start,end),edits));edits=[]
+  }
+  for(let i=0;i<trimmed.text.length;i++){
+    const ch=trimmed.text[i]
+    if(ch==='|'){
+      if(escaped)edits.push({from:i-1-start,to:i+1-start,text:'|'})
+      else {append(i);start=i+1}
+    }
+    escaped=ch==='\\'
+  }
+  append(trimmed.text.length)
+  if(cells[0]?.text==='')cells.shift()
+  if(cells[cells.length-1]?.text==='')cells.pop()
+  const projected=actual.map((value,i)=>{
+    const cell=cells[i]
+    if(!cell)return undefined
+    const leading=cell.text.length-cell.text.trimStart().length
+    return sliceTrace(cell,leading,leading+cell.text.trim().length)
+  })
+  if(projected.some((cell,i)=>(cell?.text??'')!==actual[i]))return undefined
+  return projected
 }

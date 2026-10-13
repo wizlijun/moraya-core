@@ -70,12 +70,12 @@ describe('source fidelity ordinary text session', () => {
     const stale = EditorState.create({doc:base.doc}).tr.insertText('丁',2,3)
     expect(applySourceTextTransaction(next,stale)).toEqual({ok:false,reason:'stale-document'})
   })
-  it('opens opaque source without claiming writable literal/container text', () => {
+  it('maps literal body while leaving math and point annotations opaque', () => {
     for (const source of ['```js\n甲\n```', '$x$', '{>>note<<}']) {
       const opened = session(source)
       expect(opened.source).toBe(source)
       expect(opened.doc.eq(parseMarkdown(source))).toBe(true)
-      expect(opened.textSpans).toEqual([])
+      expect(opened.textSpans).toEqual(source.startsWith('```')?[{sourceFrom:6,sourceTo:7,pmFrom:1,pmTo:2,kind:'linear'}]:[])
     }
   })
   it('captures text after CRLF without normalizing raw source', () => {
@@ -151,9 +151,10 @@ it('keeps unknown and zero-width bytes around mapped text',()=>{
  const {result}=replaceAt(s,'甲','乙');expect(result.ok).toBe(true)
  if(result.ok)expect(result.session.source).toBe(s.replace('甲','乙'))
 })
-it('opaque literal edit fails without a writable result',()=>{
+it('literal edit preserves the original fence and neighboring text',()=>{
  const {base,result}=replaceAt('```mermaid\n甲\n```\n\n保持。','甲','乙')
- expect(result.ok).toBe(false);expect('session' in result).toBe(false)
+ expect(result.ok).toBe(true)
+ if(result.ok){expect(result.session.source).toBe('```mermaid\n乙\n```\n\n保持。');expect(result.session.doc.eq(parseMarkdown(result.session.source))).toBe(true)}
  expect(base.source).toBe('```mermaid\n甲\n```\n\n保持。')
 })
 

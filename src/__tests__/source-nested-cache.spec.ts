@@ -66,3 +66,39 @@ it('rejects a newly consumed duplicate even when every old protected byte is kep
  const result=preparePreservingSourceCandidate(verified,[{from,to:from,removed:'',text}],work,parseMarkdown(target))
  expect(result.ok).toBe(false);expect(base.source).toBe(raw)
 })
+
+const actualBodies=[
+ ['| H |\n| :--- |\n| 甲 |\n',[0,1,0,0],0],
+ ['> | H |\n> | --- |\n> | a\\|甲 |\n',[0,0,1,0,0],2],
+ ['~~~~mermaid\ngraph TD; 甲-->B\n~~~~\n',[0],10],
+ ['\uFEFF---\r\ntitle: 甲\r\nother: keep\r\n---\r\n',[0],7],
+ ['<div class="note">\n  甲。\n</div>\n',[0],21],
+ ['    甲。\n    同句。\n',[0],0],
+ ['{==保留 _甲强调_==}{>>原注<<}',[0],3],
+] as const
+it.each(actualBodies)('body facts survive three replay generations and a foreign session %j',(raw,path,offset)=>{
+ const initial=captureFilePipeline(raw);expect(initial.ok).toBe(true)
+ if(!initial.ok)throw Error(initial.reason)
+ let cached=initial
+ for(let i=0;i<3;i++){
+  const replay=replayFilePipeline(cached.cache);expect(replay.ok).toBe(true)
+  if(!replay.ok)throw Error(replay.reason)
+  expect(replay.value.doc.eq(initial.value.doc)).toBe(true)
+  for(const key of ['textRuns','roots','protectedSources','layout'] as const)expect(replay.value[key]).toEqual(initial.value[key])
+  expect(capturedInlineBodies(raw,replay.value.doc,replay.value.roots,replay.value.layout))
+   .toEqual(capturedInlineBodies(raw,initial.value.doc,initial.value.roots,initial.value.layout))
+  cached=replay
+ }
+ const base=open(raw),p=at(base.doc,path,offset),tr=EditorState.create({doc:base.doc}).tr.insertText('乙',p,p+1)
+ const snapshot=JSON.stringify(base)
+ const forged={...base,textSpans:base.textSpans.map(span=>({...span,sourceFrom:span.sourceFrom+1}))}
+ const spy=vi.spyOn(markdown,'serializeSourceRootMarkdown')
+ try{
+  expect(applySourceBlockTransaction(forged,tr).ok).toBe(false)
+  const result=applySourceBlockTransaction({...base},tr);expect(result.ok).toBe(true)
+  if(!result.ok)throw Error(result.reason)
+  expect(result.mode).toBe('exact-text');expect(result.session.source).toBe(raw.replace('甲','乙'))
+  expect(result.session.doc.eq(tr.doc)).toBe(true);expect(JSON.stringify(base)).toBe(snapshot)
+  expect(spy).not.toHaveBeenCalled()
+ }finally{spy.mockRestore()}
+})

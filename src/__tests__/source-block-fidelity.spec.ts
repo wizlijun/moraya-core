@@ -68,7 +68,7 @@ it.each([
  const tr=transaction(b).addMark(p,p+5,b.doc.type.schema.marks.strong!.create())
  expect(tr.steps[0]!.getMap().ranges).toEqual([])
  const r=accept(b,tr)
- const wholeBody=['* Alpha\n  + nested\n* Beta','> Alpha\n>\n> Beta','[^a]: Alpha','Term\n: Alpha'].includes(head)
+ const wholeBody=['| A | B |\n| :- | -: |\n| Alpha | Beta |','* Alpha\n  + nested\n* Beta','> Alpha\n>\n> Beta','[^a]: Alpha','Term\n: Alpha'].includes(head)
  expect(r.mode).toBe(wholeBody?'fragment-render':'root-render')
  if(wholeBody)expect(r.session.source).toBe(raw.replace('Alpha','**Alpha**'))
  expect(r.changedRoots).toEqual([b.roots[0]!.id])
@@ -136,12 +136,12 @@ it('handles removeMark with an empty StepMap',()=>{
  const r=accept(b,tr)
  expect(r.session.source).toBe('Alpha\n\nTail')
 })
-it('falls back for real nested, table and literal text without exact spans',()=>{
+it('preserves actual nested, table and literal text with exact spans',()=>{
  for(const raw of ['* 甲\n  + 子项\n\nTail','| A |\n| --- |\n| 甲 |\n\nTail',
   '~~~text\n甲\n~~~\n\nTail','---\ntitle: 甲\n---\n\nTail']) {
   const b=open(raw),p=pos(b.doc,'甲'),r=accept(b,transaction(b).insertText('乙',p,p+1))
-  expect(r.mode).toBe(raw.startsWith('* ')?'exact-text':'root-render');expect(r.changedRoots).toEqual([0])
-  if(raw.startsWith('* '))expect(r.session.source).toBe(raw.replace('甲','乙'))
+  expect(r.mode).toBe('exact-text');expect(r.changedRoots).toEqual([0])
+  expect(r.session.source).toBe(raw.replace('甲','乙'))
   expect(r.session.source.endsWith('\n\nTail')).toBe(true)
  }
 })

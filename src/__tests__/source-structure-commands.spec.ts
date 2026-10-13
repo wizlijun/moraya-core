@@ -10,6 +10,7 @@ import {createSourceSession,applySourceBlockTransaction} from '../source-fidelit
 import {wrapInTaskList} from '../commands'
 import {defaultSchema} from '../schema'
 import {parseMarkdown,parseMarkdownAsync} from '../markdown'
+import * as markdown from '../markdown'
 function open(raw:string){const r=createSourceSession(raw);if(!r.ok)throw Error(r.reason);return r.session}
 function state(b:ReturnType<typeof open>,from:number,to=from){
  return EditorState.create({doc:b.doc,selection:TextSelection.create(b.doc,from,to)})
@@ -144,9 +145,13 @@ it('fence content terminal LF remains distinct from closing syntax',()=>{
  const b=open('```js\nA\n\n```'+tail),r=accept(b,state(b,1).tr.insertText('B',text(b.doc,'A')+1))
  expect(r.session.doc.child(0).textContent).toBe('AB\n');expect(r.session.source.endsWith(tail)).toBe(true)
 })
-it('literal renderer chooses a fence longer than content and preserves trailing LFs',()=>{
- const b=open('```js\nA\n```'+tail),tr=state(b,1).tr.insertText('\n```\n\n',2)
- const r=accept(b,tr);expect(r.session.source.startsWith('````js\n')).toBe(true)
+it('literal body replacement cannot lengthen the original fence through root rendering',()=>{
+ const b=open('```js\nA\n```'+tail),tr=state(b,1).tr.insertText('\n```\n\n',2),before=JSON.stringify(b)
+ const spy=vi.spyOn(markdown,'serializeSourceRootMarkdown')
+ try {
+  const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(false);expect('session' in r).toBe(false)
+  expect(spy).not.toHaveBeenCalled();expect(JSON.stringify(b)).toBe(before)
+ }finally{spy.mockRestore()}
 })
 
 it('code-mark internal space stays on its native serialization branch',()=>{

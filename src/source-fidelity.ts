@@ -132,24 +132,46 @@ function applySourceTextTransactionWithEdit(base: SourceSession, tr: Transaction
   const verified = context?.verified ?? prepareVerifiedFileBase(base, work)
   if ('ok' in verified) return verified
   base = verified.verifiedBase
-  const { from, to } = step
+  let { from, to } = step
   let textOnly=true;step.slice.content.forEach(node=>{if(!node.isText)textOnly=false})
   const owner=base.roots.find(root=>root.pmFrom<=from&&root.pmTo>=to)
   if(!owner||!sourceRootHasClosedFences(owner))return {ok:false,reason:'unsupported-step'}
   const $from = base.doc.resolve(from), $to = base.doc.resolve(to)
-  if (!$from.sameParent($to) || !['paragraph','heading'].includes($from.parent.type.name)
+  if (!$from.sameParent($to) || !['paragraph','heading','code_block','frontmatter','html_block'].includes($from.parent.type.name)
     || to < from || step.slice.openStart || step.slice.openEnd || !textOnly) {
     return { ok: false, reason: 'unsupported-step' }
   }
   if (splitsTextAt(base.doc, from) || splitsTextAt(base.doc, to)) {
     return { ok: false, reason: 'unmapped-range' }
   }
-  const spans = base.textSpans.filter(span => from === to
+  let spans = base.textSpans.filter(span => from === to
     ? span.pmFrom <= from && span.pmTo >= to : span.pmTo > from && span.pmFrom < to)
   if (!spans.length) return { ok: false, reason: 'unmapped-range' }
   if (from < to && (spans[0]!.pmFrom > from || spans[spans.length - 1]!.pmTo < to
     || spans.some((span, i) => i > 0 && spans[i - 1]!.pmTo !== span.pmFrom))) {
     return { ok: false, reason: 'unmapped-range' }
+  }
+  let insert='';step.slice.content.forEach(node=>{insert+=node.text!})
+  // Audit the original replacement before reducing a literal consumer's whole-body Step.
+  // Prefix/suffix comparison concerns only this already-authorized plain body.
+  const literal=['code_block','frontmatter','html_block'].includes($from.parent.type.name)
+  let plain=literal
+  step.slice.content.forEach(node=>{if(node.marks.length)plain=false})
+  if(plain)base.doc.nodesBetween(from,to,node=>{if(node.isText&&node.marks.length)plain=false})
+  if(plain&&from<to){
+    const originalFrom=boundary(spans[0]!,from),originalTo=boundary(spans[spans.length-1]!,to)
+    if(originalFrom===undefined||originalTo===undefined||overlapsProtectedSource(base,originalFrom,originalTo))
+      return {ok:false,reason:'unmapped-range'}
+    const before=base.doc.textBetween(from,to)
+    let prefix=0,suffix=0
+    while(prefix<before.length&&prefix<insert.length&&before[prefix]===insert[prefix])prefix++
+    while(splitsSurrogate(before,prefix)||splitsSurrogate(insert,prefix))prefix--
+    while(suffix<before.length-prefix&&suffix<insert.length-prefix
+      &&before[before.length-1-suffix]===insert[insert.length-1-suffix])suffix++
+    while(splitsSurrogate(before,before.length-suffix)||splitsSurrogate(insert,insert.length-suffix))suffix--
+    from+=prefix;to-=suffix;insert=insert.slice(prefix,insert.length-suffix)
+    spans=base.textSpans.filter(span=>from===to?span.pmFrom<=from&&span.pmTo>=to:span.pmTo>from&&span.pmFrom<to)
+    if(!spans.length)return {ok:false,reason:'unmapped-range'}
   }
   // An insertion at a syntax boundary is ambiguous.
   if (from === to && spans.some(span => boundary(span, from) !== boundary(spans[0]!, from))) {
@@ -163,7 +185,6 @@ function applySourceTextTransactionWithEdit(base: SourceSession, tr: Transaction
     return { ok: false, reason: 'unmapped-range' }
   }
   if (overlapsProtectedSource(base, sourceFrom, sourceTo)) return { ok: false, reason: 'unsupported-step' }
-  let insert='';step.slice.content.forEach(node=>{insert+=node.text!})
   context?.verifyEdit?.({ from: sourceFrom, to: sourceTo, text: insert })
   const result = preparePreservingSourceCandidate(verified, [{ from: sourceFrom, to: sourceTo,
     removed: base.source.slice(sourceFrom, sourceTo), text: insert }], work, tr.doc)
@@ -468,11 +489,9 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
    }
    const step=tr.steps[0] as ReplaceStep,from=base.doc.resolve(step.from),to=base.doc.resolve(step.to)
    let ordinary=true;step.slice.content.forEach(node=>{if(!node.isText||!node.hasMarkup(node.type,null,from.marks()))ordinary=false})
-   const cell=from.depth>1&&['table_cell','table_header'].includes(from.node(from.depth-1).type.name)
-   const supportedMarks=from.marks().every(mark=>['strong','em','link'].includes(mark.type.name))
-   if(from.sameParent(to)&&['paragraph','heading'].includes(from.parent.type.name)&&ordinary&&supportedMarks
-    &&(!cell||capturedInlineBodies(base.source,base.doc,base.roots,base.layout)?.some(body=>body.pmFrom===from.start()))
-    &&(exact.reason==='unmapped-range'||step.to-step.from<=1&&step.slice.size<=1))return exact
+   const supportedMarks=from.marks().every(mark=>['strong','em','link','annotation','html_mark','highlight','strike_through'].includes(mark.type.name))
+   if(from.sameParent(to)&&['paragraph','heading','code_block','frontmatter','html_block'].includes(from.parent.type.name)&&ordinary&&supportedMarks
+    &&(['code_block','frontmatter','html_block'].includes(from.parent.type.name)||exact.reason==='unmapped-range'||step.to-step.from<=1&&step.slice.size<=1))return exact
   }
   const fragment=plainMarkBody(base,tr)
   if(fragment){

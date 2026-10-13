@@ -15,7 +15,7 @@ function captured(source: string) {
     expect(s.sourceTo).toBeLessThanOrEqual(source.length)
     const from = r.value.doc.resolve(s.pmFrom)
     expect(from.sameParent(r.value.doc.resolve(s.pmTo))).toBe(true)
-    expect(['paragraph','heading']).toContain(from.parent.type.name)
+    expect(['paragraph','heading','code_block','frontmatter','html_block']).toContain(from.parent.type.name)
     if (s.kind === 'linear') expect(source.slice(s.sourceFrom, s.sourceTo))
       .toBe(r.value.doc.textBetween(s.pmFrom, s.pmTo))
   }
@@ -99,11 +99,11 @@ it.each([
     expect(r.doc.textBetween(pm, pm + 1)).toBe(needle[2])
   }
 })
-it('maps container text while keeping literal text opaque', () => {
+it('maps actual container and literal text', () => {
   for(const [source,pmFrom] of [['> 甲。',2],['* 甲。',3]] as const)
     expect(captured(source).textRuns).toEqual([{sourceFrom:2,sourceTo:4,pmFrom,pmTo:pmFrom+2,kind:'linear'}])
-  for (const source of ['```js\n甲\n```', '---\nx: 甲\n---']) {
-    expect(captured(source).textRuns).toEqual([])
+  for (const [source,sourceFrom,sourceTo,pmTo] of [['```js\n甲\n```',6,7,2], ['---\nx: 甲\n---',4,8,5]] as const) {
+    expect(captured(source).textRuns).toEqual([{sourceFrom,sourceTo,pmFrom:1,pmTo,kind:'linear'}])
   }
 })
 it('keeps repeated paragraph ownership and subsequent captures separate', () => {
@@ -116,15 +116,16 @@ it('keeps repeated paragraph ownership and subsequent captures separate', () => 
     { sourceFrom: 0, sourceTo: 1, pmFrom: 1, pmTo: 2, kind: 'linear' },
   ])
 })
-it('leaves unsupported marks opaque while capturing surrounding text and reference labels', () => {
+it('maps actual text marks while keeping inline code opaque', () => {
   for (const source of [
     '甲 `code` 目标乙', '甲 ~~删除~~ 目标乙', '甲 <u>下划线</u> 目标乙',
     '甲 [标签][ref] 目标乙\n\n[ref]: /path “标题”',
   ]) {
     const r = captured(source)
     expect(r.textRuns.some(s => s.sourceFrom <= source.indexOf('目标乙') && s.sourceTo > source.indexOf('目标乙'))).toBe(true)
+    if(source.includes('`code`'))expect(r.textRuns.some(span=>span.sourceFrom<source.indexOf('code')+4&&span.sourceTo>source.indexOf('code'))).toBe(false)
     for (const span of r.textRuns) r.doc.nodesBetween(span.pmFrom, span.pmTo, node => {
-      if (node.isText) expect(node.marks.every(mark => ['em', 'strong', 'link'].includes(mark.type.name))).toBe(true)
+      if (node.isText) expect(node.marks.every(mark => ['em', 'strong', 'link', 'strike_through', 'html_mark'].includes(mark.type.name))).toBe(true)
     })
   }
 })
