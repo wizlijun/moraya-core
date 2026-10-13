@@ -1,3 +1,5 @@
+import { gfmTableCommand } from './table-commands'
+export { gfmTableCommand, type GfmTableAction } from './table-commands'
 import { type Command, type EditorState, type Transaction } from 'prosemirror-state'
 import {
   toggleMark,
@@ -152,24 +154,8 @@ export const insertHorizontalRule: Command = (state, dispatch) => {
   return true
 }
 
-/**
- * Insert a 3×3 placeholder table. Note: full table support requires
- * prosemirror-tables setup at editor mount time; this command falls back
- * to inserting a markdown-style code block snippet if tables aren't
- * registered (true for this minimal v0.1.0 schema).
- */
-export const insertTable: Command = (state, dispatch) => {
-  const tableType = schema.nodes.table
-  if (!tableType) {
-    // Insert pipe-table markdown directly into a paragraph.
-    if (dispatch) {
-      const text = '\n\n| Col 1 | Col 2 | Col 3 |\n|---|---|---|\n|   |   |   |\n|   |   |   |\n\n'
-      dispatch(state.tr.insertText(text))
-    }
-    return true
-  }
-  return false
-}
+/** Insert a 3×3 GFM table using the current editor's schema. */
+export const insertTable: Command = gfmTableCommand({ kind: 'insert' })
 
 export const insertMathBlock: Command = (state, dispatch) => {
   const mathBlock = schema.nodes.math_block

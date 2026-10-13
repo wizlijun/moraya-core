@@ -24,7 +24,7 @@ import {
   createParagraphNear,
   liftEmptyBlock,
 } from 'prosemirror-commands'
-import { addRowAfter } from 'prosemirror-tables'
+import { gfmTableCommand } from '../table-commands'
 
 const enterHandlerKey = new PluginKey('moraya-enter-handler')
 
@@ -120,24 +120,9 @@ export function createEnterHandlerPlugin(): Plugin {
         if (inTable) {
           // Ctrl/Cmd+Enter → add row after and move cursor there
           if ((event.ctrlKey || event.metaKey) && !event.shiftKey) {
-            event.preventDefault()
-            addRowAfter(view.state, view.dispatch)
-
-            const { $from: $cur } = view.state.selection
-            for (let d = $cur.depth; d > 0; d--) {
-              const name = $cur.node(d).type.name
-              if (name === 'table_row' || name === 'table_header_row') {
-                try {
-                  const rowEnd = $cur.after(d)
-                  const $newRow = view.state.doc.resolve(rowEnd + 1)
-                  view.dispatch(
-                    view.state.tr.setSelection(TextSelection.near($newRow)).scrollIntoView(),
-                  )
-                } catch { /* new row at table boundary */ }
-                break
-              }
-            }
-            return true
+            const handled = gfmTableCommand({ kind: 'add-row' })(view.state, view.dispatch)
+            if (handled) event.preventDefault()
+            return handled
           }
 
           // Shift+Enter → insert hard break

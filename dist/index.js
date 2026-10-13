@@ -2813,10 +2813,10 @@ function tagPairedHtmlInline(tokens) {
   const VOID_RE = /^<(?:br|hr|img|input|wbr|area|base|col|embed|link|meta|param|source|track)[\s/>]/i;
   for (const token of tokens) {
     if (token.type !== "inline" || !token.children) continue;
-    const children = token.children;
+    const children2 = token.children;
     const stack = [];
-    for (let i = 0; i < children.length; i++) {
-      const child = children[i];
+    for (let i = 0; i < children2.length; i++) {
+      const child = children2[i];
       if (!child || child.type !== "html_inline") continue;
       const content = child.content;
       if (VOID_RE.test(content) || /\/>$/.test(content) || /^<!--/.test(content)) continue;
@@ -2827,7 +2827,7 @@ function tagPairedHtmlInline(tokens) {
           const entry = stack[j];
           if (!entry) continue;
           if (entry.tagName === tagName) {
-            const opener = children[entry.index];
+            const opener = children2[entry.index];
             if (opener) {
               opener.meta = { ...opener.meta || {}, htmlPaired: true };
             }
@@ -3539,13 +3539,13 @@ var parserTokens = {
           if (match) {
             checked = match[1] !== " ";
             t.content = t.content.slice(match[0].length);
-            const children = t.children;
-            if (children && children.length > 0) {
-              const firstChild = children[0];
+            const children2 = t.children;
+            if (children2 && children2.length > 0) {
+              const firstChild = children2[0];
               if (firstChild.type === "text") {
                 firstChild.content = firstChild.content.slice(match[0].length);
                 if (!firstChild.content) {
-                  children.shift();
+                  children2.shift();
                 }
               }
             }
@@ -4418,6 +4418,126 @@ function parseDocumentWithSourceCapture(source, schema2) {
   }
 }
 
+// src/table-commands.ts
+import { TextSelection } from "prosemirror-state";
+function children(node) {
+  const result = [];
+  node.forEach((child) => result.push(child));
+  return result;
+}
+function validAlignment(value) {
+  return value === "left" || value === "center" || value === "right";
+}
+function tableContext(state) {
+  const { $from } = state.selection;
+  for (let depth = $from.depth; depth > 0; depth--) {
+    const table2 = $from.node(depth);
+    if (table2.type !== state.schema.nodes.table) continue;
+    if ($from.depth < depth + 2) return null;
+    const columns = table2.firstChild?.childCount ?? 0;
+    if (!columns) return null;
+    for (let row = 0; row < table2.childCount; row++) {
+      const node = table2.child(row);
+      if (node.type !== state.schema.nodes[row === 0 ? "table_header_row" : "table_row"] || node.childCount !== columns) return null;
+      for (let col = 0; col < columns; col++) {
+        const cell = node.child(col);
+        if (cell.type !== state.schema.nodes[row === 0 ? "table_header" : "table_cell"] || cell.attrs.colspan !== 1 || cell.attrs.rowspan !== 1 || !validAlignment(cell.attrs.alignment)) return null;
+      }
+    }
+    return { table: table2, pos: $from.before(depth), row: $from.index(depth), column: $from.index(depth + 1) };
+  }
+  return null;
+}
+function gfmTableCommand(action) {
+  return (state, dispatch) => {
+    const { table: table2, table_header_row: table_header_row2, table_row: table_row2, table_header: table_header2, table_cell: table_cell2, paragraph: paragraph2 } = state.schema.nodes;
+    if (!table2 || !table_header_row2 || !table_row2 || !table_header2 || !table_cell2 || !paragraph2) return false;
+    const freshCell = (header, alignment) => (header ? table_header2 : table_cell2).createAndFill({ alignment, colspan: 1, rowspan: 1, colwidth: null });
+    if (action.kind === "insert") {
+      if (!dispatch) return true;
+      const tableNode = table2.create(null, [
+        table_header_row2.create(null, Array.from({ length: 3 }, () => freshCell(true, "left"))),
+        ...Array.from({ length: 2 }, () => table_row2.create(null, Array.from({ length: 3 }, () => freshCell(false, "left"))))
+      ]);
+      const tr2 = state.tr.replaceSelectionWith(tableNode);
+      tr2.doc.descendants((node, pos) => {
+        if (node === tableNode) {
+          tr2.setSelection(TextSelection.near(tr2.doc.resolve(pos + 3)));
+          return false;
+        }
+        return true;
+      });
+      dispatch(tr2.scrollIntoView());
+      return true;
+    }
+    const context = tableContext(state);
+    if (!context) return false;
+    const rows = children(context.table);
+    let row = context.row, column = context.column;
+    if (action.kind === "align-column") {
+      if (!validAlignment(action.alignment)) return false;
+      if (!dispatch) return true;
+      const tr2 = state.tr;
+      let rowPos = context.pos + 1;
+      for (const current of rows) {
+        let cellPos = rowPos + 1;
+        for (let col = 0; col < column; col++) cellPos += current.child(col).nodeSize;
+        const cell = current.child(column);
+        if (cell.attrs.alignment !== action.alignment) tr2.setNodeMarkup(cellPos, void 0, { ...cell.attrs, alignment: action.alignment }, cell.marks);
+        rowPos += current.nodeSize;
+      }
+      dispatch(tr2);
+      return true;
+    }
+    const freshRow = () => table_row2.create(null, children(rows[0]).map((cell) => freshCell(false, cell.attrs.alignment)));
+    if (action.kind === "add-row") {
+      rows.splice(row + 1, 0, freshRow());
+      row++;
+    } else if (action.kind === "delete-row") {
+      if (rows.length <= 1) return false;
+      rows.splice(row, 1);
+      if (row === 0) rows[0] = table_header_row2.create(
+        rows[0].attrs,
+        children(rows[0]).map((cell) => table_header2.create(cell.attrs, cell.content, cell.marks)),
+        rows[0].marks
+      );
+      row = Math.min(row, rows.length - 1);
+    } else if (action.kind === "add-column" || action.kind === "delete-column") {
+      if (action.kind === "delete-column" && rows[0].childCount <= 1) return false;
+      for (let index = 0; index < rows.length; index++) {
+        const cells = children(rows[index]);
+        if (action.kind === "add-column") cells.splice(column + 1, 0, freshCell(index === 0, "left"));
+        else cells.splice(column, 1);
+        rows[index] = rows[index].type.create(rows[index].attrs, cells, rows[index].marks);
+      }
+      column = action.kind === "add-column" ? column + 1 : Math.min(column, rows[0].childCount - 1);
+    } else if (action.kind === "next-cell" || action.kind === "previous-cell") {
+      column += action.kind === "next-cell" ? 1 : -1;
+      if (column < 0) {
+        row--;
+        column = row >= 0 ? rows[row].childCount - 1 : 0;
+      }
+      if (row >= 0 && column >= rows[row].childCount) {
+        row++;
+        column = 0;
+      }
+      if (row < 0) return false;
+      if (row >= rows.length) rows.push(freshRow());
+    } else return false;
+    if (!dispatch) return true;
+    const replacement = table2.create(context.table.attrs, rows, context.table.marks);
+    const tr = state.tr;
+    if (!replacement.eq(context.table)) tr.replaceWith(context.pos, context.pos + context.table.nodeSize, replacement);
+    let position = context.pos + 1;
+    for (let index = 0; index < row; index++) position += rows[index].nodeSize;
+    position += 1;
+    for (let index = 0; index < column; index++) position += rows[row].child(index).nodeSize;
+    tr.setSelection(TextSelection.near(tr.doc.resolve(position + 1))).scrollIntoView();
+    dispatch(tr);
+    return true;
+  };
+}
+
 // src/setup.ts
 import {
   AllSelection as AllSelection2,
@@ -4426,7 +4546,7 @@ import {
   Plugin as Plugin9,
   PluginKey as PluginKey9,
   Selection,
-  TextSelection as TextSelection4
+  TextSelection as TextSelection5
 } from "prosemirror-state";
 import { Decoration as Decoration5, DecorationSet as DecorationSet5, EditorView } from "prosemirror-view";
 import { keymap } from "prosemirror-keymap";
@@ -4558,17 +4678,7 @@ var insertHorizontalRule = (state, dispatch) => {
   }
   return true;
 };
-var insertTable = (state, dispatch) => {
-  const tableType = schema.nodes.table;
-  if (!tableType) {
-    if (dispatch) {
-      const text2 = "\n\n| Col 1 | Col 2 | Col 3 |\n|---|---|---|\n|   |   |   |\n|   |   |   |\n\n";
-      dispatch(state.tr.insertText(text2));
-    }
-    return true;
-  }
-  return false;
-};
+var insertTable = gfmTableCommand({ kind: "insert" });
 var insertMathBlock = (state, dispatch) => {
   const mathBlock = schema.nodes.math_block;
   if (!mathBlock) {
@@ -4618,7 +4728,7 @@ function createDefListInputRule(schema2) {
 }
 
 // src/plugins/enter-handler.ts
-import { Plugin, PluginKey, TextSelection } from "prosemirror-state";
+import { Plugin, PluginKey, TextSelection as TextSelection2 } from "prosemirror-state";
 import {
   splitBlock,
   chainCommands,
@@ -4626,7 +4736,6 @@ import {
   createParagraphNear,
   liftEmptyBlock
 } from "prosemirror-commands";
-import { addRowAfter } from "prosemirror-tables";
 var enterHandlerKey = new PluginKey("moraya-enter-handler");
 function parsePipeTableHeader(text2) {
   if (!/^\|(.+\|)+\s*$/.test(text2)) return null;
@@ -4686,24 +4795,9 @@ function createEnterHandlerPlugin() {
         }
         if (inTable) {
           if ((event.ctrlKey || event.metaKey) && !event.shiftKey) {
-            event.preventDefault();
-            addRowAfter(view.state, view.dispatch);
-            const { $from: $cur } = view.state.selection;
-            for (let d = $cur.depth; d > 0; d--) {
-              const name = $cur.node(d).type.name;
-              if (name === "table_row" || name === "table_header_row") {
-                try {
-                  const rowEnd = $cur.after(d);
-                  const $newRow = view.state.doc.resolve(rowEnd + 1);
-                  view.dispatch(
-                    view.state.tr.setSelection(TextSelection.near($newRow)).scrollIntoView()
-                  );
-                } catch {
-                }
-                break;
-              }
-            }
-            return true;
+            const handled = gfmTableCommand({ kind: "add-row" })(view.state, view.dispatch);
+            if (handled) event.preventDefault();
+            return handled;
           }
           if (event.shiftKey && !event.ctrlKey && !event.metaKey) {
             event.preventDefault();
@@ -4728,13 +4822,13 @@ function createEnterHandlerPlugin() {
               const afterNode = view.state.doc.nodeAt(tableEnd);
               if (afterNode) {
                 const $target = view.state.doc.resolve(tableEnd + 1);
-                view.dispatch(view.state.tr.setSelection(TextSelection.near($target)).scrollIntoView());
+                view.dispatch(view.state.tr.setSelection(TextSelection2.near($target)).scrollIntoView());
               } else {
                 const paragraph2 = view.state.schema.nodes.paragraph;
                 if (paragraph2) {
                   const tr = view.state.tr.insert(tableEnd, paragraph2.create());
                   const $target = tr.doc.resolve(tableEnd + 1);
-                  tr.setSelection(TextSelection.near($target));
+                  tr.setSelection(TextSelection2.near($target));
                   view.dispatch(tr.scrollIntoView());
                 }
               }
@@ -4751,7 +4845,7 @@ function createEnterHandlerPlugin() {
               }
               targetPos += 1;
               const $target = view.state.doc.resolve(targetPos);
-              view.dispatch(view.state.tr.setSelection(TextSelection.near($target)).scrollIntoView());
+              view.dispatch(view.state.tr.setSelection(TextSelection2.near($target)).scrollIntoView());
             }
             return true;
           }
@@ -4790,7 +4884,7 @@ function createEnterHandlerPlugin() {
                   if (inserted && inserted.childCount >= 2) {
                     const headerRowSize = inserted.child(0).nodeSize;
                     const $dataRow = tr.doc.resolve(pos + 1 + headerRowSize + 1);
-                    tr.setSelection(TextSelection.near($dataRow));
+                    tr.setSelection(TextSelection2.near($dataRow));
                   }
                   tr.scrollIntoView();
                   view.dispatch(tr);
@@ -4943,7 +5037,7 @@ function createCursorSyntaxPlugin(inlineScope = "cursor") {
 }
 
 // src/plugins/link-text-plugin.ts
-import { Plugin as Plugin3, PluginKey as PluginKey3, TextSelection as TextSelection2 } from "prosemirror-state";
+import { Plugin as Plugin3, PluginKey as PluginKey3, TextSelection as TextSelection3 } from "prosemirror-state";
 import { Decoration as Decoration2, DecorationSet as DecorationSet2 } from "prosemirror-view";
 var pluginKey2 = new PluginKey3("moraya-link-text");
 var LINK_PATTERN_DECO = /\[([^\]]*)\]\(([^)]*)\)/g;
@@ -5096,7 +5190,7 @@ function createLinkTextPlugin() {
           const relPos = Math.max(0, Math.min(newPos - from, text2.length));
           const cursorPos = from + 1 + relPos;
           try {
-            tr2.setSelection(TextSelection2.create(tr2.doc, cursorPos));
+            tr2.setSelection(TextSelection3.create(tr2.doc, cursorPos));
           } catch {
           }
           return tr2;
@@ -5304,7 +5398,7 @@ function createInlineCodeConvertPlugin(enableBacktickCollapse = true) {
 
 // src/plugins/editor-props-plugin.ts
 import { Fragment as Fragment2, Slice } from "prosemirror-model";
-import { AllSelection, Plugin as Plugin5, PluginKey as PluginKey5, TextSelection as TextSelection3 } from "prosemirror-state";
+import { AllSelection, Plugin as Plugin5, PluginKey as PluginKey5, TextSelection as TextSelection4 } from "prosemirror-state";
 import { Decoration as Decoration3, DecorationSet as DecorationSet3 } from "prosemirror-view";
 var editorPropsKey = new PluginKey5("moraya-editor-props");
 function isLocalFilePath(href) {
@@ -5537,7 +5631,7 @@ function createEditorPropsPlugin(opts) {
                 beforePos = pos;
               }
             }
-            const sel = TextSelection3.near(view.state.doc.resolve(beforePos), -1);
+            const sel = TextSelection4.near(view.state.doc.resolve(beforePos), -1);
             view.dispatch(view.state.tr.setSelection(sel));
           } catch {
           }
@@ -5599,13 +5693,13 @@ function createEditorPropsPlugin(opts) {
               if (!paragraphType) return false;
               const emptyParagraph = paragraphType.create();
               const tr = view.state.tr.replaceWith(0, docSize, emptyParagraph);
-              tr.setSelection(TextSelection3.create(tr.doc, 1));
+              tr.setSelection(TextSelection4.create(tr.doc, 1));
               tr.setMeta("full-delete", true);
               view.dispatch(tr);
               return true;
             }
             if (event.key === "Backspace") {
-              if (sel instanceof TextSelection3 && sel.empty && sel.$cursor) {
+              if (sel instanceof TextSelection4 && sel.empty && sel.$cursor) {
                 const { parent, parentOffset } = sel.$cursor;
                 if (parent.isTextblock && parentOffset === parent.content.size && parentOffset > 0) {
                   const nb = sel.$cursor.nodeBefore;
@@ -5652,7 +5746,7 @@ function createEditorPropsPlugin(opts) {
         const endPos = doc2.content.size;
         const paragraph2 = paragraphType.create();
         const tr = view.state.tr.insert(endPos, paragraph2);
-        tr.setSelection(TextSelection3.create(tr.doc, endPos + 1));
+        tr.setSelection(TextSelection4.create(tr.doc, endPos + 1));
         view.dispatch(tr);
         view.focus();
         return true;
@@ -5665,7 +5759,7 @@ function createEditorPropsPlugin(opts) {
         if (node.type.name !== "image") return false;
         if (event.button !== 0) return false;
         const $pos = view.state.doc.resolve(nodePos + node.nodeSize);
-        const sel = TextSelection3.near($pos);
+        const sel = TextSelection4.near($pos);
         view.dispatch(view.state.tr.setSelection(sel));
         return true;
       },
@@ -5678,7 +5772,7 @@ function createEditorPropsPlugin(opts) {
         if (event.isComposing) return false;
         if (event.key === "ArrowRight" && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
           const sel = view.state.selection;
-          if (sel.empty && sel instanceof TextSelection3 && sel.$cursor) {
+          if (sel.empty && sel instanceof TextSelection4 && sel.$cursor) {
             const $cursor = sel.$cursor;
             const ZWSP_MARK_NAMES2 = ["code", "strong", "em", "strike_through"];
             const nodeBefore = $cursor.nodeBefore;
@@ -5690,7 +5784,7 @@ function createEditorPropsPlugin(opts) {
             if (hasTargetMarkBefore && nodeAfter?.isText && nodeAfter.text?.startsWith("\u200B")) {
               const nextPos = $cursor.pos + nodeAfter.nodeSize;
               const $next = view.state.doc.resolve(Math.min(nextPos, view.state.doc.content.size));
-              const nextSel = TextSelection3.near($next, 1);
+              const nextSel = TextSelection4.near($next, 1);
               const tr = view.state.tr.setSelection(nextSel);
               tr.setStoredMarks([]);
               tr.setMeta("code-escape", true);
@@ -5710,7 +5804,7 @@ function createEditorPropsPlugin(opts) {
             if (!paragraphType) return false;
             const emptyParagraph = paragraphType.create();
             const tr = view.state.tr.replaceWith(0, docSize, emptyParagraph);
-            tr.setSelection(TextSelection3.create(tr.doc, 1));
+            tr.setSelection(TextSelection4.create(tr.doc, 1));
             tr.setMeta("full-delete", true);
             view.dispatch(tr);
             return true;
@@ -6181,14 +6275,21 @@ function buildKeymap(schema2) {
   };
   if (listItemType) {
     bindings["Enter"] = splitListItem(listItemType);
-    bindings["Tab"] = (state, dispatch) => {
+    bindings["Mod-]"] = sinkListItem(listItemType);
+    bindings["Mod-["] = liftListItem2(listItemType);
+  }
+  for (const [key, kind] of [["Tab", "next-cell"], ["Shift-Tab", "previous-cell"]]) {
+    bindings[key] = (state, dispatch) => {
+      const { $from } = state.selection;
+      for (let depth = $from.depth; depth > 0; depth--) {
+        if ($from.node(depth).type === N.table) return gfmTableCommand({ kind })(state, dispatch);
+      }
+      if (!listItemType) return false;
+      if (key === "Shift-Tab") return liftListItem2(listItemType)(state, dispatch);
       if (sinkListItem(listItemType)(state)) return sinkListItem(listItemType)(state, dispatch);
       if (dispatch) dispatch(state.tr.insertText("    "));
       return true;
     };
-    bindings["Mod-]"] = sinkListItem(listItemType);
-    bindings["Shift-Tab"] = liftListItem2(listItemType);
-    bindings["Mod-["] = liftListItem2(listItemType);
   }
   if (N.paragraph) bindings["Mod-Alt-0"] = setBlockType2(N.paragraph);
   if (N.heading) {
@@ -6203,7 +6304,7 @@ function buildKeymap(schema2) {
     for (let d = $from.depth; d > 0; d--) {
       if ($from.node(d).type.name === "code_block") {
         if (dispatch) {
-          dispatch(state.tr.setSelection(TextSelection4.create(state.doc, $from.start(d), $from.end(d))));
+          dispatch(state.tr.setSelection(TextSelection5.create(state.doc, $from.start(d), $from.end(d))));
         }
         return true;
       }
@@ -6231,7 +6332,7 @@ function buildKeymap(schema2) {
         if (!paragraphType) return false;
         const emptyParagraph = paragraphType.create();
         const tr = state.tr.replaceWith(0, docSize, emptyParagraph);
-        tr.setSelection(TextSelection4.create(tr.doc, 1));
+        tr.setSelection(TextSelection5.create(tr.doc, 1));
         tr.setMeta("full-delete", true);
         dispatch(tr);
         return true;
@@ -6245,7 +6346,7 @@ function buildKeymap(schema2) {
       }
       return true;
     }
-    if (!sel.empty || !(sel instanceof TextSelection4)) return false;
+    if (!sel.empty || !(sel instanceof TextSelection5)) return false;
     const $cursor = sel.$cursor;
     if (!$cursor) return false;
     const { parent, parentOffset } = $cursor;
@@ -6318,7 +6419,7 @@ function buildKeymap(schema2) {
       }
       return true;
     }
-    if (sel.empty && sel instanceof TextSelection4 && sel.$cursor) {
+    if (sel.empty && sel instanceof TextSelection5 && sel.$cursor) {
       const $c = sel.$cursor;
       if ($c.parent.isTextblock && $c.parentOffset === $c.parent.content.size) {
         const ap = $c.after();
@@ -6676,14 +6777,14 @@ function originSpan(base, origin) {
   return { from: f.sourceAnchor, to: f.sourceAnchor };
 }
 function createLedger(base) {
-  const children = new Array(base.doc.childCount);
+  const children2 = new Array(base.doc.childCount);
   const assign = (origin, from, to, pmFrom, pmTo) => {
-    if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to <= from || to > children.length) fail();
+    if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to <= from || to > children2.length) fail();
     let pos2 = pmFrom;
     for (let i = from; i < to; i++) {
-      if (children[i]) fail();
+      if (children2[i]) fail();
       const node = base.doc.child(i);
-      children[i] = { ref: { kind: "base", origin }, node, from: pos2, to: pos2 + node.nodeSize };
+      children2[i] = { ref: { kind: "base", origin }, node, from: pos2, to: pos2 + node.nodeSize };
       pos2 += node.nodeSize;
     }
     if (pos2 !== pmTo) fail();
@@ -6701,15 +6802,15 @@ function createLedger(base) {
     assign({ kind: "fallback" }, e.childFrom, e.childTo, e.pmFrom, e.pmTo);
   }
   let pos = 0;
-  for (const lane of children) {
+  for (const lane of children2) {
     if (!lane || lane.from !== pos) fail();
     pos = lane.to;
   }
   if (pos !== base.doc.content.size) fail();
   const boundaries = [];
   let blankCursor = 0;
-  for (let i = 0; i <= children.length; i++) {
-    const left = children[i - 1]?.ref, right = children[i]?.ref;
+  for (let i = 0; i <= children2.length; i++) {
+    const left = children2[i - 1]?.ref, right = children2[i]?.ref;
     if (left?.kind === "base" && right?.kind === "base" && sameOrigin(left.origin, right.origin) && left.origin.kind === "root") {
       boundaries.push({ kind: "inside-root", rootId: left.origin.id });
       continue;
@@ -6724,7 +6825,7 @@ function createLedger(base) {
     }
     boundaries.push({ kind: "base", anchor, slotIds });
   }
-  return { children, boundaries, components: [] };
+  return { children: children2, boundaries, components: [] };
 }
 function representative(ledger, id) {
   let c2 = ledger.components[id];
@@ -6955,7 +7056,11 @@ function makeRecipe(base, ledger, slots, render, rootHasClosedFences) {
         atoms2.push(raw(keepTerminal));
         removed.add(keepTerminal);
         if (n < nodes.length - 1) claims.push({ from: keepTerminal.to, to: keepTerminal.to, kind: "anchor", step: stepOf(c2) });
-      } else atoms2.push(generated("terminator", output.terminal === "content-eol" ? "\n" : "", anchor, stepOf(c2)));
+      } else {
+        const original = origins.length === 1 && c2.origins.length === 1 && !c2.births.length && nodes.length === 1 ? base.roots[origins[0].id] : void 0;
+        const keepAbsentTableEol = output.family === "table" && finalIndex === ledger.children.length - 1 && !terminal && original?.tokenType === "table_open" && original.childTo === base.doc.childCount && original.sourceTo === base.source.length && original.tailFrom === original.sourceTo;
+        atoms2.push(generated("terminator", output.terminal === "content-eol" && !keepAbsentTableEol ? "\n" : "", anchor, stepOf(c2)));
+      }
     }
     if (!nodes.length && !c2.origins.length) continue;
     const previous = insertions.get(anchor) ?? [];
@@ -7311,9 +7416,9 @@ var renderableRoots = /* @__PURE__ */ new Set([
   "math_block_eqno"
 ]);
 function rootRenderNode(node) {
-  const children = [];
-  node.forEach((child) => children.push(rootRenderNode(child)));
-  const rendered = node.isLeaf ? node : node.copy(Fragment3.fromArray(children));
+  const children2 = [];
+  node.forEach((child) => children2.push(rootRenderNode(child)));
+  const rendered = node.isLeaf ? node : node.copy(Fragment3.fromArray(children2));
   const highlight2 = rendered.marks.findIndex((mark) => mark.type.name === "highlight" && mark.attrs.delimiter === "equals");
   if (highlight2 < 1) return rendered;
   let outer = highlight2;
@@ -7435,6 +7540,7 @@ export {
   createSourceSession,
   djb2Hash,
   getDocumentBaseDir,
+  gfmTableCommand,
   insertHorizontalRule,
   insertImage,
   insertMathBlock,

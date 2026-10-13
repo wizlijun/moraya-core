@@ -2,6 +2,17 @@ import { Command } from 'prosemirror-state';
 export { Command, EditorState, Transaction } from 'prosemirror-state';
 export { Node } from 'prosemirror-model';
 
+type GfmTableAction = {
+    kind: 'insert';
+} | {
+    kind: 'add-row' | 'delete-row' | 'add-column' | 'delete-column' | 'next-cell' | 'previous-cell';
+} | {
+    kind: 'align-column';
+    alignment: 'left' | 'center' | 'right';
+};
+/** Commands for rectangular GFM tables, using only the current editor's schema. */
+declare function gfmTableCommand(action: GfmTableAction): Command;
+
 declare const toggleBold: Command;
 declare const toggleItalic: Command;
 declare const toggleStrikethrough: Command;
@@ -22,15 +33,10 @@ declare const wrapInOrderedList: Command;
 declare const wrapInTaskList: Command;
 declare const toggleCodeBlock: Command;
 declare const insertHorizontalRule: Command;
-/**
- * Insert a 3×3 placeholder table. Note: full table support requires
- * prosemirror-tables setup at editor mount time; this command falls back
- * to inserting a markdown-style code block snippet if tables aren't
- * registered (true for this minimal v0.1.0 schema).
- */
+/** Insert a 3×3 GFM table using the current editor's schema. */
 declare const insertTable: Command;
 declare const insertMathBlock: Command;
 declare function toggleLink(href?: string): Command;
 declare function insertImage(src: string, alt?: string): Command;
 
-export { insertHorizontalRule, insertImage, insertMathBlock, insertTable, setHeading, toggleBlockquote, toggleBold, toggleBulletList, toggleCode, toggleCodeBlock, toggleHighlight, toggleItalic, toggleLink, toggleOrderedList, toggleStrikethrough, wrapInBulletList, wrapInOrderedList, wrapInTaskList };
+export { type GfmTableAction, gfmTableCommand, insertHorizontalRule, insertImage, insertMathBlock, insertTable, setHeading, toggleBlockquote, toggleBold, toggleBulletList, toggleCode, toggleCodeBlock, toggleHighlight, toggleItalic, toggleLink, toggleOrderedList, toggleStrikethrough, wrapInBulletList, wrapInOrderedList, wrapInTaskList };

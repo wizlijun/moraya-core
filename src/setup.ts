@@ -1,3 +1,4 @@
+import { gfmTableCommand } from './table-commands'
 /**
  * Editor lifecycle factory for `@moraya/core`.
  *
@@ -417,16 +418,23 @@ function buildKeymap(schema: Schema): Plugin {
 
   if (listItemType) {
     bindings['Enter'] = splitListItem(listItemType)
-    bindings['Tab'] = (state, dispatch) => {
-      // In a list → indent list item
+    bindings['Mod-]'] = sinkListItem(listItemType)
+    bindings['Mod-['] = liftListItem(listItemType)
+  }
+
+  for (const [key, kind] of [['Tab', 'next-cell'], ['Shift-Tab', 'previous-cell']] as const) {
+    bindings[key] = (state, dispatch) => {
+      const { $from } = state.selection
+      for (let depth = $from.depth; depth > 0; depth--) {
+        // A rejected table command must never fall through to list/space edits.
+        if ($from.node(depth).type === N.table) return gfmTableCommand({ kind })(state, dispatch)
+      }
+      if (!listItemType) return false
+      if (key === 'Shift-Tab') return liftListItem(listItemType)(state, dispatch)
       if (sinkListItem(listItemType)(state)) return sinkListItem(listItemType)(state, dispatch)
-      // Otherwise → insert tab (4 spaces)
       if (dispatch) dispatch(state.tr.insertText('    '))
       return true
     }
-    bindings['Mod-]'] = sinkListItem(listItemType)
-    bindings['Shift-Tab'] = liftListItem(listItemType)
-    bindings['Mod-['] = liftListItem(listItemType)
   }
 
   if (N.paragraph) bindings['Mod-Alt-0'] = setBlockType(N.paragraph)

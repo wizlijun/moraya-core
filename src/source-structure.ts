@@ -311,7 +311,15 @@ function makeRecipe(base:SourceSession,ledger:Ledger,slots:Slot[],render:(nodes:
    if(n===lastVisible&&keepTerminal){
     atoms.push(raw(keepTerminal));removed.add(keepTerminal)
     if(n<nodes.length-1)claims.push({from:keepTerminal.to,to:keepTerminal.to,kind:'anchor',step:stepOf(c)})
-   }else atoms.push(generated('terminator',output.terminal==='content-eol'?'\n':'',anchor,stepOf(c)))
+   }else{
+    // A one-to-one edit of the final table inherits its original absent EOL.
+    // Births and multi-node replacements have no such terminal provenance.
+    const original=origins.length===1&&c.origins.length===1&&!c.births.length&&nodes.length===1?base.roots[origins[0]!.id]:undefined
+    const keepAbsentTableEol=output.family==='table'&&finalIndex===ledger.children.length-1&&!terminal
+     &&original?.tokenType==='table_open'&&original.childTo===base.doc.childCount
+     &&original.sourceTo===base.source.length&&original.tailFrom===original.sourceTo
+    atoms.push(generated('terminator',output.terminal==='content-eol'&&!keepAbsentTableEol?'\n':'',anchor,stepOf(c)))
+   }
   }
   // A component without surviving origins or nodes is a cancelled pure birth.
   if(!nodes.length&&!c.origins.length)continue

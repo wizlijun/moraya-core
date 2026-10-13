@@ -49,6 +49,8 @@ export {
   toggleBulletList,
   toggleCodeBlock,
   insertTable,
+  gfmTableCommand,
+  type GfmTableAction,
   insertHorizontalRule,
   insertMathBlock,
   toggleLink,
