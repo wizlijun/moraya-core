@@ -13,7 +13,7 @@ it('preserves actual nested definition while real toggleMark edits Alpha',()=>{
  const {r,tr}=bold(a,[0,0]); expect(r.ok).toBe(true); if(!r.ok)throw Error(r.reason);
  expect(r.mode).toBe('fragment-render');
  expect(r.session.source).toBe('> [ref]: /url\n>\n> **Alpha**\n\nTail');
- expect(r.session.doc.eq(tr.doc)).toBe(true); expect(r.edits).toHaveLength(1);
+ expect(r.session.doc.eq(tr.doc)).toBe(true); expect(r.edits).toEqual([{from:18,to:18,text:'**'},{from:23,to:23,text:'**'}]);
  const back=bold(r.session.source,[0,0]); expect(back.r.ok).toBe(true);
  if(back.r.ok)expect(back.r.session.source).toBe(a);
 });
@@ -35,12 +35,14 @@ it('never renders the protected owner for full-body marks',()=>{
   expect(spy).not.toHaveBeenCalled()
  }finally{spy.mockRestore()}
 })
-it('rejects a real mark spanning Alpha and Tail without changing base',()=>{
+it('preserves raw while a real mark spans Alpha and Tail',()=>{
  const raw='> [ref]: /u\n>\n> Alpha\n\nTail',base=open(raw),before=JSON.stringify(base)
  const a=at(base.doc,[0,0]),z=at(base.doc,[1],4)
  expect(base.doc.textBetween(a,a+5)).toBe('Alpha');expect(base.doc.textBetween(z-4,z)).toBe('Tail')
  const tr=EditorState.create({doc:base.doc}).tr.addMark(a,z,base.doc.type.schema.marks.strong!.create())
- expect(applySourceBlockTransaction(base,tr).ok).toBe(false);expect(JSON.stringify(base)).toBe(before)
+ const r=applySourceBlockTransaction(base,tr);expect(r.ok).toBe(true);if(!r.ok)throw Error(r.reason)
+ expect(r.session.source).toBe('> [ref]: /u\n>\n> **Alpha**\n\n**Tail**');expect(r.session.doc.eq(tr.doc)).toBe(true)
+ expect(r.session.protectedSources).toEqual(base.protectedSources);expect(r.edits).toHaveLength(4);expect(JSON.stringify(base)).toBe(before)
 })
 it('rejects custom ReplaceStep prototypes in both public paths',()=>{
  class FakeReplace extends ReplaceStep{}

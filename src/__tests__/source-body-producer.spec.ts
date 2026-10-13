@@ -93,7 +93,11 @@ it.each([
  const base=open(raw);let p=-1;base.doc.descendants((node,pos)=>{if(node.isText&&node.text!.includes('甲'))p=pos+node.text!.indexOf('甲')});
  const spy=vi.spyOn(markdown,'serializeSourceRootMarkdown');
  try{const result=applySourceBlockTransaction(base,EditorState.create({doc:base.doc}).tr.insertText(insert,p,p+1));
-  expect(result.ok).toBe(false);expect(spy).not.toHaveBeenCalled();expect(base.source).toBe(raw);
+  if(raw==='~~~~text\n甲\n~~~~\n'){
+   expect(result.ok).toBe(true);if(!result.ok)throw Error(result.reason)
+   expect(result.session.source).toBe('~~~~~text\n\n~~~~\n\n~~~~~\n');expect(result.edits).toHaveLength(3)
+  }else expect(result.ok).toBe(false)
+  expect(spy).not.toHaveBeenCalled();expect(base.source).toBe(raw);
  }finally{spy.mockRestore()}
 });
 it('promoted HTML and CSV do not receive literal spans',()=>{
@@ -107,7 +111,12 @@ it.each([
 ])('a full literal body replacement cannot bypass delimiter safety %j',(raw,text)=>{
  const base=open(raw),node=base.doc.firstChild!,tr=EditorState.create({doc:base.doc}).tr.replaceWith(1,1+node.content.size,base.doc.type.schema.text(text));
  const spy=vi.spyOn(markdown,'serializeSourceRootMarkdown');
- try{const result=applySourceBlockTransaction(base,tr);expect(result.ok).toBe(false);expect('session' in result).toBe(false);expect(spy).not.toHaveBeenCalled();expect(base.source).toBe(raw)}finally{spy.mockRestore()}
+ try{const result=applySourceBlockTransaction(base,tr);
+  if(raw==='~~~~text\n甲\n~~~~\n'){
+   expect(result.ok).toBe(true);if(!result.ok)throw Error(result.reason)
+   expect(result.session.source).toBe('~~~~~text\n甲\n~~~~\n\n~~~~~\n');expect(result.edits).toHaveLength(3);expect(result.session.doc.eq(tr.doc)).toBe(true)
+  }else{expect(result.ok).toBe(false);expect('session' in result).toBe(false)}
+  expect(spy).not.toHaveBeenCalled();expect(base.source).toBe(raw)}finally{spy.mockRestore()}
 });
 it('literal full replacement does not trim through a UTF-16 surrogate',()=>{
  const raw='---\r\nx: 😀\r\n---\r\n',base=open(raw),node=base.doc.firstChild!;

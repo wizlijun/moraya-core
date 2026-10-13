@@ -1,3 +1,5 @@
+import {prepareInlineRecipe,prepareClosedFenceRecipe} from './source-inline-recipe'
+import {capturedInlineRecipeFacts} from './markdown'
 import {prepareEmptyBodyTransaction} from './source-empty-body'
 import { prepareRawFileSourceEdits, createFileSourceSession, emptyFileParseWork, prepareVerifiedFileBase, finishUnchangedFile, prepareCandidate, preparePreservingSourceCandidate, type VerifiedFileBase } from './source-file-cache'
 import { Fragment, type Node as PmNode, type ResolvedPos, type Schema } from 'prosemirror-model'
@@ -487,6 +489,30 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
    return {...finishUnchangedFile(verified,work),mode:'unchanged',edits:[],changedRoots:[]}
   }
   if(changedRoots.some(id=>!sourceRootHasClosedFences(ownership.rootById[id]!)))throw new UnsupportedBlockTransaction()
+  const inlineFacts=capturedInlineRecipeFacts(base)
+  const preserving=(edits:readonly SourceEdit[]):SourceBlockResult=>{
+   applySourceEdits(base,edits,changedRoots,ownership)
+   const parsed=preparePreservingSourceCandidate(verified,edits.map(edit=>({...edit,removed:base.source.slice(edit.from,edit.to)})),work,tr.doc)
+   return parsed.ok?{ok:true,session:parsed.session,file:parsed.file,mode:'fragment-render',edits,changedRoots}:{ok:false,reason:parsed.reason}
+  }
+  if(inlineFacts&&tr.steps.length===1&&tr.steps[0] instanceof ReplaceStep&&base.doc.resolve(tr.steps[0].from).parent.type.name==='code_block'){
+   const fence=prepareClosedFenceRecipe(base,tr,inlineFacts)
+   if(fence.ok&&fence.edits.length)return preserving(fence.edits)
+   if(!fence.ok&&inlineFacts.fences.some(f=>f.pmFrom===base.doc.resolve((tr.steps[0] as ReplaceStep).from).before()))return fence
+  }
+  // Mark chains and replacements changing marks have one deterministic recipe.
+  // Do not probe an exact parse before generating their syntax envelope.
+  let needsInline=tr.steps.length!==1||!(tr.steps[0] instanceof ReplaceStep)
+  if(!needsInline){
+   const step=tr.steps[0] as ReplaceStep,from=base.doc.resolve(step.from)
+   if(['paragraph','heading'].includes(from.parent.type.name)){
+    step.slice.content.forEach(n=>{if(!n.isText||!n.hasMarkup(n.type,null,step.from<step.to?(from.nodeAfter?.marks??from.marks()):from.marks()))needsInline=true})
+    if(from.marks().some(m=>m.type.name==='code')&&step.slice.content.textBetween(0,step.slice.content.size).includes('`'))needsInline=true
+    const inserted=step.slice.content.textBetween(0,step.slice.content.size),to=base.doc.resolve(step.to)
+    if(from.parentOffset===0&&/^[ \t]/.test(inserted)||to.parentOffset===to.parent.content.size&&/[ \t]$/.test(inserted))needsInline=true
+   }
+  }
+  if(needsInline&&inlineFacts){const inline=prepareInlineRecipe(base,tr,inlineFacts);return inline.ok?preserving(inline.edits):inline}
   // Only a single ReplaceStep can satisfy the old exact API. Replay this one
   // document step to remove stored-mark bookkeeping without touching the caller.
   if(tr.steps.length===1&&tr.steps[0] instanceof ReplaceStep) {
@@ -497,11 +523,19 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
     const edits=[exact.edit]
     return {ok:true,session:exact.session,file:exact.file,mode:'exact-text',edits,changedRoots}
    }
+   // A candidate parse is terminal. Only an unmapped/unsupported exact shape
+   // that never constructed a candidate may enter the inline recipe.
+   if(exact.reason!=='unmapped-range'&&exact.reason!=='unsupported-step')return exact
    const step=tr.steps[0] as ReplaceStep,from=base.doc.resolve(step.from),to=base.doc.resolve(step.to)
    let ordinary=true;step.slice.content.forEach(node=>{if(!node.isText||!node.hasMarkup(node.type,null,from.marks()))ordinary=false})
    const supportedMarks=from.marks().every(mark=>['strong','em','link','annotation','html_mark','highlight','strike_through'].includes(mark.type.name))
    if(from.sameParent(to)&&['paragraph','heading','code_block','frontmatter','html_block'].includes(from.parent.type.name)&&ordinary&&supportedMarks
     &&(['code_block','frontmatter','html_block'].includes(from.parent.type.name)||exact.reason==='unmapped-range'||step.to-step.from<=1&&step.slice.size<=1))return exact
+  }
+  if(inlineFacts){
+   const inline=prepareInlineRecipe(base,tr,inlineFacts)
+   if(inline.ok)return preserving(inline.edits)
+   return inline
   }
   const fragment=plainMarkBody(base,tr)
   if(fragment){

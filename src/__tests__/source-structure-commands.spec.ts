@@ -145,11 +145,13 @@ it('fence content terminal LF remains distinct from closing syntax',()=>{
  const b=open('```js\nA\n\n```'+tail),r=accept(b,state(b,1).tr.insertText('B',text(b.doc,'A')+1))
  expect(r.session.doc.child(0).textContent).toBe('AB\n');expect(r.session.source.endsWith(tail)).toBe(true)
 })
-it('literal body replacement cannot lengthen the original fence through root rendering',()=>{
+it('literal body replacement grows only the actual closed fence markers',()=>{
  const b=open('```js\nA\n```'+tail),tr=state(b,1).tr.insertText('\n```\n\n',2),before=JSON.stringify(b)
  const spy=vi.spyOn(markdown,'serializeSourceRootMarkdown')
  try {
-  const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(false);expect('session' in r).toBe(false)
+  const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(true);if(!r.ok)throw Error(r.reason)
+  expect(r.session.source).toBe('````js\nA\n```\n\n\n````'+tail);expect(r.session.doc.eq(tr.doc)).toBe(true)
+  expect(r.edits).toEqual([{from:0,to:3,text:'````'},{from:7,to:7,text:'\n```\n\n'},{from:8,to:11,text:'````'}])
   expect(spy).not.toHaveBeenCalled();expect(JSON.stringify(b)).toBe(before)
  }finally{spy.mockRestore()}
 })
@@ -313,10 +315,10 @@ it('a schema without list paragraph filling rejects omission of an explicitly in
 it.each([false,true])('fence observation restores an existing getLines descriptor after throw=%s',throws=>{
  const getLines=StateBlock.prototype.getLines,skip=StateBlock.prototype.skipEmptyLines
  let observed:any,descriptor:PropertyDescriptor|undefined,calls=0
- const owned=function(this:any,...args:any[]){calls++;if(throws)throw Error('fence getLines failed');return getLines.apply(this,args)}
+ const owned=function(this:any,...args:any[]){calls++;if(throws)throw Error('fence getLines failed');return getLines.apply(this,args as Parameters<typeof getLines>)}
  const spy=vi.spyOn(StateBlock.prototype,'skipEmptyLines').mockImplementation(function(this:any,...args:any[]){
   if(!observed){observed=this;Object.defineProperty(this,'getLines',{configurable:true,writable:true,enumerable:true,value:owned});descriptor=Object.getOwnPropertyDescriptor(this,'getLines')}
-  return skip.apply(this,args)
+  return skip.apply(this,args as Parameters<typeof skip>)
  })
  try {
   const r=createSourceSession('```js\nA\n```');expect(r.ok).toBe(!throws)
@@ -333,7 +335,7 @@ it('fence observation deletes only its temporary own method after an inherited g
 it('legacy sync and async fence parses do not install the capture getLines wrapper',async()=>{
  const original=StateBlock.prototype.getLines;let calls=0
  const spy=vi.spyOn(StateBlock.prototype,'getLines').mockImplementation(function(this:any,...args:any[]){
-  calls++;expect(Object.hasOwn(this,'getLines')).toBe(false);return original.apply(this,args)
+  calls++;expect(Object.hasOwn(this,'getLines')).toBe(false);return original.apply(this,args as Parameters<typeof original>)
  })
  try {
   const raw='> ```js\n> A\n> ```',doc=parseMarkdown(raw)

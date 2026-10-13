@@ -50,8 +50,10 @@ it('rejects marks, fake Step prototypes, wider ranges and missing authority with
  try{
   const marked=b.doc.type.schema.text('X',[b.doc.type.schema.marks.strong!.create()]);
   const widened=state.tr.insertText('X',p);Object.assign(widened.steps[0]!,{from:p-1,to:p+1});
-  const transactions=[state.tr.step(new Fake(p,p,new Slice(Fragment.from(b.doc.type.schema.text('X')),0,0))),state.tr.replaceWith(p,p,marked),widened];
+  const transactions=[state.tr.step(new Fake(p,p,new Slice(Fragment.from(b.doc.type.schema.text('X')),0,0))),widened];
   for(const tr of transactions)expect(applySourceBlockTransaction(b,tr).ok).toBe(false);
+  const markedResult=applySourceBlockTransaction(b,state.tr.replaceWith(p,p,marked));expect(markedResult.ok).toBe(true)
+  if(markedResult.ok)expect(markedResult.session.source).toBe('| H | J |\n| --- | --- |\n| A |**X** |\n')
   const tr=state.tr.insertText('X',p),facts=capturedEmptyBodies(b.source,b.doc,b.roots,b.layout)!;
   expect(prepareEmptyBodyTransaction(b,tr,[]).kind).toBe('unsupported');
   expect(prepareEmptyBodyTransaction(b,tr,facts.map(f=>({...f,pmAt:f.pmAt+1}))).kind).toBe('unsupported');
@@ -144,7 +146,7 @@ it('pending nested facts replay once and never transfer across equal parses',()=
  expect(capturedEmptyBodies(raw,copied.doc,copied.roots,copied.layout)).toBeUndefined();
  const recaptured=applySourceBlockTransaction(copied,tr);expect(recaptured.ok).toBe(true);
  const marked=EditorState.create({doc:b.doc}).tr.insertText('X',at(b.doc,[0,2])).addMark(at(b.doc,[0,2]),at(b.doc,[0,2])+1,b.doc.type.schema.marks.strong!.create());
- expect(applySourceBlockTransaction(b,marked).ok).toBe(false);
+ const markedResult=applySourceBlockTransaction(b,marked);expect(markedResult.ok).toBe(true);if(markedResult.ok){expect(markedResult.session.source).toBe('> A\n>\n>\n>**X**');expect(markedResult.session.doc.eq(marked.doc)).toBe(true)}
  const valid=applySourceBlockTransaction(b,tr);expect(valid.ok).toBe(true);if(valid.ok)expect(valid.session.source).toBe('> A\n>\n>\n>X');
 });
 it('nested selected blank preserves protected scopes and exact translated raw ranges',()=>{

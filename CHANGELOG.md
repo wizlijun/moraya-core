@@ -4,6 +4,8 @@ All notable changes to `@moraya/core` are documented here. SemVer.
 
 ## Unreleased
 
+- Source transactions preserve original inline syntax during partial and cross-body mark commands, actual inline InputRules, editable code spans, and marked/link first input in certified empty bodies. Closed top-level code fences grow only the necessary markers on collisions. Source and consumer tests are committed; compiled artifacts and installed-host acceptance follow in the annotation integration task.
+
 - Source-preserving ordinary first input now materializes certified empty paragraphs, headings, list/quote/footnote bodies, table cells and closed code/frontmatter bodies while retaining untouched bytes. Restores installed fence interruption rules. Source capture also preserves actual nested blank paragraphs and supports consecutive Enter/first-input transactions, including closed-code newlines and first input beside protected reference definitions. Compiled artifacts and installed-host command coverage accompany this foundation; full file UI/history integration follows separately.
 
 - Source-preserving transactions now map actual nested prose, headings, table cells and supported literal bodies, retaining untouched Markdown bytes and protected definitions. Complete LF container windows can reparse locally with bounded block work and replay remote reference changes. File UI, history, native/IME integration and dedicated literal delimiter changes remain future work.

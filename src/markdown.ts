@@ -1,3 +1,5 @@
+import type {InlineRecipeFacts,InlineEdge,ClosedFenceBody} from './source-inline-recipe'
+import type {SourceSession} from './source-fidelity'
 /**
  * Markdown ↔ ProseMirror Doc roundtrip for `@moraya/core`.
  *
@@ -138,7 +140,7 @@ md.inline.ruler.push('caret_highlight', (state, silent) => {
   if (closeIdx < 0 || closeIdx === contentStart) return false
 
   if (!silent) {
-    state.push('caret_highlight_open', 'mark', 1).markup = '^^'
+    const opened=state.push('caret_highlight_open', 'mark', 1);opened.markup = '^^'
     // Recursively tokenize the wrapped text (like the ==…== and {==…==} paths)
     // so escapes (`\*`) are consumed and inner marks (`**bold**`) still work. A
     // raw slice would keep backslash escapes as literal text, which the
@@ -151,7 +153,9 @@ md.inline.ruler.push('caret_highlight', (state, silent) => {
     state.md.inline.tokenize(state)
     state.pos = oldPos
     state.posMax = oldMax
-    state.push('caret_highlight_close', 'mark', -1).markup = '^^'
+    const closed=state.push('caret_highlight_close', 'mark', -1);closed.markup = '^^'
+    const trace=inlineStateOwners.get(state)
+    if(trace)registerEdge(opened,closed,trace,start,contentStart,closeIdx,closeIdx+2)
   }
   state.pos = closeIdx + 2
   return true
@@ -205,7 +209,9 @@ md.inline.ruler.push('critic_annotation', (state, silent) => {
     state.md.inline.tokenize(state)
     state.pos = oldPos
     state.posMax = oldMax
-    state.push('critic_anno_close', 'span', -1)
+    const close=state.push('critic_anno_close', 'span', -1)
+    const trace=inlineStateOwners.get(state)
+    if(trace)registerEdge(open,close,trace,start,start+3,hlClose,noteClose+3)
   }
   state.pos = noteClose + 3
   return true
@@ -259,6 +265,8 @@ function tagPairedHtmlInline(tokens: InlineToken[]): void {
             const opener = children[entry.index]
             if (opener) {
               opener.meta = { ...(opener.meta || {}), htmlPaired: true }
+              const open=htmlTokenRanges.get(opener),close=htmlTokenRanges.get(child)
+              if(open&&close){edgeTokens.set(opener,{open,close,side:'open'});edgeTokens.set(child,{open,close,side:'close'})}
             }
             child.meta = { ...(child.meta || {}), htmlPaired: true }
             stack.splice(j, 1)
@@ -436,7 +444,7 @@ type SourceRun = { text: string; kind?: undefined; trace?: undefined }
   | { text: string; kind: 'linear' | 'atomic'; trace: SourceTrace }
 type Capture = {
   file?: FileCaptureState
-  emptyBodies: EmptyBody[]; bodies: InlineBody[]; emissions: InlineEmission[]
+  edges:InlineEdge[]; fences:ClosedFenceBody[]; emptyBodies: EmptyBody[]; bodies: InlineBody[]; emissions: InlineEmission[]
   source: string; blankLines: BlankDraft[]; fallback?: FallbackEmpty; lists: ListDraft[]
   trace: SourceTrace; lineStarts: number[]; protectedSources: ProtectedSource[]; runs: CapturedTextRun[]; roots: SourceRoot[]
   synthetic: { gapIndex: number; emission: SyntheticEmission }[]
@@ -447,21 +455,27 @@ type InlineBody = Readonly<{
   pmFrom:number; pmTo:number; sourceFrom:number; sourceTo:number
   kind:'paragraph'|'heading'|'table-cell'; singlePhysicalLine:boolean
 }>
-type InlineEmission = {from:number;to:number;kind:string;runFrom:number;runTo:number;node?:PmNode;body?:InlineBody;empty?:EmptyPlace}
+type InlineEmission = {from:number;to:number;kind:string;runFrom:number;runTo:number;node?:PmNode;body?:InlineBody;empty?:EmptyPlace;edgeFrom?:number;edgeTo?:number;fence?:ClosedFenceBody}
 const inlineFrames=new WeakMap<object,InlineEmission>()
 const inlineCloseStates=new WeakSet<object>()
 const inlineFacts = new WeakMap<object, {collector:Capture;trace?:SourceTrace;kind?:InlineBody['kind'];empty?:EmptyPlace;trimEnd?:number}>()
 const literalFacts=new WeakMap<object,{collector:Capture;trace:SourceTrace;kind:string;empty?:EmptyPlace}>()
 const capturedTextParents=['paragraph','heading','code_block','frontmatter','html_block']
-const capturedTextMarks=['em','strong','link','annotation','html_mark','highlight','strike_through']
+const capturedTextMarks=['em','strong','link','annotation','html_mark','highlight','strike_through','code']
 const tokenArrays = new WeakMap<object, object>()
 const inlineStateOwners = new WeakMap<object, SourceTrace>()
 const tokenSources = new WeakMap<object, { collector: Capture; runs: SourceRun[] }>()
 const pendingSources = new WeakMap<object, SourceRun[]>()
+type EdgeToken={open:{from:number;to:number};close:{from:number;to:number};side:'open'|'close'|'code'}
+const htmlTokenRanges=new WeakMap<object,{from:number;to:number}>()
+const edgeTokens=new WeakMap<object,EdgeToken>()
+const fenceTokens=new WeakMap<object,Omit<ClosedFenceBody,'pmFrom'|'pmTo'|'contentFrom'|'contentTo'>>()
+const currentInlineCollector=new WeakMap<object,Capture>()
+const activeEdges=new WeakMap<object,Map<number,{pmFrom:number;marks:readonly Mark[]}>>()
 const capturedFenceClosed = new WeakMap<object, boolean>()
 const capturedRootFencesClosed = new WeakMap<SourceRoot, boolean>()
 const capturedListLayouts = new WeakMap<SourceLayout, {
-  source: string; doc: PmNode; roots: readonly SourceRoot[]; lists: readonly SourceListLexeme[]; emptyBodies:readonly EmptyBody[]; bodies: readonly InlineBody[]
+  source: string; doc: PmNode; roots: readonly SourceRoot[]; lists: readonly SourceListLexeme[]; emptyBodies:readonly EmptyBody[]; bodies: readonly InlineBody[]; recipe:InlineRecipeFacts
 }>()
 let captureAvailable = true
 
@@ -475,6 +489,11 @@ export function capturedSourceLists(source: string, doc: PmNode, roots: readonly
 export function capturedInlineBodies(source:string,doc:PmNode,roots:readonly SourceRoot[],layout:SourceLayout):readonly InlineBody[]|undefined {
   const bound=capturedListLayouts.get(layout)
   return bound&&bound.source===source&&bound.doc===doc&&bound.roots===roots&&bound.lists===layout.lists?bound.bodies:undefined
+}
+
+export function capturedInlineRecipeFacts(base:SourceSession):InlineRecipeFacts|undefined {
+ const bound=capturedListLayouts.get(base.layout)
+ return bound&&bound.source===base.source&&bound.doc===base.doc&&bound.roots===base.roots&&bound.lists===base.layout.lists?bound.recipe:undefined
 }
 
 export function capturedEmptyBodies(source:string,doc:PmNode,roots:readonly SourceRoot[],layout:SourceLayout):readonly EmptyBody[]|undefined {
@@ -715,7 +734,7 @@ wrapCaptureRule(md.block.ruler, 'fence', (original, state, startLine, endLine, s
   const originalGetLines = state.getLines, descriptor = Object.getOwnPropertyDescriptor(state, 'getLines')
   if (typeof originalGetLines !== 'function' || descriptor?.configurable === false) throw new UnsupportedSourceCapture()
   const tokenStart = state.tokens.length
-  let contentEnd: number | undefined, bodyTrace:SourceTrace|undefined,empty:EmptyPlace|undefined
+  let contentEnd: number | undefined, bodyTrace:SourceTrace|undefined,empty:EmptyPlace|undefined,bodyUnstripped=false
   Object.defineProperty(state, 'getLines', {
     configurable: true, writable: true, enumerable: descriptor?.enumerable ?? false,
     value: function (this: unknown, begin: number, end: number, indent: number, keepLastLF: boolean) {
@@ -727,6 +746,8 @@ wrapCaptureRule(md.block.ruler, 'fence', (original, state, startLine, endLine, s
       })}
       const value=originalGetLines.call(this,begin,end,indent,keepLastLF)
       bodyTrace=traceConsumedLines(collectorFor(state)!.trace,read,value)
+      bodyUnstripped=!!bodyTrace&&bodyTrace.pieces.length>0&&bodyTrace.pieces[0]!.sourceFrom===rawPoint(collectorFor(state)!.trace,state.bMarks[begin])
+        &&bodyTrace.pieces.every((p,i)=>p.kind!=='generated'&&(!i||bodyTrace!.pieces[i-1]!.sourceTo===p.sourceFrom))
       empty=emptyLiteral(state,startLine,end,indent,value)
       return value
     },
@@ -742,6 +763,15 @@ wrapCaptureRule(md.block.ruler, 'fence', (original, state, startLine, endLine, s
       || token.map?.[0] !== startLine || token.map?.[1] !== state.line
       || (state.line !== contentEnd && state.line !== contentEnd + 1)) throw new UnsupportedSourceCapture()
     capturedFenceClosed.set(token, state.line === contentEnd + 1)
+    if(state.line===contentEnd+1){
+      const collector=collectorFor(state)!,a=state.bMarks[startLine]+state.tShift[startLine],b=state.bMarks[contentEnd]+state.tShift[contentEnd]
+      const character=token.markup[0] as '`'|'~';let end=b
+      while(state.src[end]===character)end++
+      const open=rawRange(collector.trace,a,a+token.markup.length),close=rawRange(collector.trace,b,end)
+      const whole=rawRange(collector.trace,collector.lineStarts[startLine]!,collector.lineStarts[state.line]!),eol=actualEol(collector,state.eMarks[startLine])
+      if(open&&close&&whole&&eol&&close.to-close.from>=token.markup.length)
+        fenceTokens.set(token,{sourceFrom:whole.from,sourceTo:whole.to,open,close,character,openLength:token.markup.length,closeLength:close.to-close.from,eol:collector.source.slice(eol.from,eol.to) as '\n'|'\r\n'|'\r',contiguousTopLevel:token.level===0&&bodyUnstripped})
+    }
     if(bodyTrace)literalFacts.set(token,{collector:collectorFor(state)!,trace:bodyTrace,kind:token.type,...(state.line===contentEnd+1&&empty?{empty}:{})})
   } else if (contentEnd !== undefined) throw new UnsupportedSourceCapture()
   return result
@@ -1003,6 +1033,19 @@ wrapCaptureRule(md.inline.ruler, 'backticks', (original, state, silent) => {
     }
     pendingSources.get(state)!.push({ text: marker, kind: 'linear', trace: sliceTrace(owner, from, end) })
   }
+  if(state.pos>end){
+    const token=state.tokens.at(-1)
+    if(token?.type!=='code_inline')throw new UnsupportedSourceCapture()
+    let a=end,b=state.pos-marker.length
+    const normalized=state.src.slice(a,b).replace(/\n/g,' ')
+    if(/^ (.+) $/.test(normalized)){a++;b--}
+    const runs:SourceRun[]=[]
+    for(let i=a;i<b;i++)runs.push({text:state.src[i]==='\n'?' ':state.src[i],kind:state.src[i]==='\n'?'atomic':'linear',trace:sliceTrace(owner,i,i+1)})
+    if(runs.map(r=>r.text).join('')!==token.content)throw new UnsupportedSourceCapture()
+    tokenSources.set(token,{collector:collectorFor(state)!,runs})
+    const open=rawRange(owner,from,a),close=rawRange(owner,b,state.pos)
+    if(open&&close)edgeTokens.set(token,{open,close,side:'code'})
+  }
   return result
 })
 wrapCaptureRule(md.inline.ruler, 'text', (original, state, silent) => {
@@ -1040,6 +1083,61 @@ wrapCaptureRule(md.inline.ruler, 'emphasis', (original, state, silent) => {
       runs: [{ trace: sliceTrace(owner, from + i, from + i + 1), text: token.content, kind: 'linear' }] }))
   }
   return ok
+})
+function registerEdge(opened:object,closed:object,trace:SourceTrace,a:number,b:number,c:number,d:number):void {
+ const open=rawRange(trace,a,b),close=rawRange(trace,c,d)
+ if(open&&close){edgeTokens.set(opened,{open,close,side:'open'});edgeTokens.set(closed,{open,close,side:'close'})}
+}
+for(const name of ['strikethrough','mark'])wrapCaptureRule(md.inline.ruler,name,(original,state,silent)=>{
+ const from=state.pos,before=state.tokens.length,ok=original(state,silent),trace=inlineStateOwners.get(state),collector=collectorFor(state)
+ if(ok&&!silent&&trace&&collector){
+  let at=from
+  for(const token of state.tokens.slice(before))if(token.type==='text'&&token.content&&/^[~=]+$/.test(token.content)){
+   tokenSources.set(token,{collector,runs:[{text:token.content,kind:'linear',trace:sliceTrace(trace,at,at+token.content.length)}]});at+=token.content.length
+  }
+ }
+ return ok
+})
+for(const name of ['emphasis','strikethrough','mark'])wrapCaptureRule(md.inline.ruler2,name,(original,state)=>{
+ const collector=collectorFor(state)
+ if(!collector)return original(state)
+ const pairs:{o:any;c:any;open:{from:number;to:number};close:{from:number;to:number}}[]=[]
+ for(const ds of [state.delimiters,...state.tokens_meta.map((m:any)=>m?.delimiters).filter(Boolean)])for(const d of ds){
+  if(d.end<0)continue
+  const o=state.tokens[d.token],c=state.tokens[ds[d.end].token]
+  const a=tokenSources.get(o)?.runs[0]?.trace,b=tokenSources.get(c)?.runs[0]?.trace
+  const open=a&&rawRange(a,0,a.text.length),close=b&&rawRange(b,0,b.text.length)
+  if(open&&close)pairs.push({o,c,open,close})
+ }
+ const result=original(state)
+ for(const p of pairs)if(p.o.nesting===1&&p.c.nesting===-1){
+  let open=p.open,close=p.close
+  if(p.o.type==='strong_open'){
+   const neighbor=pairs.find(q=>q.open.to===open.from&&q.close.from===close.to&&q.o.content==='')
+   if(!neighbor)continue
+   open={from:neighbor.open.from,to:open.to};close={from:close.from,to:neighbor.close.to}
+  }
+  edgeTokens.set(p.o,{open,close,side:'open'});edgeTokens.set(p.c,{open,close,side:'close'})
+ }
+ return result
+})
+wrapCaptureRule(md.inline.ruler,'html_inline',(original,state,silent)=>{
+ const start=state.pos,result=original(state,silent),trace=inlineStateOwners.get(state)
+ if(result&&!silent&&trace){const token=state.tokens.at(-1),range=rawRange(trace,start,state.pos);if(token?.type==='html_inline'&&range)htmlTokenRanges.set(token,range)}
+ return result
+})
+wrapCaptureRule(md.inline.ruler,'link',(original,state,silent)=>{
+ const trace=inlineStateOwners.get(state)
+ if(silent||!trace)return original(state,silent)
+ const start=state.pos,before=state.tokens.length,tokenize=state.md.inline.tokenize
+ let label:{from:number;to:number}|undefined
+ state.md.inline.tokenize=function(current:any){if(current===state&&!label)label={from:current.pos,to:current.posMax};return tokenize.call(this,current)}
+ let result;try{result=original(state,silent)}finally{state.md.inline.tokenize=tokenize}
+ if(result&&label){
+  const opened=state.tokens.slice(before).find((t:any)=>t.type==='link_open'),closed=state.tokens.at(-1)
+  if(opened&&closed?.type==='link_close')registerEdge(opened,closed,trace,start,label.from,label.to,state.pos)
+ }
+ return result
 })
 md.inline.ruler.push('source_capture_fallback', (state, silent) => {
   const owner = inlineStateOwners.get(state)
@@ -1135,6 +1233,30 @@ function captureText(state: any, token: any, delegate: () => void) {
   if (captureCursor(state) !== pos) throw new UnsupportedSourceCapture()
 }
 
+function captureEdgeEmission(state:any,token:any,delegate:()=>void):void {
+ const edge=edgeTokens.get(token),collector=currentInlineCollector.get(state)
+ if(!edge){delegate();return}
+ const position=captureCursor(state),frame=state.stack.at(-1)
+ let active=activeEdges.get(state);if(!active){active=new Map();activeEdges.set(state,active)}
+ if(edge.side==='code'){
+  if(!collector){delegate();return}
+  captureText(state,token,delegate)
+  const mark=state.schema.marks.code.create(),marks=mark.addToSet(frame.marks)
+  collector.edges.push({id:collector.edges.length,body:-1,family:'code',pmFrom:position,pmTo:captureCursor(state),open:edge.open,close:edge.close,marks})
+  return
+ }
+ if(edge.side==='close'){
+  const opened=active.get(edge.open.from)
+  delegate()
+  if(opened&&collector){
+   const mark=opened.marks.find(m=>!m.isInSet(frame.marks))
+   if(mark)collector.edges.push({id:collector.edges.length,body:-1,family:mark.type.name,pmFrom:opened.pmFrom,pmTo:position,open:edge.open,close:edge.close,marks:opened.marks})
+  }
+  active.delete(edge.open.from);return
+ }
+ delegate();active.set(edge.open.from,{pmFrom:position,marks:frame.marks.slice()})
+}
+
 function emptyLiteral(state:any,start:number,end:number,indent:number,content:string):EmptyPlace|undefined {
  const collector=collectorFor(state)!
  if(content!==''&&content!=='\n')return undefined
@@ -1165,7 +1287,11 @@ function captureLiteralEmission(state:any,token:any,delegate:()=>void):void {
   const trace=sliceTrace(fact.trace,0,text.length),runFrom=fact.collector.runs.length
   for(const p of trace.pieces)if(p.kind!=='generated')fact.collector.runs.push({sourceFrom:p.sourceFrom,sourceTo:p.sourceTo,
     pmFrom:from+p.from,pmTo:from+p.to,kind:p.kind==='copy'?'linear':'atomic'})
-  fact.collector.emissions.push({from,to:from+text.length,kind,runFrom,runTo:fact.collector.runs.length,node,...(fact.empty?{empty:fact.empty}:{})})
+  const fence=fenceTokens.get(token)
+  const contiguous=trace.pieces.length>0&&trace.pieces.every((p,i)=>p.kind!=='generated'&&(!i||trace.pieces[i-1]!.sourceTo===p.sourceFrom))
+  const raw=fence&&trace.pieces.length?{from:trace.pieces[0]!.sourceFrom,to:trace.pieces.at(-1)!.sourceTo}:undefined
+  fact.collector.emissions.push({from,to:from+text.length,kind,runFrom,runTo:fact.collector.runs.length,node,...(fact.empty?{empty:fact.empty}:{}),
+    ...(fence&&raw?{fence:{...fence,contiguousTopLevel:fence.contiguousTopLevel&&contiguous,pmFrom:from-1,pmTo:from+text.length+1,contentFrom:raw.from,contentTo:raw.to}}:{})})
 }
 
 // Inline handlers emit into one actual open PM frame, including table cell paragraphs.
@@ -1185,11 +1311,13 @@ function captureInlineEmission(state:any,token:any,delegate:()=>void):void {
     inlineCloseStates.add(state)
   }
   const frame=state.stack[state.stack.length-1],from=captureCursor(state),runFrom=fact.collector.runs.length
+  currentInlineCollector.set(state,fact.collector)
+  const edgeFrom=fact.collector.edges.length
   delegate()
-  const to=captureCursor(state)
+  const edgeTo=fact.collector.edges.length,to=captureCursor(state)
   if(state.stack[state.stack.length-1]!==frame)throw new UnsupportedSourceCapture()
   if(!['paragraph','heading'].includes(frame.type.name))return
-  const emission:InlineEmission={from,to,kind:frame.type.name,runFrom,runTo:fact.collector.runs.length,...(fact.empty?{empty:fact.empty}:{})}
+  const emission:InlineEmission={from,to,edgeFrom,edgeTo,kind:frame.type.name,runFrom,runTo:fact.collector.runs.length,...(fact.empty?{empty:fact.empty}:{})}
   fact.collector.emissions.push(emission);inlineFrames.set(frame,emission)
   if(fact.trace&&fact.kind){
     const pieces=fact.trace.pieces
@@ -1936,6 +2064,10 @@ class MorayaMarkdownParser extends MarkdownParser {
     }
     const defaultInline=h['inline']!
     h['inline']=(state,tok,tokens,i)=>captureInlineEmission(state,tok,()=>defaultInline(state,tok,tokens,i))
+    for(const key of Object.keys(h)){
+      const delegate=h[key]!
+      h[key]=(state,tok,tokens,i)=>captureEdgeEmission(state,tok,()=>delegate(state,tok,tokens,i))
+    }
     for (const key of Object.keys(h)) {
       const delegate = h[key]!
       h[key] = (state, tok, tokens, i) => captureRootEmission(state, tok,
@@ -2243,13 +2375,16 @@ function writeSourceText(state: MarkdownSerializerState, node: PmNode, parent: P
     for (let i = end; i < text.length; i++) state.text(text[i] === '\t' ? '&#9;' : '&#32;', false)
   }
 }
+export function sourceFenceLength(text:string,character:'`'|'~',minimum:number):number {
+ let length=Math.max(3,minimum)
+ for(const run of text.match(character==='`'?/`+/g:/~+/g)??[])length=Math.max(length,run.length+1)
+ return length
+}
 function sourceCodeNode(state: MarkdownSerializerState, node: PmNode): void {
   const language = node.attrs.language
   if (typeof language !== 'string' || /[\r\n]/.test(language)) throw new UnsupportedSourceCapture()
   const info = language, character = info.includes('`') ? '~' : '`'
-  const runs = node.textContent.match(character === '`' ? /`+/g : /~+/g) || []
-  let length = 3
-  for (const run of runs) length = Math.max(length, run.length + 1)
+  const length=sourceFenceLength(node.textContent,character,3)
   const fence = character.repeat(length)
   state.write(fence + info + '\n')
   state.text(node.textContent, false)
@@ -2257,7 +2392,7 @@ function sourceCodeNode(state: MarkdownSerializerState, node: PmNode): void {
   state.write(fence)
   state.closeBlock(node)
 }
-function sourceEmDelimiter(mark: Mark, parent: PmNode, index: number, opening: boolean): string {
+export function sourceEmDelimiter(mark: Mark, parent: PmNode, index: number, opening: boolean): string {
   let from = opening ? index : index - 1, to = from + 1
   while (from > 0 && mark.isInSet(parent.child(from - 1).marks)) from--
   while (to < parent.childCount && mark.isInSet(parent.child(to).marks)) to++
@@ -2268,7 +2403,7 @@ function sourceEmDelimiter(mark: Mark, parent: PmNode, index: number, opening: b
   return strong(left) && /[ \t]$/.test(left!.textContent)
     || strong(right) && /^[ \t]/.test(right!.textContent) ? '_' : '*'
 }
-function sourceCodeDelimiter(node: PmNode, opening: boolean): string {
+export function sourceCodeDelimiter(node: PmNode, opening: boolean): string {
   const text = node.text || '', runs = text.match(/`+/g) || []
   let length = 1
   for (const run of runs) length = Math.max(length, run.length + 1)
@@ -2357,9 +2492,9 @@ const sourceRootSerializer = new MarkdownSerializer({
 }, sourceMarks, ({ hardBreakNodeName: 'hardbreak', strict: false } as any))
 
 /** Render only inline content with the same conservative callbacks as roots. */
-export function serializeSourceInlineBody(node:PmNode):string {
+export function serializeSourceInlineBody(node:PmNode,tableCell=false):string {
   const inline=new MarkdownSerializer({...sourceRootSerializer.nodes,
-    [node.type.name](state,body){state.renderInline(body)}},sourceRootSerializer.marks,sourceRootSerializer.options)
+    [node.type.name](state,body){state.renderInline(body)}},sourceRootSerializer.marks,tableCell?{...sourceRootSerializer.options,escapeExtraCharacters:/\|/g}:sourceRootSerializer.options)
   return inline.serialize(node.type.schema.topNodeType.create(null,[node]))
 }
 
@@ -2714,7 +2849,15 @@ function finalizeCapturedDocument(collector: Capture, doc: PmNode): CapturedDocu
           run.pmFrom+=delta;run.pmTo+=delta
         }
         if(emission.empty&&parent.content.size===0)collector.emptyBodies.push({pmAt:from,parent,place:emission.empty,...(root&&root.pmFrom<from&&from<root.pmTo?{rootId:root.id}:{})})
-        if(emission.body)collector.bodies.push({...emission.body,pmFrom:from,pmTo:from+parent.content.size})
+        if(emission.body){
+          const body=collector.bodies.length
+          collector.bodies.push({...emission.body,pmFrom:from,pmTo:from+parent.content.size})
+          for(let i=emission.edgeFrom??0;i<(emission.edgeTo??0);i++){
+            const edge=collector.edges[i]!
+            collector.edges[i]={...edge,body,pmFrom:edge.pmFrom+delta,pmTo:edge.pmTo+delta}
+          }
+        }
+        if(emission.fence)collector.fences.push({...emission.fence,pmFrom:offset,pmTo:offset+parent.nodeSize})
       }
       parent.forEach((node,inner)=>{if(node.isText)text.push({node,parentFrom:from,from:from+inner,to:from+inner+node.nodeSize})})
       return false
@@ -2755,7 +2898,7 @@ function finalizeCapturedDocument(collector: Capture, doc: PmNode): CapturedDocu
     }
     for(const u of layout.blankLines)if(u.role==='empty-paragraph')layoutBody(u.emission.pmFrom,{kind:'layout',origin:{kind:'blank',id:u.id}})
     if(layout.fallback)layoutBody(layout.fallback.emission.pmFrom,{kind:'layout',origin:{kind:'fallback'}})
-    capturedListLayouts.set(layout, { emptyBodies:Object.freeze(collector.emptyBodies.map(f=>Object.freeze(f))), source, doc, roots: collector.roots, lists, bodies:Object.freeze(collector.bodies.map(body=>Object.freeze(body))) })
+    capturedListLayouts.set(layout, { recipe:Object.freeze({bodies:Object.freeze(collector.bodies.map((b,body)=>Object.freeze({...b,body}))),edges:Object.freeze(collector.edges.filter(e=>e.body>=0).map(e=>Object.freeze(e))),fences:Object.freeze(collector.fences.map(f=>Object.freeze(f)))}),emptyBodies:Object.freeze(collector.emptyBodies.map(f=>Object.freeze(f))), source, doc, roots: collector.roots, lists, bodies:Object.freeze(collector.bodies.map(body=>Object.freeze(body))) })
     return { doc, textRuns: collector.runs,
       protectedSources: Object.freeze(collector.protectedSources),
       layout,
@@ -2830,7 +2973,7 @@ export function preprocessFileSource(source: string): SourceTrace {
 }
 
 function newFileCollector(source: string, trace: SourceTrace, work: FileWorkAccumulator): Capture {
-  return { source, trace, emptyBodies:[], bodies: [], emissions: [], lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [], lists: [],
+  return { source, trace, edges:[], fences:[], emptyBodies:[], bodies: [], emissions: [], lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [], lists: [],
     file: { work, checkpoints: [], definitions: [], blockTokens: [], effects: [] } }
 }
 
@@ -2892,6 +3035,12 @@ function cloneTokenBatch(tokens: readonly ActualToken[], collector: Capture, raw
     if(container)containerEnds.set(copy,{collector,kind:container.kind,place:shiftEmpty(container.place,rawDelta,lineDelta)})
     const pending=nestedBlanks.get(token)
     if(pending)nestedBlanks.set(copy,pending.map(p=>({...p,line:p.line+lineDelta,place:shiftEmpty(p.place,rawDelta,lineDelta)})))
+    const edge=edgeTokens.get(token)
+    const shift=(r:{from:number;to:number})=>({from:r.from+rawDelta,to:r.to+rawDelta})
+    const html=htmlTokenRanges.get(token);if(html)htmlTokenRanges.set(copy,shift(html))
+    if(edge)edgeTokens.set(copy,{...edge,open:shift(edge.open),close:shift(edge.close)})
+    const fence=fenceTokens.get(token)
+    if(fence)fenceTokens.set(copy,{...fence,sourceFrom:fence.sourceFrom+rawDelta,sourceTo:fence.sourceTo+rawDelta,open:shift(fence.open),close:shift(fence.close)})
     const closed = capturedFenceClosed.get(token)
     if (closed !== undefined) capturedFenceClosed.set(copy, closed)
     return copy

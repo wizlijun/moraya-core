@@ -508,9 +508,25 @@ export function applyStructuralTransaction(base:SourceSession,tr:Transaction,ren
 /** Materialize one certified top-level empty origin without rendering any root. */
 export function prepareEmptyParagraphEdits(base:SourceSession,tr:Transaction,
  origin:{kind:'blank';id:number}|{kind:'fallback'},body:string):readonly SourceEdit[] {
- const ledger=createLedger(base),step=tr.steps[0];
- if(tr.steps.length!==1||Object.getPrototypeOf(step)!==ReplaceStep.prototype)fail()
- advanceLedger(ledger,base.doc,tr.doc,step as ReplaceStep,0);finishLedger(base,tr,ledger)
+ const ledger=createLedger(base),first=tr.steps[0];
+ if(!first||Object.getPrototypeOf(first)!==ReplaceStep.prototype||tr.steps.length!==tr.docs.length||!tr.before.eq(base.doc))fail()
+ const initial=first as ReplaceStep,parent=base.doc.resolve(initial.from).parent
+ initial.slice.content.forEach(node=>{if(!node.isText)fail()})
+ if(initial.from!==initial.to||initial.slice.openStart||initial.slice.openEnd||!initial.slice.size||(initial as ReplaceStep&{structure:boolean}).structure||parent.type.name!=='paragraph'||parent.content.size)fail()
+ for(let i=0;i<tr.steps.length;i++){
+  const step=tr.steps[i]!,before=tr.docs[i]!,after=tr.docs[i+1]??tr.doc
+  if(i===0&&!before.eq(base.doc))fail()
+  if(i>0){
+   const prototype=Object.getPrototypeOf(step)
+   if(prototype!==AddMarkStep.prototype&&prototype!==RemoveMarkStep.prototype)fail()
+   const mark=step as AddMarkStep|RemoveMarkStep
+   if(mark.from<initial.from||mark.to>initial.from+initial.slice.size)fail()
+  }
+  const result=step.apply(before)
+  if(result.failed||!result.doc?.eq(after))fail()
+  advanceLedger(ledger,before,after,step as ReplaceStep|AddMarkStep|RemoveMarkStep,i)
+ }
+ finishLedger(base,tr,ledger)
  const components=ledger.components.filter(c=>c.parent===c.id),c=components[0]
  if(components.length!==1||!c||c.origins.length!==1||!sameOrigin(c.origins[0]!,origin)
   ||c.births.length||c.finalRuns.length!==1||c.finalRuns[0]!.to-c.finalRuns[0]!.from!==1)fail()

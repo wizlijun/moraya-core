@@ -23,7 +23,10 @@ for(const source of ['- [ref]: /url\n\n  Alpha\n\nTail','> [ref]: /url\n>\n> Alp
   expect(result.session.doc.eq(tr.doc)).toBe(true)
   const tail=position(base.doc,'Tail')
   const outside=EditorState.create({doc:base.doc}).tr.addMark(p,tail+4,base.doc.type.schema.marks.strong!.create())
-  expect(applySourceBlockTransaction(base,outside)).toEqual({ok:false,reason:'unsupported-step'})
+  const multi=applySourceBlockTransaction(base,outside);expect(multi.ok).toBe(true);if(!multi.ok)throw Error(multi.reason)
+  expect(multi.session.source).toBe(source.startsWith('-')?'- [ref]: /url\n\n  **Alpha**\n\n**Tail**':'> [ref]: /url\n>\n> **Alpha**\n\n**Tail**')
+  expect(multi.session.doc.eq(outside.doc)).toBe(true);expect(multi.edits).toHaveLength(4)
+  expect(multi.session.protectedSources).toEqual(base.protectedSources)
   expect(Buffer.from(base.source)).toEqual(bytes)
   expect(JSON.stringify(base)).toBe(before)
  })
@@ -83,14 +86,17 @@ for(const source of ['- [ref]: /url\n\n  Alpha\n\nTail','> [ref]: /url\n>\n> Alp
   expect(result.session.source).toBe(source.replace('Tail','**Tail**'))
   expect(result.session.protectedSources).toEqual(base.protectedSources)
  })
- it(`rejects multi-root transaction atomically: ${JSON.stringify(source)}`,()=>{
+ it(`marks multiple natural roots atomically: ${JSON.stringify(source)}`,()=>{
   const base=session(source),before=JSON.stringify(base)
   const tr=EditorState.create({doc:base.doc}).tr
   for(const needle of ['Tail','Alpha']) {
    const p=position(tr.doc,needle)
    tr.addMark(p,p+needle.length,base.doc.type.schema.marks.strong!.create())
   }
-  expect(applySourceBlockTransaction(base,tr)).toEqual({ok:false,reason:'unsupported-step'})
+  const result=applySourceBlockTransaction(base,tr);expect(result.ok).toBe(true);if(!result.ok)throw Error(result.reason)
+  expect(result.session.source).toBe(source.startsWith('-')?'- [ref]: /url\n\n  **Alpha**\n\n**Tail**':'> [ref]: /url\n>\n> **Alpha**\n\n**Tail**')
+  expect(result.session.doc.eq(tr.doc)).toBe(true);expect(result.edits).toHaveLength(4)
+  expect(result.session.protectedSources).toEqual(base.protectedSources)
   expect(JSON.stringify(base)).toBe(before)
  })
 }

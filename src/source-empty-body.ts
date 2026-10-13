@@ -1,3 +1,4 @@
+import {prepareEmptyInlineContent} from './source-inline-recipe';
 // src/source-empty-body.ts；所有raw range仅引用session.source，不存raw副本。
 import type {Node as PmNode} from 'prosemirror-model';
 import type {Transaction} from 'prosemirror-state';
@@ -48,14 +49,13 @@ export function prepareEmptyBodyTransaction(base:SourceSession,tr:Transaction,fa
   }catch{return reject('invalid-range')}
  }
  if(!emptyInput)return {kind:'not-empty'};
- if(tr.steps.length!==1)return reject('empty-multistep');
  const first=tr.steps[0] as ReplaceStep;
  try{
-  if(tr.steps.length!==1||tr.docs.length!==1||Object.getPrototypeOf(first)!==ReplaceStep.prototype
+  if(tr.docs.length!==tr.steps.length||Object.getPrototypeOf(first)!==ReplaceStep.prototype
    ||!tr.before.eq(base.doc)||!tr.docs[0]!.eq(base.doc)||(first as ReplaceStep & {structure:boolean}).structure
    ||first.from!==first.to||first.slice.openStart||first.slice.openEnd||!first.slice.size)return reject('empty-step');
   const applied=first.apply(tr.docs[0]!);
-  if(applied.failed||!applied.doc?.eq(tr.doc))return reject('empty-chain');
+  if(applied.failed||!applied.doc?.eq(tr.docs[1]??tr.doc))return reject('empty-chain');
   tr.doc.check();
   const certified=capturedEmptyBodies(base.source,base.doc,base.roots,base.layout);
   if(certified!==facts)return reject('empty-binding');
@@ -65,7 +65,8 @@ export function prepareEmptyBodyTransaction(base:SourceSession,tr:Transaction,fa
   if(!['paragraph','heading','code_block','frontmatter'].includes(fact.parent.type.name)
    ||!fact.parent.sameMarkup(after)||fact.parent.marks.length)return reject('empty-markup');
   let plain=true;first.slice.content.forEach(n=>{if(!n.isText||n.marks.length)plain=false});
-  if(!plain)return reject('empty-content');
+  const generated=prepareEmptyInlineContent(base,tr,fact);
+  if((!plain||tr.steps.length!==1)&&generated.kind!=='ready')return reject('empty-content');
   const place=fact.place,literal=place.kind==='literal',text=after.textContent;
   if(!literal&&/[\r\n]/.test(text))return reject('empty-newline');
   const root=fact.rootId===undefined?undefined:base.roots[fact.rootId];
@@ -75,7 +76,7 @@ export function prepareEmptyBodyTransaction(base:SourceSession,tr:Transaction,fa
    if(range.from<root.sourceFrom||range.to>root.sourceTo)return reject('empty-owner-range');
    if(base.protectedSources.some(p=>range.from===range.to?p.sourceFrom<range.from&&range.from<p.sourceTo:p.sourceFrom<range.to&&p.sourceTo>range.from))return reject('empty-protected');
   }
-  const body=literal?text:escapeEmptyText(after);
+  const body=literal?text:generated.kind==='ready'?generated.body:escapeEmptyText(after);
   let edits:readonly SourceEdit[];
   switch(place.kind){
    case 'inline':edits=[{...place.range,text:place.before+body+place.after}];break;
