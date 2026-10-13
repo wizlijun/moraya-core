@@ -1,7 +1,7 @@
 import {applyStructuralTransaction} from '../source-structure';
 import {it,expect} from 'vitest';
 import {EditorState,TextSelection,NodeSelection,type Transaction} from 'prosemirror-state';
-import {Slice,Fragment} from 'prosemirror-model';
+import {Schema,Slice,Fragment} from 'prosemirror-model';
 import {ReplaceStep} from 'prosemirror-transform';
 import {BrowserMediaResolver} from '../adapters/browser-media-resolver';
 import {createSchema} from '../schema';
@@ -137,4 +137,11 @@ it('cross-body new inline atoms commit together while all old spellings remain',
 it('unsupported old root mixed with new block remains atomic',()=>{
  const b=open('AB\n\n<div>x</div>\n'),s=b.doc.type.schema,tr=EditorState.create({doc:b.doc}).tr.replaceWith(0,4,s.nodes.math_block!.create()).insertText('z',3);
  expect(tr.doc.child(1).textContent).not.toBe(b.doc.child(1).textContent);expect(applySourceBlockTransaction(b,tr).ok).toBe(false);expect(b.source).toBe('AB\n\n<div>x</div>\n');
+});
+
+it('nonempty schema defaults never authorize an empty-source mathematical birth',()=>{
+ const ordinary=createSchema({mediaResolver:new BrowserMediaResolver()}),schema=new Schema({...ordinary.spec,nodes:ordinary.spec.nodes.update('math_block',{...ordinary.nodes.math_block!.spec,attrs:{value:{default:'nonempty'}}})});
+ const o=createSourceSession('',schema);if(!o.ok)throw Error(o.reason);const b=o.session,node=schema.nodes.math_block!.create();expect(node.hasMarkup(node.type)).toBe(true);expect(node.attrs.value).toBe('nonempty');
+ const tr=EditorState.create({doc:b.doc}).tr.replaceWith(0,b.doc.content.size,node);let renders=0;
+ expect(()=>applyStructuralTransaction(b,tr,()=>{renders++;throw Error('renderer reached')},()=>true)).toThrow();expect(renders).toBe(0);expect(applySourceBlockTransaction(b,tr).ok).toBe(false);
 });

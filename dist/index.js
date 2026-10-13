@@ -5191,7 +5191,7 @@ var sourceRootSerializer = new MarkdownSerializer({
   text: writeSourceText,
   code_block: sourceCodeNode,
   math_block(state, node) {
-    if (node.type === node.type.schema.nodes.math_block && node.hasMarkup(node.type) && !node.content.size) {
+    if (node.type === node.type.schema.nodes.math_block && node.attrs.value === "" && node.hasMarkup(node.type) && !node.content.size) {
       state.write("$$ $$");
       state.closeBlock(node);
     } else serializer.nodes.math_block(state, node, node, 0);
@@ -9196,7 +9196,7 @@ function mathWitnesses(base, tr) {
     }
     if (step instanceof ReplaceStep2 || step instanceof ReplaceAroundStep) step.slice.content.descendants((node, pos) => {
       if (node.type.name !== "math_block") return;
-      if (node.type !== before.type.schema.nodes.math_block || !node.hasMarkup(node.type) || node.content.size) fail();
+      if (node.type !== before.type.schema.nodes.math_block || node.attrs.value !== "" || !node.hasMarkup(node.type) || node.content.size) fail();
       if (step instanceof ReplaceAroundStep) {
         const previous = tr.steps[i - 1], paragraph2 = before.nodeAt(step.from);
         if (step.slice.openStart || step.slice.openEnd || step.slice.content.childCount !== 1 || pos !== 0 || step.insert !== 1 || step.gapFrom !== step.from + 1 || step.gapTo !== step.gapFrom || step.to !== step.from + 2 || !paragraph2 || !empty(paragraph2) || !paragraph2.hasMarkup(paragraph2.type) || !previous || Object.getPrototypeOf(previous) !== ReplaceStep2.prototype) fail();

@@ -273,7 +273,7 @@ function mathWitnesses(base:SourceSession,tr:Transaction):{births:Set<number>;re
   }
   if(step instanceof ReplaceStep||step instanceof ReplaceAroundStep)step.slice.content.descendants((node,pos)=>{
    if(node.type.name!=='math_block')return
-   if(node.type!==before.type.schema.nodes.math_block||!node.hasMarkup(node.type)||node.content.size)fail()
+   if(node.type!==before.type.schema.nodes.math_block||node.attrs.value!==''||!node.hasMarkup(node.type)||node.content.size)fail()
    if(step instanceof ReplaceAroundStep){
     const previous=tr.steps[i-1],paragraph=before.nodeAt(step.from)
     if(step.slice.openStart||step.slice.openEnd||step.slice.content.childCount!==1||pos!==0||step.insert!==1
