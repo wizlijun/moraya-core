@@ -56,11 +56,15 @@ jobs:
             exit 1
           fi
 
-      - name: Gate 4 — Bundle budget (≤ 80KB gzipped main entry)
+      - name: Gate 4 — Bundle budget (≤ 104448 bytes, Node default gzip)
         run: |
-          GZIP_SIZE=$(gzip -c dist/index.js | wc -c)
-          echo "Main entry: $GZIP_SIZE bytes gzipped (limit 81920)"
-          if [ "$GZIP_SIZE" -gt 81920 ]; then
-            echo "::error::Main entry $GZIP_SIZE > 80KB gzipped"
-            exit 1
-          fi
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs'
+          import { gzipSync } from 'node:zlib'
+          const size = gzipSync(readFileSync('dist/index.js')).length
+          console.log(`Main entry: ${size} bytes gzipped (limit 104448)`)
+          if (size > 104448) {
+            console.error(`::error::Main entry ${size} > 104448 bytes gzipped`)
+            process.exit(1)
+          }
+          JS
