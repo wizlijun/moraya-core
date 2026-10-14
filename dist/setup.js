@@ -347,113 +347,26 @@ var init_emoji = __esm({
   }
 });
 
-// src/plugins/mermaid-renderer.ts
-var mermaid_renderer_exports = {};
-__export(mermaid_renderer_exports, {
-  ensureMermaidLoaded: () => ensureMermaidLoaded,
-  renderMermaid: () => renderMermaid,
-  updateMermaidTheme: () => updateMermaidTheme
-});
-function isDark() {
-  if (typeof document === "undefined") return false;
-  const dt = document.documentElement.getAttribute("data-theme");
-  if (dt === "dark") return true;
-  if (dt === "light") return false;
-  if (typeof window === "undefined" || !window.matchMedia) return false;
-  return window.matchMedia("(prefers-color-scheme: dark)").matches;
-}
-function resolveThemeColors() {
-  if (typeof document === "undefined" || typeof getComputedStyle === "undefined") {
-    return {
-      primaryColor: "#4a90d9",
-      primaryTextColor: "#333",
-      primaryBorderColor: "#ccc",
-      lineColor: "#666",
-      secondaryColor: "#f5f5f5",
-      tertiaryColor: "#eee"
-    };
-  }
-  const s = getComputedStyle(document.documentElement);
-  return {
-    primaryColor: s.getPropertyValue("--accent-color").trim() || "#4a90d9",
-    primaryTextColor: s.getPropertyValue("--text-primary").trim() || "#333",
-    primaryBorderColor: s.getPropertyValue("--border-color").trim() || "#ccc",
-    lineColor: s.getPropertyValue("--text-secondary").trim() || "#666",
-    secondaryColor: s.getPropertyValue("--bg-secondary").trim() || "#f5f5f5",
-    tertiaryColor: s.getPropertyValue("--bg-hover").trim() || "#eee"
-  };
-}
-async function ensureMermaidLoaded() {
-  if (mermaidModule) return;
-  if (loadingPromise) return loadingPromise;
-  loadingPromise = (async () => {
-    const mod = await import(
-      /* @vite-ignore */
-      "mermaid"
-    );
-    mermaidModule = mod.default;
-    mermaidModule.initialize({
-      startOnLoad: false,
-      theme: isDark() ? "dark" : "default",
-      themeVariables: resolveThemeColors()
-    });
-  })();
-  return loadingPromise;
-}
-async function renderMermaid(code2) {
-  await ensureMermaidLoaded();
-  const result = new Promise((resolve) => {
-    renderQueue = renderQueue.then(async () => {
-      const id = `mermaid-${++renderCounter}`;
-      try {
-        const { svg } = await mermaidModule.render(id, code2);
-        resolve({ svg });
-      } catch (e) {
-        resolve({ error: e instanceof Error ? e.message : "Render failed" });
-      }
-    });
-  });
-  return result;
-}
-function updateMermaidTheme() {
-  if (!mermaidModule) return;
-  mermaidModule.initialize({
-    startOnLoad: false,
-    theme: isDark() ? "dark" : "default",
-    themeVariables: resolveThemeColors()
-  });
-}
-var mermaidModule, loadingPromise, renderCounter, renderQueue;
-var init_mermaid_renderer = __esm({
-  "src/plugins/mermaid-renderer.ts"() {
-    "use strict";
-    mermaidModule = null;
-    loadingPromise = null;
-    renderCounter = 0;
-    renderQueue = Promise.resolve();
-  }
-});
-
 // src/plugins/code-block-view.ts
 var code_block_view_exports = {};
 __export(code_block_view_exports, {
   createCodeBlockNodeViewFactory: () => createCodeBlockNodeViewFactory
 });
-function loadMermaidApi() {
-  if (mermaidApi) return Promise.resolve(mermaidApi);
-  if (mermaidLoading) return mermaidLoading;
-  mermaidLoading = Promise.resolve().then(() => (init_mermaid_renderer(), mermaid_renderer_exports)).then((mod) => {
-    mermaidApi = mod;
-    return mermaidApi;
+function loadMermaidApi(loader) {
+  const cached = mermaidLoads.get(loader);
+  if (cached) return cached;
+  const promise = Promise.resolve().then(loader).catch((error) => {
+    mermaidLoads.delete(loader);
+    throw error;
   });
-  return mermaidLoading;
+  mermaidLoads.set(loader, promise);
+  return promise;
 }
 function installThemeObserver() {
   if (themeObserverInstalled) return;
   themeObserverInstalled = true;
   if (typeof document === "undefined" || typeof MutationObserver === "undefined") return;
   const notifyThemeChange = () => {
-    if (mermaidApi) mermaidApi.updateMermaidTheme();
     for (const cb of mermaidReRenderCallbacks) cb();
   };
   const observer = new MutationObserver(notifyThemeChange);
@@ -739,7 +652,7 @@ function copyPreviewAsImage(btn, preview, codeEl) {
   navigator.clipboard.write([new ClipboardItem({ "image/png": blobPromise })]).then(() => markCopied(btn)).catch(() => handleCopy(btn, codeEl));
 }
 function createCodeBlockNodeViewFactory(opts = {}) {
-  const { rendererRegistry } = opts;
+  const { rendererRegistry, mermaidLoader } = opts;
   const langLists = buildLanguageLists(rendererRegistry);
   const { rendererLangIds, all: allLanguages } = langLists;
   return function createCodeBlockNodeView(nodeArg, view, getPos) {
@@ -785,10 +698,12 @@ function createCodeBlockNodeViewFactory(opts = {}) {
     wrapper.appendChild(mermaidPreview);
     wrapper.appendChild(rendererPreview);
     let isEditing = false;
-    let isMermaid = node.attrs.language === "mermaid";
+    let isMermaid = Boolean(mermaidLoader) && node.attrs.language === "mermaid";
+    let loadedApi;
+    let destroyed = false, renderGeneration = 0;
     let lastRenderedCode = "";
     let renderTimer = null;
-    let isRenderer = rendererLangIds.has(node.attrs.language || "");
+    let isRenderer = node.attrs.language !== "mermaid" && rendererLangIds.has(node.attrs.language || "");
     let rendererEditing = false;
     let lastRendererCode = "";
     let rendererTimer = null;
@@ -804,30 +719,41 @@ function createCodeBlockNodeViewFactory(opts = {}) {
         if (showPreview) triggerMermaidRender();
       }
     }
+    function failMermaid(message) {
+      lastRenderedCode = "";
+      isEditing = true;
+      pre.style.display = "";
+      wrapper.classList.remove("mermaid-preview-mode");
+      toggleBtn.textContent = "\u{1F441} Preview";
+      mermaidPreview.style.display = "flex";
+      mermaidPreview.innerHTML = `<div class="mermaid-error">${escapeText(message)}</div>`;
+    }
     function triggerMermaidRender() {
-      const codeText = code2.textContent || "";
+      if (destroyed || !isMermaid || !mermaidLoader) return;
+      const codeText = node.textContent;
+      if (codeText === lastRenderedCode && codeText.trim()) return;
+      const generation = ++renderGeneration;
+      if (renderTimer) clearTimeout(renderTimer);
       if (!codeText.trim()) {
         mermaidPreview.innerHTML = '<div class="mermaid-empty">Empty diagram</div>';
         lastRenderedCode = "";
         return;
       }
-      if (codeText === lastRenderedCode) return;
       lastRenderedCode = codeText;
-      if (renderTimer) clearTimeout(renderTimer);
+      const valid = () => !destroyed && isMermaid && !isEditing && generation === renderGeneration && node.textContent === codeText;
       renderTimer = setTimeout(async () => {
+        if (!valid()) return;
         mermaidPreview.innerHTML = '<div class="mermaid-loading"><div class="mermaid-spinner"></div>Loading diagram...</div>';
         try {
-          const api = await loadMermaidApi();
-          if (!api) return;
+          const api = await loadMermaidApi(mermaidLoader);
+          if (!valid()) return;
+          loadedApi = api;
           const result = await api.renderMermaid(codeText);
-          if (code2.textContent !== codeText) return;
-          if ("svg" in result) {
-            mermaidPreview.innerHTML = result.svg;
-          } else {
-            mermaidPreview.innerHTML = `<div class="mermaid-error">${escapeText(result.error)}</div>`;
-          }
+          if (!valid()) return;
+          if ("svg" in result) mermaidPreview.innerHTML = result.svg;
+          else failMermaid(result.error);
         } catch {
-          mermaidPreview.innerHTML = '<div class="mermaid-error">Render failed</div>';
+          if (valid()) failMermaid("Render failed \u2014 try Preview again");
         }
       }, 150);
     }
@@ -878,6 +804,8 @@ function createCodeBlockNodeViewFactory(opts = {}) {
       }, 150);
     }
     function onThemeChange() {
+      if (destroyed) return;
+      loadedApi?.updateMermaidTheme();
       if (isMermaid && !isEditing) {
         lastRenderedCode = "";
         triggerMermaidRender();
@@ -886,7 +814,9 @@ function createCodeBlockNodeViewFactory(opts = {}) {
     if (isMermaid) {
       installThemeObserver();
       mermaidReRenderCallbacks.add(onThemeChange);
-      requestAnimationFrame(() => syncMermaidMode());
+      requestAnimationFrame(() => {
+        if (!destroyed) syncMermaidMode();
+      });
     } else if (isRenderer) {
       syncRendererMode();
       requestAnimationFrame(() => syncRendererMode());
@@ -936,6 +866,10 @@ function createCodeBlockNodeViewFactory(opts = {}) {
       e.stopPropagation();
       if (isMermaid) {
         isEditing = !isEditing;
+        if (isEditing) {
+          renderGeneration++;
+          lastRenderedCode = "";
+        }
         syncMermaidMode();
       } else if (isRenderer) {
         rendererEditing = !rendererEditing;
@@ -947,6 +881,8 @@ function createCodeBlockNodeViewFactory(opts = {}) {
       e.preventDefault();
       e.stopPropagation();
       isEditing = true;
+      renderGeneration++;
+      lastRenderedCode = "";
       syncMermaidMode();
       view.focus();
     });
@@ -976,8 +912,10 @@ function createCodeBlockNodeViewFactory(opts = {}) {
         node = updatedNode;
         langLabel.textContent = findLanguageLabel(updatedNode.attrs.language || "", allLanguages);
         const wasMermaid = isMermaid;
-        isMermaid = updatedNode.attrs.language === "mermaid";
+        isMermaid = Boolean(mermaidLoader) && updatedNode.attrs.language === "mermaid";
         if (isMermaid !== wasMermaid) {
+          renderGeneration++;
+          lastRenderedCode = "";
           isEditing = false;
           if (isMermaid) {
             installThemeObserver();
@@ -987,7 +925,7 @@ function createCodeBlockNodeViewFactory(opts = {}) {
           }
         }
         const wasRenderer = isRenderer;
-        isRenderer = rendererLangIds.has(updatedNode.attrs.language || "");
+        isRenderer = updatedNode.attrs.language !== "mermaid" && rendererLangIds.has(updatedNode.attrs.language || "");
         if (isRenderer !== wasRenderer) {
           rendererEditing = false;
           lastRendererCode = "";
@@ -1016,6 +954,8 @@ function createCodeBlockNodeViewFactory(opts = {}) {
         wrapper.classList.remove("ProseMirror-selectednode");
       },
       destroy() {
+        destroyed = true;
+        renderGeneration++;
         if (activePicker) {
           activePicker.destroy();
           activePicker = null;
@@ -1034,12 +974,11 @@ function createCodeBlockNodeViewFactory(opts = {}) {
     };
   };
 }
-var mermaidApi, mermaidLoading, themeObserverInstalled, mermaidReRenderCallbacks, POPULAR_LANGUAGES, BASE_OTHER_LANGUAGES, POPULAR_IDS, hljsAutoDetect;
+var mermaidLoads, themeObserverInstalled, mermaidReRenderCallbacks, POPULAR_LANGUAGES, BASE_OTHER_LANGUAGES, POPULAR_IDS, hljsAutoDetect;
 var init_code_block_view = __esm({
   "src/plugins/code-block-view.ts"() {
     "use strict";
-    mermaidApi = null;
-    mermaidLoading = null;
+    mermaidLoads = /* @__PURE__ */ new WeakMap();
     themeObserverInstalled = false;
     mermaidReRenderCallbacks = /* @__PURE__ */ new Set();
     POPULAR_LANGUAGES = [
@@ -6980,12 +6919,14 @@ function createDocCache(maxEntries = 10) {
 // src/setup.ts
 var tier1Cache = null;
 var tier1Loading = null;
-function preloadEnhancementPlugins(schema, rendererRegistry) {
-  if (tier1Cache && tier1Cache.key.schema === schema && tier1Cache.key.rendererRegistry === rendererRegistry) {
-    return Promise.resolve(tier1Cache.plugins);
-  }
-  if (tier1Loading) return tier1Loading;
-  tier1Loading = Promise.allSettled([
+function sameTier1Key(a, b) {
+  return a.schema === b.schema && a.rendererRegistry === b.rendererRegistry && a.mermaidLoader === b.mermaidLoader;
+}
+function preloadEnhancementPlugins(schema, rendererRegistry, mermaidLoader) {
+  const key = { schema, ...rendererRegistry ? { rendererRegistry } : {}, ...mermaidLoader ? { mermaidLoader } : {} };
+  if (tier1Cache && sameTier1Key(tier1Cache.key, key)) return Promise.resolve(tier1Cache.plugins);
+  if (tier1Loading && sameTier1Key(tier1Loading.key, key)) return tier1Loading.promise;
+  const promise = Promise.allSettled([
     Promise.resolve().then(() => (init_highlight(), highlight_exports)),
     Promise.resolve().then(() => (init_emoji(), emoji_exports)),
     Promise.resolve().then(() => (init_code_block_view(), code_block_view_exports))
@@ -6999,15 +6940,18 @@ function preloadEnhancementPlugins(schema, rendererRegistry) {
     }
     if (cbv.status === "fulfilled") {
       plugins.codeBlockView = cbv.value.createCodeBlockNodeViewFactory({
-        ...rendererRegistry ? { rendererRegistry } : {}
+        ...rendererRegistry ? { rendererRegistry } : {},
+        ...mermaidLoader ? { mermaidLoader } : {}
       });
     }
     plugins.defListInputRule = createDefListInputRule(schema);
-    tier1Cache = { key: { schema, ...rendererRegistry ? { rendererRegistry } : {} }, plugins };
-    tier1Loading = null;
+    tier1Cache = { key, plugins };
     return plugins;
+  }).finally(() => {
+    if (tier1Loading?.promise === promise) tier1Loading = null;
   });
-  return tier1Loading;
+  tier1Loading = { key, promise };
+  return promise;
 }
 function createImageSelectionPlugin() {
   return new Plugin9({
@@ -7460,7 +7404,7 @@ async function createEditorPlugins(opts, schemaArg) {
       }
     }
   };
-  const tier1 = await preloadEnhancementPlugins(schema, opts.rendererRegistry);
+  const tier1 = await preloadEnhancementPlugins(schema, opts.rendererRegistry, opts.enableMermaid === false ? void 0 : opts.mermaidLoader);
   const plugins = [
     // List shortcuts using event.code (reliable on macOS where Option+key
     // produces special chars). Must come before keymap so this handler has
@@ -7533,7 +7477,7 @@ async function createEditor(opts) {
   const docCache = opts.docCache ?? createDocCache(10);
   void docCache;
   const plugins = await createEditorPlugins(opts, schema);
-  const tier1 = await preloadEnhancementPlugins(schema, opts.rendererRegistry);
+  const tier1 = await preloadEnhancementPlugins(schema, opts.rendererRegistry, opts.enableMermaid === false ? void 0 : opts.mermaidLoader);
   const nodeViews = {};
   if (tier1.codeBlockView) {
     nodeViews.code_block = tier1.codeBlockView;

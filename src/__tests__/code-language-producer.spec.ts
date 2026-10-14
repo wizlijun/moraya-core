@@ -164,7 +164,7 @@ it.each(['', 'text', 'TypeScript', 'mermaid', 'dot', 'graphviz', 'Mermaid', 'Dot
     }
     const view = new EditorView(document.body, {
       state: EditorState.create({ doc }),
-      nodeViews: { code_block: createCodeBlockNodeViewFactory({ rendererRegistry: registry }) },
+      nodeViews: { code_block: createCodeBlockNodeViewFactory({ rendererRegistry: registry, mermaidLoader: async () => ({ renderMermaid: async () => ({ svg: '<svg/>' }), updateMermaidTheme() {} }) }) },
       dispatchTransaction(tr) { transactions.push(tr); view.updateState(view.state.apply(tr)) },
     })
     views.push(view)

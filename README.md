@@ -83,3 +83,22 @@ pnpm test
 ## License
 
 PolyForm Internal Use 1.0.0 (private; not for redistribution).
+
+### Mermaid preview capability migration (2026-10-14)
+
+Mermaid fences now remain editable source unless the host explicitly injects a loader.
+`enableMermaid: true` alone does not load a renderer; `false` suppresses any injected loader.
+The no-options NodeView factory follows the same rule. This changes the previous SDK
+implicit auto-preview behavior. Registry entries named `mermaid` do not enable previews.
+To retain the original desktop preview, install the optional `mermaid` peer and pass:
+
+```ts
+import { createEditor } from '@moraya/core'
+const mermaidLoader = () => import('@moraya/core/plugins/mermaid-renderer')
+await createEditor({ container, mediaResolver, mermaidLoader })
+```
+
+Reuse a stable loader per host. Custom loaders implement the exported `MermaidApi` type
+(`renderMermaid` and `updateMermaidTheme`). Load failures leave the source editable and
+Preview retries. `preloadEnhancementPlugins(schema, registry, mermaidLoader)` accepts
+that same reference; both pending and completed factories are isolated by all three identities.

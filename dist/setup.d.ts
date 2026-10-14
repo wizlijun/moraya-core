@@ -3,7 +3,7 @@ import { EditorView } from 'prosemirror-view';
 import { InputRule } from 'prosemirror-inputrules';
 import { Schema } from 'prosemirror-model';
 import { InlineSyntaxScope } from './plugins/cursor-syntax.js';
-import { MediaResolver, RendererRegistry, LinkOpener, Platform, SpreadsheetViewFactory, FrontmatterViewFactory } from './types.js';
+import { MermaidLoader, MediaResolver, RendererRegistry, LinkOpener, Platform, SpreadsheetViewFactory, FrontmatterViewFactory } from './types.js';
 import { DocCache } from './doc-cache.js';
 
 /**
@@ -39,15 +39,16 @@ interface Tier1Plugins {
  *
  * The `defListInputRule` requires a Schema; the `codeBlockView` factory
  * closes over the consumer's `RendererRegistry`. The cache is keyed by
- * (schema, rendererRegistry) so consumers with different injection produce
+ * (schema, rendererRegistry, mermaidLoader) so consumers with different injection produce
  * different cached factories.
  */
-declare function preloadEnhancementPlugins(schema: Schema, rendererRegistry?: RendererRegistry): Promise<Tier1Plugins>;
+declare function preloadEnhancementPlugins(schema: Schema, rendererRegistry?: RendererRegistry, mermaidLoader?: MermaidLoader): Promise<Tier1Plugins>;
 declare function buildInputRules(schema: Schema, tier1: Tier1Plugins, enableInlineMarks?: boolean): Plugin;
 interface EditorPluginOptions {
     /** Render features */
     enableMath?: boolean;
     enableMermaid?: boolean;
+    mermaidLoader?: MermaidLoader;
     enableTableResize?: boolean;
     enableImageSelection?: boolean;
     enableHistory?: boolean;

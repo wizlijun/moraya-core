@@ -67,6 +67,7 @@ import type {
   LinkOpener,
   RendererRegistry,
   Platform,
+  MermaidLoader,
   SchemaConfig,
   SpreadsheetViewFactory,
   FrontmatterViewFactory,
@@ -87,12 +88,16 @@ interface Tier1Plugins {
 }
 
 interface Tier1CacheKey {
+  mermaidLoader?: MermaidLoader
   schema: Schema
   rendererRegistry?: RendererRegistry
 }
 
 let tier1Cache: { key: Tier1CacheKey; plugins: Tier1Plugins } | null = null
-let tier1Loading: Promise<Tier1Plugins> | null = null
+let tier1Loading: { key: Tier1CacheKey; promise: Promise<Tier1Plugins> } | null = null
+function sameTier1Key(a: Tier1CacheKey, b: Tier1CacheKey): boolean {
+  return a.schema === b.schema && a.rendererRegistry === b.rendererRegistry && a.mermaidLoader === b.mermaidLoader
+}
 
 /**
  * Preload Tier 1 enhancement plugins via dynamic `import()`.
@@ -101,21 +106,19 @@ let tier1Loading: Promise<Tier1Plugins> | null = null
  *
  * The `defListInputRule` requires a Schema; the `codeBlockView` factory
  * closes over the consumer's `RendererRegistry`. The cache is keyed by
- * (schema, rendererRegistry) so consumers with different injection produce
+ * (schema, rendererRegistry, mermaidLoader) so consumers with different injection produce
  * different cached factories.
  */
 export function preloadEnhancementPlugins(
   schema: Schema,
   rendererRegistry?: RendererRegistry,
+  mermaidLoader?: MermaidLoader,
 ): Promise<Tier1Plugins> {
-  if (tier1Cache &&
-      tier1Cache.key.schema === schema &&
-      tier1Cache.key.rendererRegistry === rendererRegistry) {
-    return Promise.resolve(tier1Cache.plugins)
-  }
-  if (tier1Loading) return tier1Loading
+  const key: Tier1CacheKey = { schema, ...(rendererRegistry ? { rendererRegistry } : {}), ...(mermaidLoader ? { mermaidLoader } : {}) }
+  if (tier1Cache && sameTier1Key(tier1Cache.key, key)) return Promise.resolve(tier1Cache.plugins)
+  if (tier1Loading && sameTier1Key(tier1Loading.key, key)) return tier1Loading.promise
 
-  tier1Loading = Promise.allSettled([
+  const promise = Promise.allSettled([
     import('./plugins/highlight'),
     import('./plugins/emoji'),
     import('./plugins/code-block-view'),
@@ -130,15 +133,16 @@ export function preloadEnhancementPlugins(
     if (cbv.status === 'fulfilled') {
       plugins.codeBlockView = cbv.value.createCodeBlockNodeViewFactory({
         ...(rendererRegistry ? { rendererRegistry } : {}),
+        ...(mermaidLoader ? { mermaidLoader } : {}),
       })
     }
     plugins.defListInputRule = createDefListInputRule(schema)
-    tier1Cache = { key: { schema, ...(rendererRegistry ? { rendererRegistry } : {}) }, plugins }
-    tier1Loading = null
+    tier1Cache = { key, plugins }
     return plugins
-  })
+  }).finally(() => { if (tier1Loading?.promise === promise) tier1Loading = null })
 
-  return tier1Loading
+  tier1Loading = { key, promise }
+  return promise
 }
 
 // ── Image Selection Highlight ───────────────────────────────────
@@ -683,7 +687,8 @@ function createLazyChangePlugin(onChange: (markdown: string) => void, debounceMs
 export interface EditorPluginOptions {
   /** Render features */
   enableMath?: boolean              // default true (KaTeX in toDOM, no plugin)
-  enableMermaid?: boolean           // default false; Moraya desktop = true (next batch)
+  enableMermaid?: boolean           // false suppresses injection; true never creates a default loader
+  mermaidLoader?: MermaidLoader
   enableTableResize?: boolean       // default true (columnResizing)
   enableImageSelection?: boolean    // default true
   enableHistory?: boolean           // default true; v0.72 Yjs collab consumers set false
@@ -802,7 +807,7 @@ export async function createEditorPlugins(
     },
   }
 
-  const tier1 = await preloadEnhancementPlugins(schema, opts.rendererRegistry)
+  const tier1 = await preloadEnhancementPlugins(schema, opts.rendererRegistry, opts.enableMermaid === false ? undefined : opts.mermaidLoader)
 
   const plugins: Plugin[] = [
     // List shortcuts using event.code (reliable on macOS where Option+key
@@ -908,7 +913,7 @@ export async function createEditor(opts: CreateEditorOptions): Promise<MorayaEdi
 
   // Tier 1 nodeViews: code_block replaced with toolbar+picker+mermaid+renderer NodeView.
   // We don't await preloadEnhancementPlugins again — createEditorPlugins already did.
-  const tier1 = await preloadEnhancementPlugins(schema, opts.rendererRegistry)
+  const tier1 = await preloadEnhancementPlugins(schema, opts.rendererRegistry, opts.enableMermaid === false ? undefined : opts.mermaidLoader)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const nodeViews: Record<string, any> = {}
   if (tier1.codeBlockView) {

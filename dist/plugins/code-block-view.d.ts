@@ -1,6 +1,6 @@
 import { Node as Node$1 } from 'prosemirror-model';
 import { EditorView } from 'prosemirror-view';
-import { RendererRegistry } from '../types.js';
+import { MermaidLoader, RendererRegistry } from '../types.js';
 
 /**
  * CodeBlock NodeView — toolbar with language label, language picker, copy button,
@@ -14,9 +14,8 @@ import { RendererRegistry } from '../types.js';
  *     is no longer accessed here; the consumer's RendererRegistry implementation
  *     closes over its own platform context and surfaces it via the renderer
  *     module's `render(source, container)` call.
- *   - mermaid still has a built-in special-case path (`language === 'mermaid'`),
- *     using core's `plugins/mermaid-renderer.ts` (which is itself the migrated
- *     version of moraya's mermaid-renderer).
+ *   - Mermaid keeps its dedicated NodeView, with an explicitly injected loader.
+ *     No loader means editable source; registry entries do not enable Mermaid.
  *
  * The render dispose-instance pattern from moraya (CAD viewer etc.) is
  * implemented in core via `RendererPluginModule.destroy(container)` per §3.3:
@@ -26,6 +25,7 @@ import { RendererRegistry } from '../types.js';
  */
 
 interface CodeBlockNodeViewOptions {
+    mermaidLoader?: MermaidLoader;
     rendererRegistry?: RendererRegistry;
 }
 /**

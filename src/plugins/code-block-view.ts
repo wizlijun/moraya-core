@@ -10,9 +10,8 @@
  *     is no longer accessed here; the consumer's RendererRegistry implementation
  *     closes over its own platform context and surfaces it via the renderer
  *     module's `render(source, container)` call.
- *   - mermaid still has a built-in special-case path (`language === 'mermaid'`),
- *     using core's `plugins/mermaid-renderer.ts` (which is itself the migrated
- *     version of moraya's mermaid-renderer).
+ *   - Mermaid keeps its dedicated NodeView, with an explicitly injected loader.
+ *     No loader means editable source; registry entries do not enable Mermaid.
  *
  * The render dispose-instance pattern from moraya (CAD viewer etc.) is
  * implemented in core via `RendererPluginModule.destroy(container)` per §3.3:
@@ -23,23 +22,20 @@
 
 import type { Node as PmNode } from 'prosemirror-model'
 import type { EditorView } from 'prosemirror-view'
-import type { renderMermaid as RenderFn, updateMermaidTheme as UpdateThemeFn } from './mermaid-renderer'
-import type { RendererRegistry, RendererPluginModule } from '../types'
+import type { RendererRegistry, RendererPluginModule, MermaidLoader, MermaidApi } from '../types'
 
 // ── Mermaid lazy-load wrapper ─────────────────────
 
-type MermaidApi = { renderMermaid: typeof RenderFn; updateMermaidTheme: typeof UpdateThemeFn }
-let mermaidApi: MermaidApi | null = null
-let mermaidLoading: Promise<MermaidApi | null> | null = null
-
-function loadMermaidApi() {
-  if (mermaidApi) return Promise.resolve(mermaidApi)
-  if (mermaidLoading) return mermaidLoading
-  mermaidLoading = import('./mermaid-renderer').then(mod => {
-    mermaidApi = mod
-    return mermaidApi
+const mermaidLoads = new WeakMap<MermaidLoader, Promise<MermaidApi>>()
+function loadMermaidApi(loader: MermaidLoader): Promise<MermaidApi> {
+  const cached = mermaidLoads.get(loader)
+  if (cached) return cached
+  const promise = Promise.resolve().then(loader).catch(error => {
+    mermaidLoads.delete(loader)
+    throw error
   })
-  return mermaidLoading
+  mermaidLoads.set(loader, promise)
+  return promise
 }
 
 // Theme change listener: re-render all mermaid previews when theme switches
@@ -51,7 +47,6 @@ function installThemeObserver() {
   themeObserverInstalled = true
   if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') return
   const notifyThemeChange = () => {
-    if (mermaidApi) mermaidApi.updateMermaidTheme()
     for (const cb of mermaidReRenderCallbacks) cb()
   }
   const observer = new MutationObserver(notifyThemeChange)
@@ -489,6 +484,7 @@ function copyPreviewAsImage(btn: HTMLButtonElement, preview: HTMLElement, codeEl
 // ── NodeView Factory ──────────────────────────────
 
 export interface CodeBlockNodeViewOptions {
+  mermaidLoader?: MermaidLoader
   rendererRegistry?: RendererRegistry
 }
 
@@ -501,7 +497,7 @@ export interface CodeBlockNodeViewOptions {
  * static map.
  */
 export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = {}) {
-  const { rendererRegistry } = opts
+  const { rendererRegistry, mermaidLoader } = opts
   const langLists = buildLanguageLists(rendererRegistry)
   const { rendererLangIds, all: allLanguages } = langLists
 
@@ -572,12 +568,14 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
 
     // ── Mermaid state ──
     let isEditing = false
-    let isMermaid = (node.attrs.language === 'mermaid')
+    let isMermaid = Boolean(mermaidLoader) && node.attrs.language === 'mermaid'
+    let loadedApi: MermaidApi | undefined
+    let destroyed = false, renderGeneration = 0
     let lastRenderedCode = ''
     let renderTimer: ReturnType<typeof setTimeout> | null = null
 
     // ── Renderer plugin state ──
-    let isRenderer = rendererLangIds.has((node.attrs.language as string) || '')
+    let isRenderer = node.attrs.language !== 'mermaid' && rendererLangIds.has((node.attrs.language as string) || '')
     let rendererEditing = false
     let lastRendererCode = ''
     let rendererTimer: ReturnType<typeof setTimeout> | null = null
@@ -596,31 +594,41 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
       }
     }
 
+    function failMermaid(message: string) {
+      lastRenderedCode = ''
+      isEditing = true
+      pre.style.display = ''
+      wrapper.classList.remove('mermaid-preview-mode')
+      toggleBtn.textContent = '👁 Preview'
+      mermaidPreview.style.display = 'flex'
+      mermaidPreview.innerHTML = `<div class="mermaid-error">${escapeText(message)}</div>`
+    }
     function triggerMermaidRender() {
-      const codeText = code.textContent || ''
+      if (destroyed || !isMermaid || !mermaidLoader) return
+      const codeText = node.textContent
+      if (codeText === lastRenderedCode && codeText.trim()) return
+      const generation = ++renderGeneration
+      if (renderTimer) clearTimeout(renderTimer)
       if (!codeText.trim()) {
         mermaidPreview.innerHTML = '<div class="mermaid-empty">Empty diagram</div>'
         lastRenderedCode = ''
         return
       }
-      if (codeText === lastRenderedCode) return
       lastRenderedCode = codeText
-
-      if (renderTimer) clearTimeout(renderTimer)
+      const valid = () => !destroyed && isMermaid && !isEditing && generation === renderGeneration && node.textContent === codeText
       renderTimer = setTimeout(async () => {
+        if (!valid()) return
         mermaidPreview.innerHTML = '<div class="mermaid-loading"><div class="mermaid-spinner"></div>Loading diagram...</div>'
         try {
-          const api = await loadMermaidApi()
-          if (!api) return
+          const api = await loadMermaidApi(mermaidLoader)
+          if (!valid()) return
+          loadedApi = api
           const result = await api.renderMermaid(codeText)
-          if (code.textContent !== codeText) return
-          if ('svg' in result) {
-            mermaidPreview.innerHTML = result.svg
-          } else {
-            mermaidPreview.innerHTML = `<div class="mermaid-error">${escapeText(result.error)}</div>`
-          }
+          if (!valid()) return
+          if ('svg' in result) mermaidPreview.innerHTML = result.svg
+          else failMermaid(result.error)
         } catch {
-          mermaidPreview.innerHTML = '<div class="mermaid-error">Render failed</div>'
+          if (valid()) failMermaid('Render failed — try Preview again')
         }
       }, 150)
     }
@@ -680,6 +688,8 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
     }
 
     function onThemeChange() {
+      if (destroyed) return
+      loadedApi?.updateMermaidTheme()
       if (isMermaid && !isEditing) {
         lastRenderedCode = ''
         triggerMermaidRender()
@@ -690,7 +700,7 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
       installThemeObserver()
       mermaidReRenderCallbacks.add(onThemeChange)
       // Defer: ProseMirror populates contentDOM AFTER NodeView factory returns
-      requestAnimationFrame(() => syncMermaidMode())
+      requestAnimationFrame(() => { if (!destroyed) syncMermaidMode() })
     } else if (isRenderer) {
       // Hide pre and show toggle button immediately, then re-trigger after content arrives
       syncRendererMode()
@@ -748,6 +758,7 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
       e.stopPropagation()
       if (isMermaid) {
         isEditing = !isEditing
+        if (isEditing) { renderGeneration++; lastRenderedCode = '' }
         syncMermaidMode()
       } else if (isRenderer) {
         rendererEditing = !rendererEditing
@@ -761,6 +772,7 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
       e.preventDefault()
       e.stopPropagation()
       isEditing = true
+      renderGeneration++; lastRenderedCode = ''
       syncMermaidMode()
       view.focus()
     })
@@ -799,8 +811,9 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
         langLabel.textContent = findLanguageLabel((updatedNode.attrs.language as string) || '', allLanguages)
 
         const wasMermaid = isMermaid
-        isMermaid = (updatedNode.attrs.language === 'mermaid')
+        isMermaid = Boolean(mermaidLoader) && updatedNode.attrs.language === 'mermaid'
         if (isMermaid !== wasMermaid) {
+          renderGeneration++; lastRenderedCode = ''
           isEditing = false
           if (isMermaid) {
             installThemeObserver()
@@ -811,7 +824,7 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
         }
 
         const wasRenderer = isRenderer
-        isRenderer = rendererLangIds.has((updatedNode.attrs.language as string) || '')
+        isRenderer = updatedNode.attrs.language !== 'mermaid' && rendererLangIds.has((updatedNode.attrs.language as string) || '')
         if (isRenderer !== wasRenderer) {
           rendererEditing = false
           lastRendererCode = ''
@@ -842,6 +855,7 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
       },
 
       destroy() {
+        destroyed = true; renderGeneration++
         if (activePicker) {
           activePicker.destroy()
           activePicker = null

@@ -3,7 +3,7 @@ export { B as BlankLineUnit, F as FallbackEmpty, a as FidelityFailure, b as Fide
 export { CreateEditorOptions, EditorPluginOptions, MorayaEditorInstance, createEditor, createEditorPlugins, preloadEnhancementPlugins } from './setup.js';
 export { GfmTableAction, gfmTableCommand, insertHorizontalRule, insertImage, insertMathBlock, insertTable, setHeading, toggleBlockquote, toggleBold, toggleBulletList, toggleCode, toggleCodeBlock, toggleHighlight, toggleItalic, toggleLink, toggleOrderedList, toggleStrikethrough } from './commands.js';
 export { DocCache, createDocCache, djb2Hash } from './doc-cache.js';
-export { FrontmatterViewFactory, LinkOpener, LocalMediaSource, MediaResolver, Platform, RendererPluginModule, RendererRegistry, SchemaConfig, SpreadsheetViewFactory } from './types.js';
+export { FrontmatterViewFactory, LinkOpener, LocalMediaSource, MediaResolver, MermaidApi, MermaidLoader, Platform, RendererPluginModule, RendererRegistry, SchemaConfig, SpreadsheetViewFactory } from './types.js';
 import 'prosemirror-model';
 import 'prosemirror-state';
 import 'prosemirror-transform';

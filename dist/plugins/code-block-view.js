@@ -1,111 +1,14 @@
-var __defProp = Object.defineProperty;
-var __getOwnPropNames = Object.getOwnPropertyNames;
-var __esm = (fn, res) => function __init() {
-  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
-};
-var __export = (target, all) => {
-  for (var name in all)
-    __defProp(target, name, { get: all[name], enumerable: true });
-};
-
-// src/plugins/mermaid-renderer.ts
-var mermaid_renderer_exports = {};
-__export(mermaid_renderer_exports, {
-  ensureMermaidLoaded: () => ensureMermaidLoaded,
-  renderMermaid: () => renderMermaid,
-  updateMermaidTheme: () => updateMermaidTheme
-});
-function isDark() {
-  if (typeof document === "undefined") return false;
-  const dt = document.documentElement.getAttribute("data-theme");
-  if (dt === "dark") return true;
-  if (dt === "light") return false;
-  if (typeof window === "undefined" || !window.matchMedia) return false;
-  return window.matchMedia("(prefers-color-scheme: dark)").matches;
-}
-function resolveThemeColors() {
-  if (typeof document === "undefined" || typeof getComputedStyle === "undefined") {
-    return {
-      primaryColor: "#4a90d9",
-      primaryTextColor: "#333",
-      primaryBorderColor: "#ccc",
-      lineColor: "#666",
-      secondaryColor: "#f5f5f5",
-      tertiaryColor: "#eee"
-    };
-  }
-  const s = getComputedStyle(document.documentElement);
-  return {
-    primaryColor: s.getPropertyValue("--accent-color").trim() || "#4a90d9",
-    primaryTextColor: s.getPropertyValue("--text-primary").trim() || "#333",
-    primaryBorderColor: s.getPropertyValue("--border-color").trim() || "#ccc",
-    lineColor: s.getPropertyValue("--text-secondary").trim() || "#666",
-    secondaryColor: s.getPropertyValue("--bg-secondary").trim() || "#f5f5f5",
-    tertiaryColor: s.getPropertyValue("--bg-hover").trim() || "#eee"
-  };
-}
-async function ensureMermaidLoaded() {
-  if (mermaidModule) return;
-  if (loadingPromise) return loadingPromise;
-  loadingPromise = (async () => {
-    const mod = await import(
-      /* @vite-ignore */
-      "mermaid"
-    );
-    mermaidModule = mod.default;
-    mermaidModule.initialize({
-      startOnLoad: false,
-      theme: isDark() ? "dark" : "default",
-      themeVariables: resolveThemeColors()
-    });
-  })();
-  return loadingPromise;
-}
-async function renderMermaid(code) {
-  await ensureMermaidLoaded();
-  const result = new Promise((resolve) => {
-    renderQueue = renderQueue.then(async () => {
-      const id = `mermaid-${++renderCounter}`;
-      try {
-        const { svg } = await mermaidModule.render(id, code);
-        resolve({ svg });
-      } catch (e) {
-        resolve({ error: e instanceof Error ? e.message : "Render failed" });
-      }
-    });
-  });
-  return result;
-}
-function updateMermaidTheme() {
-  if (!mermaidModule) return;
-  mermaidModule.initialize({
-    startOnLoad: false,
-    theme: isDark() ? "dark" : "default",
-    themeVariables: resolveThemeColors()
-  });
-}
-var mermaidModule, loadingPromise, renderCounter, renderQueue;
-var init_mermaid_renderer = __esm({
-  "src/plugins/mermaid-renderer.ts"() {
-    "use strict";
-    mermaidModule = null;
-    loadingPromise = null;
-    renderCounter = 0;
-    renderQueue = Promise.resolve();
-  }
-});
-
 // src/plugins/code-block-view.ts
-var mermaidApi = null;
-var mermaidLoading = null;
-function loadMermaidApi() {
-  if (mermaidApi) return Promise.resolve(mermaidApi);
-  if (mermaidLoading) return mermaidLoading;
-  mermaidLoading = Promise.resolve().then(() => (init_mermaid_renderer(), mermaid_renderer_exports)).then((mod) => {
-    mermaidApi = mod;
-    return mermaidApi;
+var mermaidLoads = /* @__PURE__ */ new WeakMap();
+function loadMermaidApi(loader) {
+  const cached = mermaidLoads.get(loader);
+  if (cached) return cached;
+  const promise = Promise.resolve().then(loader).catch((error) => {
+    mermaidLoads.delete(loader);
+    throw error;
   });
-  return mermaidLoading;
+  mermaidLoads.set(loader, promise);
+  return promise;
 }
 var themeObserverInstalled = false;
 var mermaidReRenderCallbacks = /* @__PURE__ */ new Set();
@@ -114,7 +17,6 @@ function installThemeObserver() {
   themeObserverInstalled = true;
   if (typeof document === "undefined" || typeof MutationObserver === "undefined") return;
   const notifyThemeChange = () => {
-    if (mermaidApi) mermaidApi.updateMermaidTheme();
     for (const cb of mermaidReRenderCallbacks) cb();
   };
   const observer = new MutationObserver(notifyThemeChange);
@@ -450,7 +352,7 @@ function copyPreviewAsImage(btn, preview, codeEl) {
   navigator.clipboard.write([new ClipboardItem({ "image/png": blobPromise })]).then(() => markCopied(btn)).catch(() => handleCopy(btn, codeEl));
 }
 function createCodeBlockNodeViewFactory(opts = {}) {
-  const { rendererRegistry } = opts;
+  const { rendererRegistry, mermaidLoader } = opts;
   const langLists = buildLanguageLists(rendererRegistry);
   const { rendererLangIds, all: allLanguages } = langLists;
   return function createCodeBlockNodeView(nodeArg, view, getPos) {
@@ -496,10 +398,12 @@ function createCodeBlockNodeViewFactory(opts = {}) {
     wrapper.appendChild(mermaidPreview);
     wrapper.appendChild(rendererPreview);
     let isEditing = false;
-    let isMermaid = node.attrs.language === "mermaid";
+    let isMermaid = Boolean(mermaidLoader) && node.attrs.language === "mermaid";
+    let loadedApi;
+    let destroyed = false, renderGeneration = 0;
     let lastRenderedCode = "";
     let renderTimer = null;
-    let isRenderer = rendererLangIds.has(node.attrs.language || "");
+    let isRenderer = node.attrs.language !== "mermaid" && rendererLangIds.has(node.attrs.language || "");
     let rendererEditing = false;
     let lastRendererCode = "";
     let rendererTimer = null;
@@ -515,30 +419,41 @@ function createCodeBlockNodeViewFactory(opts = {}) {
         if (showPreview) triggerMermaidRender();
       }
     }
+    function failMermaid(message) {
+      lastRenderedCode = "";
+      isEditing = true;
+      pre.style.display = "";
+      wrapper.classList.remove("mermaid-preview-mode");
+      toggleBtn.textContent = "\u{1F441} Preview";
+      mermaidPreview.style.display = "flex";
+      mermaidPreview.innerHTML = `<div class="mermaid-error">${escapeText(message)}</div>`;
+    }
     function triggerMermaidRender() {
-      const codeText = code.textContent || "";
+      if (destroyed || !isMermaid || !mermaidLoader) return;
+      const codeText = node.textContent;
+      if (codeText === lastRenderedCode && codeText.trim()) return;
+      const generation = ++renderGeneration;
+      if (renderTimer) clearTimeout(renderTimer);
       if (!codeText.trim()) {
         mermaidPreview.innerHTML = '<div class="mermaid-empty">Empty diagram</div>';
         lastRenderedCode = "";
         return;
       }
-      if (codeText === lastRenderedCode) return;
       lastRenderedCode = codeText;
-      if (renderTimer) clearTimeout(renderTimer);
+      const valid = () => !destroyed && isMermaid && !isEditing && generation === renderGeneration && node.textContent === codeText;
       renderTimer = setTimeout(async () => {
+        if (!valid()) return;
         mermaidPreview.innerHTML = '<div class="mermaid-loading"><div class="mermaid-spinner"></div>Loading diagram...</div>';
         try {
-          const api = await loadMermaidApi();
-          if (!api) return;
+          const api = await loadMermaidApi(mermaidLoader);
+          if (!valid()) return;
+          loadedApi = api;
           const result = await api.renderMermaid(codeText);
-          if (code.textContent !== codeText) return;
-          if ("svg" in result) {
-            mermaidPreview.innerHTML = result.svg;
-          } else {
-            mermaidPreview.innerHTML = `<div class="mermaid-error">${escapeText(result.error)}</div>`;
-          }
+          if (!valid()) return;
+          if ("svg" in result) mermaidPreview.innerHTML = result.svg;
+          else failMermaid(result.error);
         } catch {
-          mermaidPreview.innerHTML = '<div class="mermaid-error">Render failed</div>';
+          if (valid()) failMermaid("Render failed \u2014 try Preview again");
         }
       }, 150);
     }
@@ -589,6 +504,8 @@ function createCodeBlockNodeViewFactory(opts = {}) {
       }, 150);
     }
     function onThemeChange() {
+      if (destroyed) return;
+      loadedApi?.updateMermaidTheme();
       if (isMermaid && !isEditing) {
         lastRenderedCode = "";
         triggerMermaidRender();
@@ -597,7 +514,9 @@ function createCodeBlockNodeViewFactory(opts = {}) {
     if (isMermaid) {
       installThemeObserver();
       mermaidReRenderCallbacks.add(onThemeChange);
-      requestAnimationFrame(() => syncMermaidMode());
+      requestAnimationFrame(() => {
+        if (!destroyed) syncMermaidMode();
+      });
     } else if (isRenderer) {
       syncRendererMode();
       requestAnimationFrame(() => syncRendererMode());
@@ -647,6 +566,10 @@ function createCodeBlockNodeViewFactory(opts = {}) {
       e.stopPropagation();
       if (isMermaid) {
         isEditing = !isEditing;
+        if (isEditing) {
+          renderGeneration++;
+          lastRenderedCode = "";
+        }
         syncMermaidMode();
       } else if (isRenderer) {
         rendererEditing = !rendererEditing;
@@ -658,6 +581,8 @@ function createCodeBlockNodeViewFactory(opts = {}) {
       e.preventDefault();
       e.stopPropagation();
       isEditing = true;
+      renderGeneration++;
+      lastRenderedCode = "";
       syncMermaidMode();
       view.focus();
     });
@@ -687,8 +612,10 @@ function createCodeBlockNodeViewFactory(opts = {}) {
         node = updatedNode;
         langLabel.textContent = findLanguageLabel(updatedNode.attrs.language || "", allLanguages);
         const wasMermaid = isMermaid;
-        isMermaid = updatedNode.attrs.language === "mermaid";
+        isMermaid = Boolean(mermaidLoader) && updatedNode.attrs.language === "mermaid";
         if (isMermaid !== wasMermaid) {
+          renderGeneration++;
+          lastRenderedCode = "";
           isEditing = false;
           if (isMermaid) {
             installThemeObserver();
@@ -698,7 +625,7 @@ function createCodeBlockNodeViewFactory(opts = {}) {
           }
         }
         const wasRenderer = isRenderer;
-        isRenderer = rendererLangIds.has(updatedNode.attrs.language || "");
+        isRenderer = updatedNode.attrs.language !== "mermaid" && rendererLangIds.has(updatedNode.attrs.language || "");
         if (isRenderer !== wasRenderer) {
           rendererEditing = false;
           lastRendererCode = "";
@@ -727,6 +654,8 @@ function createCodeBlockNodeViewFactory(opts = {}) {
         wrapper.classList.remove("ProseMirror-selectednode");
       },
       destroy() {
+        destroyed = true;
+        renderGeneration++;
         if (activePicker) {
           activePicker.destroy();
           activePicker = null;

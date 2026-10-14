@@ -35,7 +35,7 @@ function stubMatchMedia() {
 async function mountMermaidNodeView() {
   vi.resetModules()
   const { createCodeBlockNodeViewFactory } = await import('../plugins/code-block-view')
-  const factory = createCodeBlockNodeViewFactory()
+  const factory = createCodeBlockNodeViewFactory({ mermaidLoader: async () => ({ renderMermaid: async () => ({ svg: '<svg/>' }), updateMermaidTheme() {} }) })
   const doc = parseMarkdown('```mermaid\n```')
   const node = doc.firstChild!
   expect(node.attrs.language).toBe('mermaid')

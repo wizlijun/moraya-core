@@ -134,5 +134,15 @@ interface NullMediaResolver extends MediaResolver {
     readonly [NULL_MEDIA_RESOLVER_SENTINEL]: true;
 }
 declare function isNullMediaResolver(r: MediaResolver): r is NullMediaResolver;
+/** Optional Mermaid preview capability. No loader means editable source only. */
+interface MermaidApi {
+    renderMermaid(code: string): Promise<{
+        svg: string;
+    } | {
+        error: string;
+    }>;
+    updateMermaidTheme(): void;
+}
+type MermaidLoader = () => Promise<MermaidApi>;
 
-export { type FrontmatterViewFactory, type LinkOpener, type LocalMediaSource, type MediaResolver, NULL_MEDIA_RESOLVER_SENTINEL, type NullMediaResolver, type Platform, type RendererPluginModule, type RendererRegistry, type SchemaConfig, type SpreadsheetViewFactory, isNullMediaResolver };
+export { type FrontmatterViewFactory, type LinkOpener, type LocalMediaSource, type MediaResolver, type MermaidApi, type MermaidLoader, NULL_MEDIA_RESOLVER_SENTINEL, type NullMediaResolver, type Platform, type RendererPluginModule, type RendererRegistry, type SchemaConfig, type SpreadsheetViewFactory, isNullMediaResolver };

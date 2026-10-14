@@ -62,6 +62,8 @@ export { createDocCache, djb2Hash, type DocCache } from './doc-cache'
 
 // DI interfaces
 export type {
+  MermaidApi,
+  MermaidLoader,
   LocalMediaSource,
   MediaResolver,
   LinkOpener,

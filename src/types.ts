@@ -161,3 +161,10 @@ export interface NullMediaResolver extends MediaResolver {
 export function isNullMediaResolver(r: MediaResolver): r is NullMediaResolver {
   return (r as NullMediaResolver)[NULL_MEDIA_RESOLVER_SENTINEL] === true
 }
+
+/** Optional Mermaid preview capability. No loader means editable source only. */
+export interface MermaidApi {
+  renderMermaid(code: string): Promise<{ svg: string } | { error: string }>
+  updateMermaidTheme(): void
+}
+export type MermaidLoader = () => Promise<MermaidApi>
