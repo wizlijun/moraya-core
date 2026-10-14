@@ -4,6 +4,25 @@ import {BrowserMediaResolver} from '../adapters/browser-media-resolver';
 import {EditorState,TextSelection,type Transaction} from 'prosemirror-state';
 import {toggleMark} from 'prosemirror-commands';
 import {createSourceSession,applySourceBlockTransaction} from '../source-fidelity';
+it('types into an empty stored link, exits it and continues in the same captured session',async()=>{
+ const container=document.createElement('div');document.body.append(container);
+ let session:Extract<ReturnType<typeof createSourceSession>,{ok:true}>['session'];let changes=0;
+ const editor=await createEditor({container,mediaResolver:new BrowserMediaResolver(),createState(schema,plugins){
+  const opened=createSourceSession('',schema);if(!opened.ok)throw Error(opened.reason);session=opened.session;
+  return EditorState.create({schema,doc:session.doc,plugins:plugins.filter(plugin=>!/^moraya-(link-text|inline-code-convert)\$/.test((plugin as unknown as {key:string}).key))});
+ },dispatchTransaction(view,tr){
+  if(tr.docChanged){const result=applySourceBlockTransaction(session,tr);expect(result.ok).toBe(true);if(!result.ok)throw Error(result.reason);session=result.session;expect(session.doc.eq(tr.doc)).toBe(true);changes++}
+  view.updateState(view.state.apply(tr));
+ }});
+ const type=(text:string)=>{for(const key of text){const {from,to}=editor.view.state.selection;const handled=editor.view.someProp('handleTextInput',f=>f(editor.view,from,to,key,()=>editor.view.state.tr.insertText(key,from,to)));if(!handled)editor.view.dispatch(editor.view.state.tr.insertText(key,from,to))}};
+ try{
+  editor.view.dispatch(editor.view.state.tr.addStoredMark(editor.view.state.schema.marks.link!.create({href:'/url'})));
+  type('link');expect(session!.source).toBe('[l](/url)ink');
+  editor.view.dispatch(editor.view.state.tr.removeStoredMark(editor.view.state.schema.marks.link!));
+  type('!xyz');expect(changes).toBe(8);expect(session!.source).toBe('[l](/url)ink!xyz');
+  expect(editor.view.state.doc.textContent).toBe('link!xyz');expect(editor.view.state.doc.firstChild!.firstChild!.marks[0]!.attrs.href).toBe('/url');
+ }finally{editor.destroy();container.remove()}
+});
 it.each([
  ['**bold**!','strong','bold!'],
  ['*italic*!','em','italic!'],

@@ -378,6 +378,7 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     for(const r of ordered.filter(r=>r.from===at))output.push(r.keep?{raw:r.old!.open}:{text:r.open})
     if(at===list.length)break
     const u=list[at]!,code=u.marks.some(m=>m.type.name==='code'),changedCode=u.before!==undefined&&u.beforeCode!==code
+    if(u.before===undefined&&!u.marks.length&&u.text==='!'&&ordered.some(r=>r.keep&&r.mark.type.name==='link'&&r.from===at+1&&base.source.slice(r.old!.open.from,r.old!.open.to)==='[')){output.push({text:'\\!'});continue}
     const edgeSpace=!code&&/^[ \t]$/.test(u.text)&&(((u.before===undefined||changedCode)&&(list.slice(list.slice(0,at).map(x=>x.text).lastIndexOf('\n')+1,at+1).every(x=>/^[ \t]$/.test(x.text))||list.slice(at,list.findIndex((x,i)=>i>at&&x.text==='\n')<0?undefined:list.findIndex((x,i)=>i>at&&x.text==='\n')).every(x=>/^[ \t]$/.test(x.text))))||ranges.some(r=>!r.keep&&['em','strong','strike_through','highlight'].includes(r.mark.type.name)&&r.from<=at&&at<r.to&&(list.slice(r.from,at+1).every(x=>/^[ \t]$/.test(x.text))||list.slice(at,r.to).every(x=>/^[ \t]$/.test(x.text)))))
     if(adjacentEntities.has(at)){
      const scalar=(u.text+(list[at+1]?.text??'')).codePointAt(0)!

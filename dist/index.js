@@ -8881,6 +8881,10 @@ function prepareInlineRecipe(base, tr, facts) {
         for (const r2 of ordered.filter((r3) => r3.from === at)) output.push(r2.keep ? { raw: r2.old.open } : { text: r2.open });
         if (at === list.length) break;
         const u = list[at], code2 = u.marks.some((m) => m.type.name === "code"), changedCode = u.before !== void 0 && u.beforeCode !== code2;
+        if (u.before === void 0 && !u.marks.length && u.text === "!" && ordered.some((r2) => r2.keep && r2.mark.type.name === "link" && r2.from === at + 1 && base.source.slice(r2.old.open.from, r2.old.open.to) === "[")) {
+          output.push({ text: "\\!" });
+          continue;
+        }
         const edgeSpace = !code2 && /^[ \t]$/.test(u.text) && ((u.before === void 0 || changedCode) && (list.slice(list.slice(0, at).map((x) => x.text).lastIndexOf("\n") + 1, at + 1).every((x) => /^[ \t]$/.test(x.text)) || list.slice(at, list.findIndex((x, i) => i > at && x.text === "\n") < 0 ? void 0 : list.findIndex((x, i) => i > at && x.text === "\n")).every((x) => /^[ \t]$/.test(x.text))) || ranges.some((r2) => !r2.keep && ["em", "strong", "strike_through", "highlight"].includes(r2.mark.type.name) && r2.from <= at && at < r2.to && (list.slice(r2.from, at + 1).every((x) => /^[ \t]$/.test(x.text)) || list.slice(at, r2.to).every((x) => /^[ \t]$/.test(x.text)))));
         if (adjacentEntities.has(at)) {
           const scalar = (u.text + (list[at + 1]?.text ?? "")).codePointAt(0);
@@ -10474,6 +10478,7 @@ function applySourceBlockTransaction(base, tr) {
     if (!needsInline) {
       const step = tr.steps[0], from = base.doc.resolve(step.from);
       if (["paragraph", "heading"].includes(from.parent.type.name)) {
+        if (step.from === step.to && inlineFacts2?.edges.some((e) => e.family === "link" && (e.pmFrom === step.from || e.pmTo === step.from))) needsInline = true;
         if (inlineFacts2?.atoms.some((a) => a.node.type.name === "math_inline" && step.from < a.pmTo && step.to > a.pmFrom)) needsInline = true;
         if (inlineFacts2?.critic.some((c2) => c2.kind === "note_anchor" && step.from < c2.pmTo && step.to > c2.pmFrom)) needsInline = true;
         step.slice.content.forEach((n) => {

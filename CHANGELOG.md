@@ -4,6 +4,8 @@ All notable changes to `@moraya/core` are documented here. SemVer.
 
 ## Unreleased
 
+- Ordinary typing at captured link edges now preserves link wrappers and reference definitions; a new literal exclamation before a link is escaped locally. / 链接边界的普通输入保留原链接外壳与引用定义；链接前新增的字面感叹号只作局部转义。
+
 - Typing unmarked letters next to punctuation at a retained bold or italic edge preserves the existing Markdown wrapper and encodes only the new Unicode scalar. / 在既有粗体或斜体标点边界外输入普通文字时，保留原 Markdown 包裹，仅对新增 Unicode 字符作必要实体编码。
 
 - Rich literal punctuation now enters the existing escaped inline recipe before candidate parsing, so continuous `**bold**!` typing retains every intermediate keystroke and reaches the real InputRule. / 富文本字面标点在候选解析前使用既有局部转义配方，连续输入 `**bold**!` 不再丢失中间按键，并正常触发真实输入规则。

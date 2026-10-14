@@ -3,6 +3,23 @@ import {toggleMark} from 'prosemirror-commands';
 import {EditorState} from 'prosemirror-state';
 import {applySourceBlockTransaction} from '../source-fidelity';
 import {open,pos,command} from './source-inline-test-utils';
+it.each([
+ ['[link](/url)\n',1,'x','x[link](/url)\n'],
+ ['[link](/url)\n',5,'!','[link](/url)!\n'],
+ ['A [link](/url) Z\n',7,'!','A [link](/url)! Z\n'],
+ ['[a](/one)[b](/two)\n',2,'x','[a](/one)x[b](/two)\n'],
+ ['[link][r]\n\n[r]: /url\n',5,'!','[link][r]!\n\n[r]: /url\n'],
+ ['[link](/url)\n',1,'!','\\![link](/url)\n'],
+ ['[a](/one)[b](/two)\n',2,'!','[a](/one)\\![b](/two)\n'],
+ ['[link][r]\n\n[r]: /url\n',1,'!','\\![link][r]\n\n[r]: /url\n'],
+ ['[link](/url)\n',3,'!','[li!nk](/url)\n'],
+] as const)('preserves real link text and edge insertion %j at %s',(raw,at,text,expected)=>{
+ const base=open(raw),state=EditorState.create({doc:base.doc});
+ const tr=state.tr.setSelection(TextSelection.create(state.doc,at)).insertText(text);
+ const result=applySourceBlockTransaction(base,tr);expect(result.ok).toBe(true);if(!result.ok)throw Error(result.reason);
+ expect(result.session.source).toBe(expected);expect(result.session.doc.eq(tr.doc)).toBe(true);expect(base.source).toBe(raw);
+ expect(result.edits).toHaveLength(1);expect(result.edits[0]!.from).toBe(result.edits[0]!.to);
+});
 it.each(['**','*'].flatMap(marker=>['left','right'].flatMap(side=>['x','中','𐐀'].map(text=>({marker,side,text})))))(
  'encodes only a new scalar outside kept $marker at $side: $text',({marker,side,text})=>{
   const wrapper=marker+'!bold!'+marker,raw='\ufeff> '+wrapper+'\r\n\r\n[r]: /keep\r\n',base=open(raw);

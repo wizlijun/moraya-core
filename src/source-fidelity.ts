@@ -516,6 +516,7 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
   if(!needsInline){
    const step=tr.steps[0] as ReplaceStep,from=base.doc.resolve(step.from)
    if(['paragraph','heading'].includes(from.parent.type.name)){
+    if(step.from===step.to&&inlineFacts?.edges.some(e=>e.family==='link'&&(e.pmFrom===step.from||e.pmTo===step.from)))needsInline=true
     if(inlineFacts?.atoms.some(a=>a.node.type.name==='math_inline'&&step.from<a.pmTo&&step.to>a.pmFrom))needsInline=true
     if(inlineFacts?.critic.some(c=>c.kind==='note_anchor'&&step.from<c.pmTo&&step.to>c.pmFrom))needsInline=true
     step.slice.content.forEach(n=>{if(!n.isText||!n.hasMarkup(n.type,null,step.from<step.to?(from.nodeAfter?.marks??from.marks()):from.marks()))needsInline=true})
