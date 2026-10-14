@@ -1,8 +1,45 @@
 import {it,expect} from 'vitest';
 import {createEditor} from '../setup';
 import {BrowserMediaResolver} from '../adapters/browser-media-resolver';
-import {TextSelection,type Transaction} from 'prosemirror-state';
+import {EditorState,TextSelection,type Transaction} from 'prosemirror-state';
 import {createSourceSession,applySourceBlockTransaction} from '../source-fidelity';
+it.each([
+ ['**bold**!','strong','bold!'],
+ ['*italic*!','em','italic!'],
+] as const)('accepts every key of %s in one empty captured session',async(sequence,mark,visible)=>{
+ const container=document.createElement('div');document.body.append(container);
+ let session:Extract<ReturnType<typeof createSourceSession>,{ok:true}>['session'];
+ const seen:string[]=[];
+ const editor=await createEditor({container,mediaResolver:new BrowserMediaResolver(),
+  createState(schema,plugins){
+   const opened=createSourceSession('',schema);if(!opened.ok)throw Error(opened.reason);session=opened.session;
+   return EditorState.create({schema,doc:session.doc,plugins:plugins.filter(plugin=>{
+    const key=(plugin as unknown as {key:string}).key;
+    return !key.startsWith('moraya-link-text$')&&!key.startsWith('moraya-inline-code-convert$');
+   })});
+  },
+  dispatchTransaction(view,tr){
+   if(tr.docChanged){
+    const result=applySourceBlockTransaction(session,tr);
+    expect(result.ok,JSON.stringify({before:session.source,steps:tr.steps.map(s=>s.toJSON()),result})).toBe(true);
+    if(!result.ok)throw Error(result.reason);session=result.session;
+    expect(session.doc.eq(tr.doc)).toBe(true);seen.push(session.source);
+   }
+   view.updateState(view.state.apply(tr));
+  },
+ });
+ try{
+  for(const key of sequence){
+   const {from,to}=editor.view.state.selection;
+   const handled=editor.view.someProp('handleTextInput',f=>f(editor.view,from,to,key,()=>editor.view.state.tr.insertText(key,from,to)));
+   if(!handled)editor.view.dispatch(editor.view.state.tr.insertText(key,from,to));
+  }
+  expect(seen).toHaveLength(sequence.length);
+  expect(editor.view.state.doc.textContent).toBe(visible);
+  expect(editor.view.state.doc.firstChild!.firstChild!.marks.some(m=>m.type.name===mark)).toBe(true);
+  expect(session!.source).not.toContain('\u200b');
+ }finally{editor.destroy();container.remove()}
+});
 it('actual closing-backtick input rule preserves unrelated raw',async()=>{
  const raw='> `Alpha\n',expected='> `Alpha`\n';
  const container=document.createElement('div');document.body.append(container);

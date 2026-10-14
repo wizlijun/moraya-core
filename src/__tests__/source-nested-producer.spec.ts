@@ -90,11 +90,14 @@ it.each([
  ['> \t甲。\n',[0,0],'> \t乙。\n'],
  ['* \t甲。\n',[0,0,0],'* \t乙。\n'],
 ] as const)('projects actual tab-indented body %j',(raw,path,expected)=>{change(raw,path,0,expected)})
-it('refuses ordinary one-character syntax intent without whole-root fallback',()=>{
+it('escapes an inserted literal syntax character without whole-root fallback',()=>{
  const base=open('> Alpha\n'),p=at(base.doc,[0,0]),tr=EditorState.create({doc:base.doc}).tr.insertText('>',p)
  const spy=vi.spyOn(markdown,'serializeSourceRootMarkdown')
  try{
-  const r=applySourceBlockTransaction(base,tr);expect(r).toEqual({ok:false,reason:'semantic-mismatch'})
+  const r=applySourceBlockTransaction(base,tr);expect(r.ok).toBe(true);if(!r.ok)throw Error(r.reason)
+  expect(r.edits).toEqual([{from:2,to:2,text:'\\>'}])
+  expect(r.session.source).toBe('> \\>Alpha\n')
+  expect(r.session.doc.eq(tr.doc)).toBe(true)
   expect(base.source).toBe('> Alpha\n')
   expect(spy).not.toHaveBeenCalled()
  }finally{spy.mockRestore()}

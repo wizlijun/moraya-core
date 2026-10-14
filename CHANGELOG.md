@@ -4,6 +4,8 @@ All notable changes to `@moraya/core` are documented here. SemVer.
 
 ## Unreleased
 
+- Rich literal punctuation now enters the existing escaped inline recipe before candidate parsing, so continuous `**bold**!` typing retains every intermediate keystroke and reaches the real InputRule. / 富文本字面标点在候选解析前使用既有局部转义配方，连续输入 `**bold**!` 不再丢失中间按键，并正常触发真实输入规则。
+
 - A single point-note replacement can consume a certified, unmarked text range in one source edit, preserving its surrounding bytes. Atom, annotation and unmapped ranges remain rejected. / 点批注可用单个替换步骤消耗已证明、无格式标记的文本范围，保留周围原文；原子节点、批注及无映射范围仍拒绝。
 
 - Editor factories can configure the final schema, provide the first captured state, and own transaction admission without an intermediate legacy parse. Default consumers retain the existing initialization and dispatch behavior. / 编辑器工厂可在首次挂载前配置最终 schema、直接提供捕获状态并接管事务准入，无需先安装旧解析结果；默认调用路径保持原行为。
