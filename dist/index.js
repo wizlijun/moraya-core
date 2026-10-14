@@ -8845,6 +8845,16 @@ function prepareInlineRecipe(base, tr, facts) {
       }
       if (cursor < body.sourceTo) gaps.push({ raw: { from: cursor, to: body.sourceTo }, before: body.pmTo });
       const adjacentEntities = /* @__PURE__ */ new Set();
+      for (const r2 of ranges) if (r2.keep && ["em", "strong"].includes(r2.mark.type.name)) {
+        for (const [outer, inner] of [[r2.from - 1, r2.from], [r2.to, r2.to - 1]]) {
+          if (outer < 0 || outer >= list.length) continue;
+          const start = (at2) => at2 > 0 && /[\uDC00-\uDFFF]/.test(list[at2].text) && /[\uD800-\uDBFF]/.test(list[at2 - 1].text) ? at2 - 1 : at2;
+          const at = start(outer), inside = start(inner), scalar = String.fromCodePoint((list[at].text + (list[at + 1]?.text ?? "")).codePointAt(0) ?? 0);
+          const innerScalar = String.fromCodePoint((list[inside].text + (list[inside + 1]?.text ?? "")).codePointAt(0) ?? 0);
+          const units2 = list.slice(at, at + scalar.length);
+          if (units2.length === scalar.length && units2.every((u) => u.before === void 0 && !u.marks.length && !!u.text) && list[inside].before !== void 0 && /[\p{P}\p{S}]/u.test(innerScalar) && !/[\s\p{P}\p{S}]/u.test(scalar)) adjacentEntities.add(at);
+        }
+      }
       for (const r2 of ranges) if (!r2.keep && ["em", "strong", "strike_through", "highlight"].includes(r2.mark.type.name)) {
         if (!ranges.some((other) => other !== r2 && other.from === r2.to) && /^[ \t]$/.test(list[r2.to - 1].text) && r2.to < list.length && !/[\s\p{P}\p{S}]/u.test(list[r2.to].text)) adjacentEntities.add(r2.to);
         if (!ranges.some((other) => other !== r2 && other.to === r2.from) && /^[ \t]$/.test(list[r2.from].text) && r2.from > 0 && !/[\s\p{P}\p{S}]/u.test(list[r2.from - 1].text)) {

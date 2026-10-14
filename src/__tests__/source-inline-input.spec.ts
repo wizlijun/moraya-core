@@ -2,6 +2,7 @@ import {it,expect} from 'vitest';
 import {createEditor} from '../setup';
 import {BrowserMediaResolver} from '../adapters/browser-media-resolver';
 import {EditorState,TextSelection,type Transaction} from 'prosemirror-state';
+import {toggleMark} from 'prosemirror-commands';
 import {createSourceSession,applySourceBlockTransaction} from '../source-fidelity';
 it.each([
  ['**bold**!','strong','bold!'],
@@ -38,6 +39,13 @@ it.each([
   expect(editor.view.state.doc.textContent).toBe(visible);
   expect(editor.view.state.doc.firstChild!.firstChild!.marks.some(m=>m.type.name===mark)).toBe(true);
   expect(session!.source).not.toContain('\u200b');
+  toggleMark(editor.view.state.schema.marks[mark]!)(editor.view.state,tr=>editor.view.dispatch(tr));
+  const {from,to}=editor.view.state.selection;
+  const handled=editor.view.someProp('handleTextInput',f=>f(editor.view,from,to,'x',()=>editor.view.state.tr.insertText('x',from,to)));
+  if(!handled)editor.view.dispatch(editor.view.state.tr.insertText('x',from,to));
+  expect(editor.view.state.doc.textContent).toBe(visible+'x');
+  expect(editor.view.state.doc.firstChild!.lastChild!.marks).toEqual([]);
+  expect(session!.source).toBe((mark==='strong'?'**bold!**':'*italic!*')+'&#120;');
  }finally{editor.destroy();container.remove()}
 });
 it('actual closing-backtick input rule preserves unrelated raw',async()=>{

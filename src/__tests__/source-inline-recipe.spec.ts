@@ -3,6 +3,26 @@ import {toggleMark} from 'prosemirror-commands';
 import {EditorState} from 'prosemirror-state';
 import {applySourceBlockTransaction} from '../source-fidelity';
 import {open,pos,command} from './source-inline-test-utils';
+it.each(['**','*'].flatMap(marker=>['left','right'].flatMap(side=>['x','中','𐐀'].map(text=>({marker,side,text})))))(
+ 'encodes only a new scalar outside kept $marker at $side: $text',({marker,side,text})=>{
+  const wrapper=marker+'!bold!'+marker,raw='\ufeff> '+wrapper+'\r\n\r\n[r]: /keep\r\n',base=open(raw);
+  const at=pos(base.doc,[0,0],side==='left'?0:6),state=EditorState.create({doc:base.doc});
+  const tr=state.tr.setSelection(TextSelection.create(state.doc,at)).setStoredMarks([]).insertText(text);
+  const result=applySourceBlockTransaction(base,tr);expect(result.ok).toBe(true);if(!result.ok)throw Error(result.reason);
+  const rawAt=raw.indexOf(wrapper)+(side==='left'?0:wrapper.length),entity='&#'+text.codePointAt(0)+';';
+  expect(result.edits).toEqual([{from:rawAt,to:rawAt,text:entity}]);
+  expect(result.session.source).toBe(raw.slice(0,rawAt)+entity+raw.slice(rawAt));
+  expect(result.session.doc.eq(tr.doc)).toBe(true);expect(base.source).toBe(raw);
+ });
+it.each(['**','*'])('keeps ordinary %s boundaries literal and does not encode retained neighbours',marker=>{
+ const raw=marker+'bold'+marker,base=open(raw),state=EditorState.create({doc:base.doc});
+ const tr=state.tr.setSelection(TextSelection.create(state.doc,5)).setStoredMarks([]).insertText('x');
+ const accepted=applySourceBlockTransaction(base,tr);expect(accepted.ok).toBe(true);if(!accepted.ok)throw Error(accepted.reason);
+ expect(accepted.session.source).toBe(raw+'x');expect(accepted.session.doc.eq(tr.doc)).toBe(true);
+ const retainedRaw=marker+'bold!'+marker+' x',retained=open(retainedRaw);
+ const rejected=applySourceBlockTransaction(retained,EditorState.create({doc:retained.doc}).tr.delete(6,7));
+ expect(rejected).toEqual({ok:false,reason:'semantic-mismatch'});expect(retained.source).toBe(retainedRaw);
+});
 it('partial strong preserves nested shell and unrelated syntax',()=>{
  command('>  Alpha Beta _Keep_。\n',[0,0],6,[0,0],10,
   s=>toggleMark(s.schema.marks.strong!),'>  Alpha **Beta** _Keep_。\n');

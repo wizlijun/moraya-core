@@ -4,6 +4,8 @@ All notable changes to `@moraya/core` are documented here. SemVer.
 
 ## Unreleased
 
+- Typing unmarked letters next to punctuation at a retained bold or italic edge preserves the existing Markdown wrapper and encodes only the new Unicode scalar. / 在既有粗体或斜体标点边界外输入普通文字时，保留原 Markdown 包裹，仅对新增 Unicode 字符作必要实体编码。
+
 - Rich literal punctuation now enters the existing escaped inline recipe before candidate parsing, so continuous `**bold**!` typing retains every intermediate keystroke and reaches the real InputRule. / 富文本字面标点在候选解析前使用既有局部转义配方，连续输入 `**bold**!` 不再丢失中间按键，并正常触发真实输入规则。
 
 - A single point-note replacement can consume a certified, unmarked text range in one source edit, preserving its surrounding bytes. Atom, annotation and unmapped ranges remain rejected. / 点批注可用单个替换步骤消耗已证明、无格式标记的文本范围，保留周围原文；原子节点、批注及无映射范围仍拒绝。
