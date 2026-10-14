@@ -8,8 +8,8 @@
  * in addition to the documentElement attribute observer.
  */
 import { describe, test, expect, vi, afterEach } from 'vitest'
-import type { EditorView } from 'prosemirror-view'
-import { parseMarkdown } from '../markdown'
+import type { MorayaEditorInstance } from '../setup'
+const editors: MorayaEditorInstance[] = []
 
 type SchemeListener = (e: { matches: boolean }) => void
 
@@ -34,18 +34,21 @@ function stubMatchMedia() {
  */
 async function mountMermaidNodeView() {
   vi.resetModules()
-  const { createCodeBlockNodeViewFactory } = await import('../plugins/code-block-view')
-  const factory = createCodeBlockNodeViewFactory({ mermaidLoader: async () => ({ renderMermaid: async () => ({ svg: '<svg/>' }), updateMermaidTheme() {} }) })
-  const doc = parseMarkdown('```mermaid\n```')
-  const node = doc.firstChild!
-  expect(node.attrs.language).toBe('mermaid')
-  const nodeView = factory(node, {} as unknown as EditorView, () => 0)
-  // Flush the deferred initial syncMermaidMode (requestAnimationFrame).
-  await new Promise<void>((r) => requestAnimationFrame(() => r()))
-  return nodeView
+  const { createEditor } = await import('../setup')
+  const api = { renderMermaid: vi.fn(async () => ({ svg: '<svg><path/></svg>' })), updateMermaidTheme: vi.fn() }
+  const container = document.createElement('div'); document.body.append(container)
+  const editor = await createEditor({ container, initialContent: '```mermaid\ngraph TD; A-->B\n```',
+    mediaResolver: { loadLocalImage: async () => '', loadLocalMedia: async () => '', loadRemoteMedia: async () => '' },
+    mermaidLoader: async () => api,
+  })
+  editors.push(editor)
+  await vi.waitFor(() => expect(container.querySelector('.mermaid-preview svg')).not.toBeNull())
+  return { dom: container, api }
 }
 
 afterEach(() => {
+  editors.splice(0).forEach(editor => editor.destroy())
+  document.body.replaceChildren()
   vi.restoreAllMocks()
   document.documentElement.removeAttribute('data-theme')
 })
@@ -60,7 +63,10 @@ describe('mermaid theme observer', () => {
     expect(listeners.length).toBeGreaterThan(0)
     for (const cb of listeners) cb({ matches: true })
 
+    await vi.waitFor(() => expect(preview.querySelector('svg')).not.toBeNull())
     expect(preview.querySelector('.stale-svg')).toBeNull()
+    expect(nodeView.api.updateMermaidTheme).toHaveBeenCalled()
+    expect(nodeView.api.renderMermaid).toHaveBeenCalledTimes(2)
   })
 
   test('re-renders preview on documentElement data-theme mutation', async () => {
@@ -73,6 +79,9 @@ describe('mermaid theme observer', () => {
     // MutationObserver callbacks are delivered asynchronously.
     await new Promise((r) => setTimeout(r, 0))
 
+    await vi.waitFor(() => expect(preview.querySelector('svg')).not.toBeNull())
     expect(preview.querySelector('.stale-svg')).toBeNull()
+    expect(nodeView.api.updateMermaidTheme).toHaveBeenCalled()
+    expect(nodeView.api.renderMermaid).toHaveBeenCalledTimes(2)
   })
 })

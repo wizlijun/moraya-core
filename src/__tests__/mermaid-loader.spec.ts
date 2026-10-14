@@ -89,3 +89,19 @@ it('keeps syntax failures editable without modifying the document', async () => 
   expect(container.querySelector('.mermaid-error')?.textContent).toBe('Invalid graph')
   expect(editor.view.state.doc.firstChild?.textContent).toBe('graph TD; A-->B')
 })
+
+it('loader completion in reverse order cannot exchange concurrent host capabilities', async () => {
+  let resolveA!: (api: MermaidApi) => void, resolveB!: (api: MermaidApi) => void
+  const a = api('reverse-a'), b = api('reverse-b')
+  const [first, second] = await Promise.all([
+    mount({ mermaidLoader: () => new Promise(r => { resolveA = r }) }),
+    mount({ mermaidLoader: () => new Promise(r => { resolveB = r }) }),
+  ])
+  resolveB(b); await settle()
+  expect(second.container.querySelector('#reverse-b')).not.toBeNull()
+  expect(first.container.querySelector('.mermaid-preview svg')).toBeNull()
+  resolveA(a); await settle()
+  expect(first.container.querySelector('#reverse-a')).not.toBeNull()
+  expect(first.container.querySelector('#reverse-b')).toBeNull()
+  expect(second.container.querySelector('#reverse-a')).toBeNull()
+})
