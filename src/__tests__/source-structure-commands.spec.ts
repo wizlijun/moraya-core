@@ -117,10 +117,10 @@ it('AttrStep code language persists without changing raw neighbors',()=>{
  expect(r.session.source.startsWith('```ts\n')).toBe(true);expect(r.session.source.endsWith(tail)).toBe(true)
 })
 it('node marks on an inline image are representable',()=>{
- const b=open('![x](image.png)'+tail),mark=b.doc.type.schema.marks.strong!.create()
- const added=accept(b,state(b,1).tr.step(new AddNodeMarkStep(1,mark)))
- const removed=accept(added.session,EditorState.create({doc:added.session.doc}).tr.step(new RemoveNodeMarkStep(1,mark)))
- expect(removed.session.doc.eq(b.doc)).toBe(true);expect(removed.session.source.endsWith(tail)).toBe(true)
+ const b=open('__Keep__ ![x](image.png)'+tail),mark=b.doc.type.schema.marks.strong!.create()
+ const added=accept(b,state(b,1).tr.step(new AddNodeMarkStep(6,mark)))
+ const removed=accept(added.session,EditorState.create({doc:added.session.doc}).tr.step(new RemoveNodeMarkStep(6,mark)))
+ expect(added.session.source).toBe('__Keep__ **![x](image.png)**'+tail);expect(removed.session.doc.eq(b.doc)).toBe(true);expect(removed.session.source).toBe(b.source)
 })
 it('empty language is preserved while unrepresentable block marks and DocAttr are rejected',()=>{
  const b=open('```js\nA\n```'+tail),tr=state(b,1).tr

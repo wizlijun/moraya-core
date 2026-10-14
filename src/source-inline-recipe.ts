@@ -1,7 +1,7 @@
 import {Fragment} from 'prosemirror-model'
 import type {Mark,Node as PmNode} from 'prosemirror-model'
 import type {Transaction} from 'prosemirror-state'
-import {AddMarkStep,RemoveMarkStep,ReplaceStep} from 'prosemirror-transform'
+import {AddMarkStep,RemoveMarkStep,ReplaceStep,AttrStep,AddNodeMarkStep,RemoveNodeMarkStep} from 'prosemirror-transform'
 import type {SourceSession,TextSourceSpan} from './source-fidelity'
 import type {SourceEdit,ProtectedSource} from './source-ownership'
 import type {EmptyBody} from './source-empty-body'
@@ -23,13 +23,26 @@ function canonicalMath(node:PmNode):boolean {
  return node.type===node.type.schema.nodes.math_inline&&node.hasMarkup(node.type)&&node.childCount===1
   &&node.firstChild!.isText&&!node.firstChild!.marks.length&&!!node.textContent&&!/[\r\n$]/.test(node.textContent)
 }
+export function canonicalImage(node:PmNode):boolean {
+ return node.type===node.type.schema.nodes.image&&node.isInline&&node.isLeaf&&node.nodeSize===1
+  &&['src','alt','title'].every(key=>typeof node.attrs[key]==='string'&&!/[\r\n]/.test(node.attrs[key]))
+  &&node.eq(node.type.create({src:node.attrs.src,alt:node.attrs.alt,title:node.attrs.title},null,node.marks))
+}
+export function imageStepRange(doc:PmNode,step:Transaction['steps'][number]):InlineRawRange|undefined {
+ const p=Object.getPrototypeOf(step)
+ if(p!==AttrStep.prototype&&p!==AddNodeMarkStep.prototype&&p!==RemoveNodeMarkStep.prototype)return
+ const s=step as AttrStep|AddNodeMarkStep|RemoveNodeMarkStep
+ if(!Number.isInteger(s.pos)||s.pos<0||s.pos>=doc.content.size)return
+ const node=doc.nodeAt(s.pos)
+ if(node&&canonicalImage(node)&&(!(s instanceof AttrStep)||['src','alt','title'].includes(s.attr)))return {from:s.pos,to:s.pos+1}
+}
 function canonicalAnnotation(mark:Mark):boolean {return mark.type.name!=='annotation'||typeof mark.attrs.note==='string'&&!/[\r\n]|<<}/.test(mark.attrs.note)&&mark.eq(mark.type.create({note:mark.attrs.note}))}
-function textOnly(node:PmNode):boolean {let ok=true;node.forEach(n=>{if(!n.isText||n.marks.some(m=>!families.includes(m.type.name)))ok=false});return ok}
+function textOnly(node:PmNode,images=false):boolean {let ok=true;node.forEach(n=>{if(!(n.isText||images&&canonicalImage(n))||n.marks.some(m=>!families.includes(m.type.name)))ok=false});return ok}
 function audit(base:SourceSession,tr:Transaction):boolean {
  if(!tr.before.eq(base.doc)||tr.docs.length!==tr.steps.length)return false
  for(let i=0;i<tr.steps.length;i++){
   const step=tr.steps[i]!,before=tr.docs[i]!,after=tr.docs[i+1]??tr.doc,p=Object.getPrototypeOf(step)
-  if(p!==ReplaceStep.prototype&&p!==AddMarkStep.prototype&&p!==RemoveMarkStep.prototype)return false
+  if(p!==ReplaceStep.prototype&&p!==AddMarkStep.prototype&&p!==RemoveMarkStep.prototype&&!imageStepRange(before,step))return false
   if(i===0&&!before.eq(base.doc))return false
   const result=step.apply(before);if(result.failed||!result.doc?.eq(after))return false
  }
@@ -49,7 +62,7 @@ export function prepareEmptyInlineContent(base:SourceSession,tr:Transaction,fact
   }
   const parent=tr.doc.resolve(step.from).parent
   if(tr.steps.length===1&&step.slice.content.childCount===1&&canonicalNote(step.slice.content.firstChild!)&&!step.slice.content.firstChild!.marks.length&&parent.sameMarkup(fact.parent)&&parent.content.eq(step.slice.content))return {kind:'ready',body:'{>>'+parent.firstChild!.attrs.note+'<<}'}
-  if(!parent.sameMarkup(fact.parent)||!textOnly(parent)||/[\r\n]/.test(parent.textContent))return no()
+  if(!parent.sameMarkup(fact.parent)||!textOnly(parent,true)||/[\r\n]/.test(parent.textContent))return no()
   const resolved=base.doc.resolve(fact.pmAt),cell=resolved.depth>0&&['table_cell','table_header'].includes(resolved.node(resolved.depth-1).type.name)
   const children:PmNode[]=[]
   parent.forEach(node=>children.push(cell&&node.marks.some(m=>m.type.name==='code')?node.type.schema.text(node.text!.replace(/\|/g,'\\|'),node.marks):node))
@@ -92,7 +105,7 @@ export function prepareClosedFenceRecipe(base:SourceSession,tr:Transaction,facts
 }
 type InlinePiece=Readonly<{kind:'retained';beforeFrom:number;beforeTo:number;afterFrom:number;afterTo:number}|{kind:'inserted';afterFrom:number;afterTo:number;step:number}>
 type BodyWork={body:number;beforeFrom:number;beforeTo:number;afterFrom:number;afterTo:number;pieces:InlinePiece[];dirtyEdges:number[]}
-type Unit={text:string;before?:number;beforeCode?:boolean;step?:number;leaf?:PmNode;math?:{node:PmNode};atom?:InlineAtomOccurrence;marks:readonly Mark[];raw?:InlineRawRange}
+type Unit={text:string;before?:number;beforeCode?:boolean;step?:number;leaf?:PmNode;image?:PmNode;math?:{node:PmNode};atom?:InlineAtomOccurrence;marks:readonly Mark[];raw?:InlineRawRange}
 type Envelope={from:number;to:number;mark:Mark;old?:InlineEdge;open:string;close:string;keep:boolean;index:number}
 type Output={raw:InlineRawRange}|{text:string}
 const sameMarks=(a:readonly Mark[],b:readonly Mark[])=>a.length===b.length&&a.every((m,i)=>m.eq(b[i]!))
@@ -123,6 +136,18 @@ function noteEdit(base:SourceSession,fact:CriticPayload,note:string):SourceEdit 
  if(right>0&&/[\uD800-\uDBFF]/.test(old[old.length-right-1]??'')&&/[\uDC00-\uDFFF]/.test(old[old.length-right]??''))right--
  return {from:fact.noteFrom+left,to:fact.noteTo-right,text:note.slice(left,note.length-right)}
 }
+function emptyBodyEdits(base:SourceSession,facts:InlineRecipeFacts,body:InlineOccurrence,contentTo:number):SourceEdit[] {
+ const edits:SourceEdit[]=[]
+ const separator=facts.separators.find(s=>s.right===body.body)??facts.separators.find(s=>s.left===body.body)
+ const definitionSeparator=facts.definitionSeparators.find(s=>s.body===body.body&&s.side==='after')
+ if(separator)edits.push({...separator.range,text:''})
+ else if(definitionSeparator)edits.push({...definitionSeparator.range,text:''})
+ // A top-level paragraph owns this exact terminal EOL. Once its only
+ // leaf is gone, retaining that EOL would introduce another empty paragraph.
+ const root=base.roots.find(r=>r.tokenType==='paragraph_open'&&r.pmFrom+1===body.pmFrom&&r.pmTo-1===body.pmTo&&r.tailFrom===body.sourceTo&&contentTo===r.tailFrom)
+ if(root&&/^(?:\r\n|\r|\n)$/.test(base.source.slice(root.tailFrom,root.sourceTo)))edits.push({from:root.tailFrom,to:root.sourceTo,text:''})
+ return edits
+}
 function preparePointRecipe(base:SourceSession,tr:Transaction,facts:InlineRecipeFacts):InlineRecipeResult|undefined {
  const no={ok:false,reason:'unsupported-step'} as const
  const touches=tr.steps.some(s=>s instanceof ReplaceStep&&(facts.critic.some(c=>c.kind==='note_anchor'&&s.from<c.pmTo&&s.to>c.pmFrom)||s.slice.content.firstChild?.type.name==='note_anchor'))
@@ -143,14 +168,7 @@ function preparePointRecipe(base:SourceSession,tr:Transaction,facts:InlineRecipe
    const edits:SourceEdit[]=[{from:fact.syntaxFrom,to:fact.syntaxTo,text:''},...emptyEdges.flatMap(e=>[{...e.open,text:''},{...e.close,text:''}])]
    const contentTo=Math.max(fact.syntaxTo,...emptyEdges.map(e=>e.close.to))
    if(body.pmFrom===fact.pmFrom&&body.pmTo===fact.pmTo&&a.parent.type.name==='paragraph'){
-    const separator=facts.separators.find(s=>s.right===fact.body)??facts.separators.find(s=>s.left===fact.body)
-    const definitionSeparator=facts.definitionSeparators.find(s=>s.body===fact.body&&s.side==='after')
-    if(separator)edits.push({...separator.range,text:''})
-    else if(definitionSeparator)edits.push({...definitionSeparator.range,text:''})
-    // A top-level paragraph owns this exact terminal EOL. Once its only
-    // leaf is gone, retaining that EOL would introduce another empty paragraph.
-    const root=base.roots.find(r=>r.tokenType==='paragraph_open'&&r.pmFrom+1===body.pmFrom&&r.pmTo-1===body.pmTo&&r.tailFrom===body.sourceTo&&contentTo===r.tailFrom)
-    if(root&&/^(?:\r\n|\r|\n)$/.test(base.source.slice(root.tailFrom,root.sourceTo)))edits.push({from:root.tailFrom,to:root.sourceTo,text:''})
+    edits.push(...emptyBodyEdits(base,facts,body,contentTo))
    }
    edits.sort((x,y)=>x.from-y.from);return {ok:true,edits,changedBodies:[fact.body]}
   }
@@ -174,7 +192,7 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
   const pointRecipe=preparePointRecipe(base,tr,facts)
   if(pointRecipe)return pointRecipe
   const work:BodyWork[]=facts.bodies.map(b=>({body:b.body,beforeFrom:b.pmFrom,beforeTo:b.pmTo,afterFrom:b.pmFrom,afterTo:b.pmTo,pieces:[{kind:'retained',beforeFrom:b.pmFrom,beforeTo:b.pmTo,afterFrom:b.pmFrom,afterTo:b.pmTo}],dirtyEdges:[]}))
-  const units=new Map<number,Unit[]>(),changed=new Set<number>()
+  const units=new Map<number,Unit[]>(),changed=new Set<number>(),removedImages=new Set<number>(),removedImageAtoms=new Set<InlineAtomOccurrence>()
   for(const b of facts.bodies){
    const list:Unit[]=[]
    base.doc.resolve(b.pmFrom).parent.forEach((node,offset)=>{
@@ -183,19 +201,27 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
      const before=b.pmFrom+offset+i
      const span=base.textSpans.find(s=>s.pmFrom<=before&&s.pmTo>before)
      const from=span&&point(span,before),to=span&&point(span,before+1)
-     list.push({text:node.isText?node.text![i]!:'',before,beforeCode:node.marks.some(m=>m.type.name==='code'),marks:node.marks,...(atom?{atom}:{}),...(from!==undefined&&to!==undefined?{raw:{from,to}}:{})})
+     list.push({text:node.isText?node.text![i]!:'',before,beforeCode:node.marks.some(m=>m.type.name==='code'),marks:node.marks,...(atom?{atom,...(canonicalImage(node)?{image:node}:{})}:{}),...(from!==undefined&&to!==undefined?{raw:{from,to}}:{})})
     }
    });units.set(b.body,list)
   }
   for(let i=0;i<tr.steps.length;i++){
-   const step=tr.steps[i] as ReplaceStep|AddMarkStep|RemoveMarkStep,before=tr.docs[i]!
-   if(step instanceof ReplaceStep){
+   const step=tr.steps[i] as ReplaceStep|AddMarkStep|RemoveMarkStep|AttrStep|AddNodeMarkStep|RemoveNodeMarkStep,before=tr.docs[i]!
+   const imageRange=imageStepRange(before,step)
+   if(imageRange){
+    const w=work.find(w=>w.afterFrom<=imageRange.from&&w.afterTo>=imageRange.to),after=tr.docs[i+1]??tr.doc,node=after.nodeAt(imageRange.from)
+    if(!w||!node||!canonicalImage(node))return no
+    const u=units.get(w.body)![imageRange.from-w.afterFrom]!
+    if(!u.image)return no
+    u.image=node;u.marks=node.marks;changed.add(w.body)
+   }else if(step instanceof ReplaceStep){
     const a=before.resolve(step.from),z=before.resolve(step.to)
     if(!a.sameParent(z)||!a.parent.inlineContent||step.slice.openStart||step.slice.openEnd||(step as ReplaceStep&{structure:boolean}).structure)return no
     const body=work.find(w=>w.afterFrom<=step.from&&w.afterTo>=step.to)
     if(!body)return no
     let inserted:Unit[]=[],valid=true
     step.slice.content.forEach(n=>{
+     if(canonicalImage(n)){inserted.push({text:'',image:n,marks:n.marks,step:i});return}
      if(canonicalMath(n)){const math={node:n};for(let k=0;k<n.nodeSize;k++)inserted.push({text:'',math,marks:n.marks,step:i});return}
      if(n.type===n.type.schema.nodes.hardbreak&&typeof n.attrs.isInline==='boolean'&&!n.marks.length&&n.eq(n.type.create({isInline:n.attrs.isInline}))){inserted.push({text:'\n',leaf:n,marks:n.marks,step:i});return}
      if(!n.isText||n.marks.some(m=>!families.includes(m.type.name)))valid=false
@@ -206,12 +232,16 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     // Only whole mathematical occurrences may be removed; payload positions
     // never acquire text authority, even for an atom born earlier in this chain.
     for(let k=start;k<end;k++){
-     const u=list[k]!;if(u.text)continue
+     const u=list[k]!;if(u.image){removedImages.add(body.body);if(u.atom)removedImageAtoms.add(u.atom);continue}if(u.text)continue
      if(u.atom?.node.type.name!=='math_inline'&&!u.math)return no
      const first=list.findIndex(x=>u.atom?x.atom===u.atom:x.math===u.math),size=u.atom?u.atom.pmTo-u.atom.pmFrom:u.math!.node.nodeSize
      if(first<start||first+size>end)return no
     }
     if(start===end&&(list[start]?.atom&&list[start]!.atom===list[start-1]?.atom||list[start]?.math&&list[start]!.math===list[start-1]?.math))return no
+    const replaced=list[start],replacement=inserted[0]
+    if(end===start+1&&inserted.length===1&&replacement?.image&&replaced?.image&&replaced.atom&&replaced.before!==undefined&&replacement.image.hasMarkup(replaced.image.type,replaced.image.attrs,replacement.marks)){
+     replacement.atom=replaced.atom;replacement.before=replaced.before
+    }
     list.splice(start,end-start,...inserted);changed.add(body.body)
     const map=step.getMap()
     for(const w of work){
@@ -221,11 +251,12 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
      w.pieces=units.get(w.body)!.map((u,k)=>u.before===undefined?{kind:'inserted',afterFrom:w.afterFrom+k,afterTo:w.afterFrom+k+1,step:u.step!}:{kind:'retained',beforeFrom:u.before,beforeTo:u.before+1,afterFrom:w.afterFrom+k,afterTo:w.afterFrom+k+1})
     }
    }else{
+    if(!(step instanceof AddMarkStep||step instanceof RemoveMarkStep))return no
     if(!families.includes(step.mark.type.name)||!canonicalAnnotation(step.mark))return no
     let valid=true
     before.nodesBetween(step.from,step.to,(n,pos)=>{
      if(!n.isInline)return
-     if(!n.isText){valid=false;return false}
+     if(!n.isText&&!canonicalImage(n)){valid=false;return false}
      const lo=Math.max(pos,step.from),hi=Math.min(pos+n.nodeSize,step.to)
      const w=work.find(w=>w.afterFrom<=lo&&w.afterTo>=hi)
      if(!w){valid=false;return false}
@@ -252,7 +283,7 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
    // Verify every projected unit against the actual final document, including
    // full Mark objects and attributes, before constructing source events.
    let offset=0,valid=true
-   target.forEach(n=>{for(let j=0;j<n.nodeSize;j++,offset++){const u=list[offset];if(!u||u.atom&&!u.atom.node.eq(n)||u.math&&!u.math.node.eq(n)||u.text!==(n.isText?n.text![j]!:u.leaf?.eq(n)?'\n':'')||!sameMarks(u.marks,n.marks))valid=false}})
+   target.forEach(n=>{for(let j=0;j<n.nodeSize;j++,offset++){const u=list[offset];if(!u||(u.image?!u.image.mark(u.marks).eq(n):u.atom&&!u.atom.node.eq(n))||u.math&&!u.math.node.eq(n)||u.text!==(n.isText?n.text![j]!:u.leaf?.eq(n)?'\n':'')||!sameMarks(u.marks,n.marks))valid=false}})
    if(!valid)return no
    const ranges:Envelope[]=[]
    for(let at=0;at<list.length;at++)for(const mark of list[at]!.marks){
@@ -379,7 +410,9 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     if(at===list.length)break
     const u=list[at]!,code=u.marks.some(m=>m.type.name==='code'),changedCode=u.before!==undefined&&u.beforeCode!==code
     if(u.before===undefined&&!u.marks.length&&u.text==='!'&&ordered.some(r=>r.keep&&r.mark.type.name==='link'&&r.from===at+1&&base.source.slice(r.old!.open.from,r.old!.open.to)==='[')){output.push({text:'\\!'});continue}
-    const edgeSpace=!code&&/^[ \t]$/.test(u.text)&&(((u.before===undefined||changedCode)&&(list.slice(list.slice(0,at).map(x=>x.text).lastIndexOf('\n')+1,at+1).every(x=>/^[ \t]$/.test(x.text))||list.slice(at,list.findIndex((x,i)=>i>at&&x.text==='\n')<0?undefined:list.findIndex((x,i)=>i>at&&x.text==='\n')).every(x=>/^[ \t]$/.test(x.text))))||ranges.some(r=>!r.keep&&['em','strong','strike_through','highlight'].includes(r.mark.type.name)&&r.from<=at&&at<r.to&&(list.slice(r.from,at+1).every(x=>/^[ \t]$/.test(x.text))||list.slice(at,r.to).every(x=>/^[ \t]$/.test(x.text)))))
+    const exposedSpace=u.before!==undefined&&u.raw&&/^[ \t]$/.test(base.source.slice(u.raw.from,u.raw.to))
+     &&[...removedImageAtoms].some(a=>a.body===id&&(a.pmTo<=u.before!&&list.slice(0,at+1).every(x=>/^[ \t]$/.test(x.text))||a.pmFrom>u.before!&&list.slice(at).every(x=>/^[ \t]$/.test(x.text))))
+    const edgeSpace=!code&&/^[ \t]$/.test(u.text)&&(exposedSpace||((u.before===undefined||changedCode)&&(list.slice(list.slice(0,at).map(x=>x.text).lastIndexOf('\n')+1,at+1).every(x=>/^[ \t]$/.test(x.text))||list.slice(at,list.findIndex((x,i)=>i>at&&x.text==='\n')<0?undefined:list.findIndex((x,i)=>i>at&&x.text==='\n')).every(x=>/^[ \t]$/.test(x.text))))||ranges.some(r=>!r.keep&&['em','strong','strike_through','highlight'].includes(r.mark.type.name)&&r.from<=at&&at<r.to&&(list.slice(r.from,at+1).every(x=>/^[ \t]$/.test(x.text))||list.slice(at,r.to).every(x=>/^[ \t]$/.test(x.text)))))
     if(adjacentEntities.has(at)){
      const scalar=(u.text+(list[at+1]?.text??'')).codePointAt(0)!
      output.push({text:'&#'+scalar+';'})
@@ -387,6 +420,12 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
      continue
     }
     if(edgeSpace){output.push({text:u.text===' '?'&#32;':'&#9;'});continue}
+    if(u.image){
+     if(code)return no
+     if(u.atom&&u.image.hasMarkup(u.atom.node.type,u.atom.node.attrs,u.image.marks))output.push({raw:{from:u.atom.sourceFrom,to:u.atom.sourceTo}})
+     else output.push({text:serializeSourceInlineBody(target.copy(Fragment.from(u.image.mark([]))),body.kind==='table-cell')})
+     continue
+    }
     if(u.before!==undefined){
      if(u.atom){
       const atom=u.atom,count=atom.pmTo-atom.pmFrom,group=list.slice(at,at+count)
@@ -418,6 +457,7 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
    const bodyEdits=editsFromOutput(base,body,output)
    if(!bodyEdits)return unmapped
    edits.push(...bodyEdits)
+   if(!list.length&&target.type.name==='paragraph'&&removedImages.has(id))edits.push(...emptyBodyEdits(base,facts,body,body.sourceTo))
   }
   edits.sort((a,b)=>a.from-b.from||a.to-b.to)
   if(edits.some((e,i)=>i>0&&edits[i-1]!.to>e.from))return no

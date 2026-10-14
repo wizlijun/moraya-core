@@ -106,9 +106,9 @@ it('partial math payload and mixed transactions reject atomically; subsequent le
  for(const tr of invalid){expect(applySourceBlockTransaction(b,tr).ok).toBe(false);expect(b.source).toBe(raw);expect(b.doc.toJSON()).toEqual(before);expect(b.revision).toBe(revision)}
  const r=applySourceBlockTransaction(b,state.tr.insertText('Z',1,2));expect(r.ok).toBe(true);if(r.ok)expect(r.session.source).toBe('__Zeep__ $x$\n\nOther\n');
 });
-it('new empty inline, unsupported mixed atom, and payload mutation after birth reject',()=>{
+it('new empty inline and payload mutation after birth reject',()=>{
  const b=open('__Keep__ $x'),s=b.doc.type.schema,state=EditorState.create({doc:b.doc}),from=6,to=8,math=s.nodes.math_inline!.create(null,s.text('x'));
- for(const tr of [state.tr.replaceWith(from,to,s.nodes.math_inline!.create()),state.tr.replaceWith(from,to,[math,s.nodes.image!.create({src:'/x'})]),state.tr.replaceWith(from,to,math).insertText('y',from+1,from+2)])expect(applySourceBlockTransaction(b,tr).ok).toBe(false);
+ for(const tr of [state.tr.replaceWith(from,to,s.nodes.math_inline!.create()),state.tr.replaceWith(from,to,math).insertText('y',from+1,from+2)])expect(applySourceBlockTransaction(b,tr).ok).toBe(false);
  expect(b.source).toBe('__Keep__ $x');
 });
 it('original steps, docs and occurrence bounds cannot be forged',()=>{
@@ -144,4 +144,9 @@ it('nonempty schema defaults never authorize an empty-source mathematical birth'
  const o=createSourceSession('',schema);if(!o.ok)throw Error(o.reason);const b=o.session,node=schema.nodes.math_block!.create();expect(node.hasMarkup(node.type)).toBe(true);expect(node.attrs.value).toBe('nonempty');
  const tr=EditorState.create({doc:b.doc}).tr.replaceWith(0,b.doc.content.size,node);let renders=0;
  expect(()=>applyStructuralTransaction(b,tr,()=>{renders++;throw Error('renderer reached')},()=>true)).toThrow();expect(renders).toBe(0);expect(applySourceBlockTransaction(b,tr).ok).toBe(false);
+});
+
+it('canonical math and image mixed birth preserves raw neighbour',()=>{
+ const b=open('__Keep__ $x'),s=b.doc.type.schema,tr=EditorState.create({doc:b.doc}).tr.replaceWith(6,8,[s.nodes.math_inline!.create(null,s.text('x')),s.nodes.image!.create({src:'/x'})]);
+ expect(open('__Keep__ $x$![](/x)').doc.eq(tr.doc)).toBe(true);const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(true);if(r.ok){expect(r.session.source).toBe('__Keep__ $x$![](/x)');expect(r.session.doc.eq(tr.doc)).toBe(true)}
 });

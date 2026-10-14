@@ -267,9 +267,11 @@ it('math rejects payload and selected marks; whole replacement has its own slice
  expect(b.source).toBe(raw);
  const retry=applySourceBlockTransaction(b,state.tr.addMark(1,3,mark));expect(retry.ok).toBe(true);if(retry.ok)expect(retry.session.source).toBe('**Al**pha $x$ Beta\n');
 });
-it('fix1 failed unrecognized atom keeps the whole mixed transaction atomic',()=>{
- const b=open('Alpha ![x](/u)\n'),tr=EditorState.create({doc:b.doc}).tr.addMark(1,3,b.doc.type.schema.marks.strong!.create()),r=applySourceBlockTransaction(b,tr);
- expect(r.ok).toBe(false);expect(r).not.toHaveProperty('session');expect(b.source).toBe('Alpha ![x](/u)\n');
+it('captured image keeps its raw occurrence while neighbouring text gains a mark',()=>{
+ const b=open('Alpha ![x](/u)\n'),tr=EditorState.create({doc:b.doc}).tr.addMark(1,3,b.doc.type.schema.marks.strong!.create()),steps=tr.steps.slice(),docs=tr.docs.slice(),revision=b.revision,protectedSources=b.protectedSources;
+ expect(open('**Al**pha ![x](/u)\n').doc.eq(tr.doc)).toBe(true);
+ const r=applySourceBlockTransaction(b,tr);expect(r.ok).toBe(true);if(r.ok){expect(r.session.source).toBe('**Al**pha ![x](/u)\n');expect(r.session.doc.eq(tr.doc)).toBe(true)}
+ expect(tr.steps).toEqual(steps);expect(tr.docs).toEqual(docs);expect(b.source).toBe('Alpha ![x](/u)\n');expect(b.revision).toBe(revision);expect(b.protectedSources).toBe(protectedSources);
 });
 
 it('fix1 real toggle splits code so crossing strong stays outside opaque syntax',()=>{

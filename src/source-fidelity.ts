@@ -1,4 +1,4 @@
-import {prepareInlineRecipe,prepareClosedFenceRecipe} from './source-inline-recipe'
+import {imageStepRange,prepareInlineRecipe,prepareClosedFenceRecipe} from './source-inline-recipe'
 import {capturedInlineRecipeFacts} from './markdown'
 import {prepareEmptyBodyTransaction} from './source-empty-body'
 import { prepareRawFileSourceEdits, createFileSourceSession, emptyFileParseWork, prepareVerifiedFileBase, finishUnchangedFile, prepareCandidate, preparePreservingSourceCandidate, type VerifiedFileBase } from './source-file-cache'
@@ -299,7 +299,7 @@ function splitsInlineText(position:ResolvedPos):boolean {
 }
 function authorizeStepRoots(before:PmNode,step:AddMarkStep|RemoveMarkStep|ReplaceStep,
  ownership:RootIndex,authorized:Set<number>,base:SourceSession,after:PmNode):void {
- const {from,to}=step
+ const {from,to}=imageStepRange(before,step)??step
  if(!Number.isInteger(from)||!Number.isInteger(to)||from<0||to<from||to>before.content.size)
   throw new UnsupportedBlockTransaction()
  const a=before.resolve(from),b=before.resolve(to)
@@ -337,7 +337,7 @@ function changedNaturalRoots(base:SourceSession,tr:Transaction,ownership:RootInd
   const step=tr.steps[i]!,prototype=Object.getPrototypeOf(step)
   // Exact prototypes exclude custom Step subclasses whose apply() need not
   // obey the range or structure guarantees of their inherited JSON format.
-  if(prototype!==ReplaceStep.prototype&&prototype!==AddMarkStep.prototype&&prototype!==RemoveMarkStep.prototype)
+  if(prototype!==ReplaceStep.prototype&&prototype!==AddMarkStep.prototype&&prototype!==RemoveMarkStep.prototype&&!imageStepRange(tr.docs[i]!,step))
    throw new UnsupportedBlockTransaction()
   const before=tr.docs[i]!
   if(before.childCount!==base.doc.childCount)throw new UnsupportedBlockTransaction()
@@ -517,7 +517,7 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
    const step=tr.steps[0] as ReplaceStep,from=base.doc.resolve(step.from)
    if(['paragraph','heading'].includes(from.parent.type.name)){
     if(step.from===step.to&&inlineFacts?.edges.some(e=>e.family==='link'&&(e.pmFrom===step.from||e.pmTo===step.from)))needsInline=true
-    if(inlineFacts?.atoms.some(a=>a.node.type.name==='math_inline'&&step.from<a.pmTo&&step.to>a.pmFrom))needsInline=true
+    if(inlineFacts?.atoms.some(a=>(a.node.type.name==='math_inline'||a.node.type.name==='image')&&step.from<a.pmTo&&step.to>a.pmFrom||a.node.type.name==='image'&&step.from===step.to&&(step.from===a.pmFrom||step.from===a.pmTo)))needsInline=true
     if(inlineFacts?.critic.some(c=>c.kind==='note_anchor'&&step.from<c.pmTo&&step.to>c.pmFrom))needsInline=true
     step.slice.content.forEach(n=>{if(!n.isText||!n.hasMarkup(n.type,null,step.from<step.to?(from.nodeAfter?.marks??from.marks()):from.marks()))needsInline=true})
     if(from.marks().some(m=>m.type.name==='code')&&step.slice.content.textBetween(0,step.slice.content.size).includes('`'))needsInline=true

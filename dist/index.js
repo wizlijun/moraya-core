@@ -3841,7 +3841,7 @@ for (const name of ["emphasis", "strikethrough", "mark"]) wrapCaptureRule(md.inl
   }
   return result;
 });
-for (const name of ["math_inline", "math_inline_double", "footnote_ref", "footnote_ref_orphan"]) wrapCaptureRule(md.inline.ruler, name, (original, state, silent) => {
+for (const name of ["math_inline", "math_inline_double", "footnote_ref", "footnote_ref_orphan", "image"]) wrapCaptureRule(md.inline.ruler, name, (original, state, silent) => {
   const from = state.pos, result = original(state, silent), trace = inlineStateOwners.get(state);
   if (result && !silent && trace) {
     const token = state.tokens.at(-1), view = sliceTrace(trace, from, state.pos);
@@ -3982,7 +3982,7 @@ function captureAtomEmission(state, token, delegate) {
   const frame = state.stack.at(-1), slot = frame.content.length, pmFrom = captureCursor(state);
   delegate();
   const node = frame.content[slot], pmTo = captureCursor(state);
-  if (state.stack.at(-1) !== frame || frame.content.length !== slot + 1 || !node || !["math_inline", "note_anchor", "hardbreak", "footnote_ref"].includes(node.type.name) || !node.isAtom || node.nodeSize !== pmTo - pmFrom) return;
+  if (state.stack.at(-1) !== frame || frame.content.length !== slot + 1 || !node || !["math_inline", "note_anchor", "hardbreak", "footnote_ref", "image"].includes(node.type.name) || !node.isAtom || node.nodeSize !== pmTo - pmFrom) return;
   collector.atoms.push({ body: -1, pmFrom, pmTo, sourceFrom: raw.from, sourceTo: raw.to, node });
   if (critic?.kind === "note_anchor" && node.type.name === "note_anchor") collector.critic.push({ ...critic, id: collector.critic.length, body: -1, pmFrom, pmTo, note: node.attrs.note });
 }
@@ -4909,7 +4909,8 @@ var serializer = new MarkdownSerializer(
       const destination = serializeImageDestination(node.attrs.src || "");
       const title = node.attrs.title;
       if (title) {
-        state.write(`![${alt}](${destination} "${serializeImageTitle(title)}")`);
+        const encoded = serializeImageTitle(title);
+        state.write(`![${alt}](${destination} "${state.options.escapeExtraCharacters ? encoded.replace(/\|/g, "\\|") : encoded}")`);
       } else {
         state.write(`![${alt}](${destination})`);
       }
@@ -8447,7 +8448,7 @@ async function createEditor(opts) {
 
 // src/source-inline-recipe.ts
 import { Fragment as Fragment3 } from "prosemirror-model";
-import { AddMarkStep, RemoveMarkStep, ReplaceStep } from "prosemirror-transform";
+import { AddMarkStep, RemoveMarkStep, ReplaceStep, AttrStep, AddNodeMarkStep, RemoveNodeMarkStep } from "prosemirror-transform";
 var families = ["em", "strong", "strike_through", "highlight", "code", "link", "annotation"];
 function canonicalNote(node) {
   return node.type === node.type.schema.nodes.note_anchor && node.isLeaf && node.nodeSize === 1 && typeof node.attrs.note === "string" && !/[\r\n]|<<}/.test(node.attrs.note) && node.eq(node.type.create({ note: node.attrs.note }, null, node.marks));
@@ -8455,13 +8456,24 @@ function canonicalNote(node) {
 function canonicalMath(node) {
   return node.type === node.type.schema.nodes.math_inline && node.hasMarkup(node.type) && node.childCount === 1 && node.firstChild.isText && !node.firstChild.marks.length && !!node.textContent && !/[\r\n$]/.test(node.textContent);
 }
+function canonicalImage(node) {
+  return node.type === node.type.schema.nodes.image && node.isInline && node.isLeaf && node.nodeSize === 1 && ["src", "alt", "title"].every((key) => typeof node.attrs[key] === "string" && !/[\r\n]/.test(node.attrs[key])) && node.eq(node.type.create({ src: node.attrs.src, alt: node.attrs.alt, title: node.attrs.title }, null, node.marks));
+}
+function imageStepRange(doc2, step) {
+  const p = Object.getPrototypeOf(step);
+  if (p !== AttrStep.prototype && p !== AddNodeMarkStep.prototype && p !== RemoveNodeMarkStep.prototype) return;
+  const s = step;
+  if (!Number.isInteger(s.pos) || s.pos < 0 || s.pos >= doc2.content.size) return;
+  const node = doc2.nodeAt(s.pos);
+  if (node && canonicalImage(node) && (!(s instanceof AttrStep) || ["src", "alt", "title"].includes(s.attr))) return { from: s.pos, to: s.pos + 1 };
+}
 function canonicalAnnotation(mark) {
   return mark.type.name !== "annotation" || typeof mark.attrs.note === "string" && !/[\r\n]|<<}/.test(mark.attrs.note) && mark.eq(mark.type.create({ note: mark.attrs.note }));
 }
-function textOnly(node) {
+function textOnly(node, images = false) {
   let ok = true;
   node.forEach((n) => {
-    if (!n.isText || n.marks.some((m) => !families.includes(m.type.name))) ok = false;
+    if (!(n.isText || images && canonicalImage(n)) || n.marks.some((m) => !families.includes(m.type.name))) ok = false;
   });
   return ok;
 }
@@ -8469,7 +8481,7 @@ function audit(base, tr) {
   if (!tr.before.eq(base.doc) || tr.docs.length !== tr.steps.length) return false;
   for (let i = 0; i < tr.steps.length; i++) {
     const step = tr.steps[i], before = tr.docs[i], after = tr.docs[i + 1] ?? tr.doc, p = Object.getPrototypeOf(step);
-    if (p !== ReplaceStep.prototype && p !== AddMarkStep.prototype && p !== RemoveMarkStep.prototype) return false;
+    if (p !== ReplaceStep.prototype && p !== AddMarkStep.prototype && p !== RemoveMarkStep.prototype && !imageStepRange(before, step)) return false;
     if (i === 0 && !before.eq(base.doc)) return false;
     const result = step.apply(before);
     if (result.failed || !result.doc?.eq(after)) return false;
@@ -8490,7 +8502,7 @@ function prepareEmptyInlineContent(base, tr, fact) {
     }
     const parent = tr.doc.resolve(step.from).parent;
     if (tr.steps.length === 1 && step.slice.content.childCount === 1 && canonicalNote(step.slice.content.firstChild) && !step.slice.content.firstChild.marks.length && parent.sameMarkup(fact.parent) && parent.content.eq(step.slice.content)) return { kind: "ready", body: "{>>" + parent.firstChild.attrs.note + "<<}" };
-    if (!parent.sameMarkup(fact.parent) || !textOnly(parent) || /[\r\n]/.test(parent.textContent)) return no();
+    if (!parent.sameMarkup(fact.parent) || !textOnly(parent, true) || /[\r\n]/.test(parent.textContent)) return no();
     const resolved = base.doc.resolve(fact.pmAt), cell = resolved.depth > 0 && ["table_cell", "table_header"].includes(resolved.node(resolved.depth - 1).type.name);
     const children2 = [];
     parent.forEach((node) => children2.push(cell && node.marks.some((m) => m.type.name === "code") ? node.type.schema.text(node.text.replace(/\|/g, "\\|"), node.marks) : node));
@@ -8571,6 +8583,16 @@ function noteEdit(base, fact, note) {
   if (right > 0 && /[\uD800-\uDBFF]/.test(old[old.length - right - 1] ?? "") && /[\uDC00-\uDFFF]/.test(old[old.length - right] ?? "")) right--;
   return { from: fact.noteFrom + left, to: fact.noteTo - right, text: note.slice(left, note.length - right) };
 }
+function emptyBodyEdits(base, facts, body, contentTo) {
+  const edits = [];
+  const separator = facts.separators.find((s) => s.right === body.body) ?? facts.separators.find((s) => s.left === body.body);
+  const definitionSeparator = facts.definitionSeparators.find((s) => s.body === body.body && s.side === "after");
+  if (separator) edits.push({ ...separator.range, text: "" });
+  else if (definitionSeparator) edits.push({ ...definitionSeparator.range, text: "" });
+  const root = base.roots.find((r2) => r2.tokenType === "paragraph_open" && r2.pmFrom + 1 === body.pmFrom && r2.pmTo - 1 === body.pmTo && r2.tailFrom === body.sourceTo && contentTo === r2.tailFrom);
+  if (root && /^(?:\r\n|\r|\n)$/.test(base.source.slice(root.tailFrom, root.sourceTo))) edits.push({ from: root.tailFrom, to: root.sourceTo, text: "" });
+  return edits;
+}
 function preparePointRecipe(base, tr, facts) {
   const no = { ok: false, reason: "unsupported-step" };
   const touches = tr.steps.some((s) => s instanceof ReplaceStep && (facts.critic.some((c2) => c2.kind === "note_anchor" && s.from < c2.pmTo && s.to > c2.pmFrom) || s.slice.content.firstChild?.type.name === "note_anchor"));
@@ -8589,12 +8611,7 @@ function preparePointRecipe(base, tr, facts) {
       const edits = [{ from: fact.syntaxFrom, to: fact.syntaxTo, text: "" }, ...emptyEdges.flatMap((e) => [{ ...e.open, text: "" }, { ...e.close, text: "" }])];
       const contentTo = Math.max(fact.syntaxTo, ...emptyEdges.map((e) => e.close.to));
       if (body2.pmFrom === fact.pmFrom && body2.pmTo === fact.pmTo && a.parent.type.name === "paragraph") {
-        const separator = facts.separators.find((s) => s.right === fact.body) ?? facts.separators.find((s) => s.left === fact.body);
-        const definitionSeparator = facts.definitionSeparators.find((s) => s.body === fact.body && s.side === "after");
-        if (separator) edits.push({ ...separator.range, text: "" });
-        else if (definitionSeparator) edits.push({ ...definitionSeparator.range, text: "" });
-        const root = base.roots.find((r2) => r2.tokenType === "paragraph_open" && r2.pmFrom + 1 === body2.pmFrom && r2.pmTo - 1 === body2.pmTo && r2.tailFrom === body2.sourceTo && contentTo === r2.tailFrom);
-        if (root && /^(?:\r\n|\r|\n)$/.test(base.source.slice(root.tailFrom, root.sourceTo))) edits.push({ from: root.tailFrom, to: root.sourceTo, text: "" });
+        edits.push(...emptyBodyEdits(base, facts, body2, contentTo));
       }
       edits.sort((x, y) => x.from - y.from);
       return { ok: true, edits, changedBodies: [fact.body] };
@@ -8621,7 +8638,7 @@ function prepareInlineRecipe(base, tr, facts) {
     const pointRecipe = preparePointRecipe(base, tr, facts);
     if (pointRecipe) return pointRecipe;
     const work = facts.bodies.map((b) => ({ body: b.body, beforeFrom: b.pmFrom, beforeTo: b.pmTo, afterFrom: b.pmFrom, afterTo: b.pmTo, pieces: [{ kind: "retained", beforeFrom: b.pmFrom, beforeTo: b.pmTo, afterFrom: b.pmFrom, afterTo: b.pmTo }], dirtyEdges: [] }));
-    const units = /* @__PURE__ */ new Map(), changed = /* @__PURE__ */ new Set();
+    const units = /* @__PURE__ */ new Map(), changed = /* @__PURE__ */ new Set(), removedImages = /* @__PURE__ */ new Set(), removedImageAtoms = /* @__PURE__ */ new Set();
     for (const b of facts.bodies) {
       const list = [];
       base.doc.resolve(b.pmFrom).parent.forEach((node, offset) => {
@@ -8630,20 +8647,33 @@ function prepareInlineRecipe(base, tr, facts) {
           const before = b.pmFrom + offset + i;
           const span = base.textSpans.find((s) => s.pmFrom <= before && s.pmTo > before);
           const from = span && point(span, before), to = span && point(span, before + 1);
-          list.push({ text: node.isText ? node.text[i] : "", before, beforeCode: node.marks.some((m) => m.type.name === "code"), marks: node.marks, ...atom ? { atom } : {}, ...from !== void 0 && to !== void 0 ? { raw: { from, to } } : {} });
+          list.push({ text: node.isText ? node.text[i] : "", before, beforeCode: node.marks.some((m) => m.type.name === "code"), marks: node.marks, ...atom ? { atom, ...canonicalImage(node) ? { image: node } : {} } : {}, ...from !== void 0 && to !== void 0 ? { raw: { from, to } } : {} });
         }
       });
       units.set(b.body, list);
     }
     for (let i = 0; i < tr.steps.length; i++) {
       const step = tr.steps[i], before = tr.docs[i];
-      if (step instanceof ReplaceStep) {
+      const imageRange = imageStepRange(before, step);
+      if (imageRange) {
+        const w = work.find((w2) => w2.afterFrom <= imageRange.from && w2.afterTo >= imageRange.to), after = tr.docs[i + 1] ?? tr.doc, node = after.nodeAt(imageRange.from);
+        if (!w || !node || !canonicalImage(node)) return no;
+        const u = units.get(w.body)[imageRange.from - w.afterFrom];
+        if (!u.image) return no;
+        u.image = node;
+        u.marks = node.marks;
+        changed.add(w.body);
+      } else if (step instanceof ReplaceStep) {
         const a = before.resolve(step.from), z = before.resolve(step.to);
         if (!a.sameParent(z) || !a.parent.inlineContent || step.slice.openStart || step.slice.openEnd || step.structure) return no;
         const body = work.find((w) => w.afterFrom <= step.from && w.afterTo >= step.to);
         if (!body) return no;
         let inserted = [], valid = true;
         step.slice.content.forEach((n) => {
+          if (canonicalImage(n)) {
+            inserted.push({ text: "", image: n, marks: n.marks, step: i });
+            return;
+          }
           if (canonicalMath(n)) {
             const math = { node: n };
             for (let k = 0; k < n.nodeSize; k++) inserted.push({ text: "", math, marks: n.marks, step: i });
@@ -8660,12 +8690,22 @@ function prepareInlineRecipe(base, tr, facts) {
         const list = units.get(body.body), start = step.from - body.afterFrom, end = step.to - body.afterFrom;
         for (let k = start; k < end; k++) {
           const u = list[k];
+          if (u.image) {
+            removedImages.add(body.body);
+            if (u.atom) removedImageAtoms.add(u.atom);
+            continue;
+          }
           if (u.text) continue;
           if (u.atom?.node.type.name !== "math_inline" && !u.math) return no;
           const first = list.findIndex((x) => u.atom ? x.atom === u.atom : x.math === u.math), size = u.atom ? u.atom.pmTo - u.atom.pmFrom : u.math.node.nodeSize;
           if (first < start || first + size > end) return no;
         }
         if (start === end && (list[start]?.atom && list[start].atom === list[start - 1]?.atom || list[start]?.math && list[start].math === list[start - 1]?.math)) return no;
+        const replaced = list[start], replacement = inserted[0];
+        if (end === start + 1 && inserted.length === 1 && replacement?.image && replaced?.image && replaced.atom && replaced.before !== void 0 && replacement.image.hasMarkup(replaced.image.type, replaced.image.attrs, replacement.marks)) {
+          replacement.atom = replaced.atom;
+          replacement.before = replaced.before;
+        }
         list.splice(start, end - start, ...inserted);
         changed.add(body.body);
         const map = step.getMap();
@@ -8675,11 +8715,12 @@ function prepareInlineRecipe(base, tr, facts) {
           w.pieces = units.get(w.body).map((u, k) => u.before === void 0 ? { kind: "inserted", afterFrom: w.afterFrom + k, afterTo: w.afterFrom + k + 1, step: u.step } : { kind: "retained", beforeFrom: u.before, beforeTo: u.before + 1, afterFrom: w.afterFrom + k, afterTo: w.afterFrom + k + 1 });
         }
       } else {
+        if (!(step instanceof AddMarkStep || step instanceof RemoveMarkStep)) return no;
         if (!families.includes(step.mark.type.name) || !canonicalAnnotation(step.mark)) return no;
         let valid = true;
         before.nodesBetween(step.from, step.to, (n, pos) => {
           if (!n.isInline) return;
-          if (!n.isText) {
+          if (!n.isText && !canonicalImage(n)) {
             valid = false;
             return false;
           }
@@ -8713,7 +8754,7 @@ function prepareInlineRecipe(base, tr, facts) {
       target.forEach((n) => {
         for (let j = 0; j < n.nodeSize; j++, offset++) {
           const u = list[offset];
-          if (!u || u.atom && !u.atom.node.eq(n) || u.math && !u.math.node.eq(n) || u.text !== (n.isText ? n.text[j] : u.leaf?.eq(n) ? "\n" : "") || !sameMarks(u.marks, n.marks)) valid = false;
+          if (!u || (u.image ? !u.image.mark(u.marks).eq(n) : u.atom && !u.atom.node.eq(n)) || u.math && !u.math.node.eq(n) || u.text !== (n.isText ? n.text[j] : u.leaf?.eq(n) ? "\n" : "") || !sameMarks(u.marks, n.marks)) valid = false;
         }
       });
       if (!valid) return no;
@@ -8885,7 +8926,8 @@ function prepareInlineRecipe(base, tr, facts) {
           output.push({ text: "\\!" });
           continue;
         }
-        const edgeSpace = !code2 && /^[ \t]$/.test(u.text) && ((u.before === void 0 || changedCode) && (list.slice(list.slice(0, at).map((x) => x.text).lastIndexOf("\n") + 1, at + 1).every((x) => /^[ \t]$/.test(x.text)) || list.slice(at, list.findIndex((x, i) => i > at && x.text === "\n") < 0 ? void 0 : list.findIndex((x, i) => i > at && x.text === "\n")).every((x) => /^[ \t]$/.test(x.text))) || ranges.some((r2) => !r2.keep && ["em", "strong", "strike_through", "highlight"].includes(r2.mark.type.name) && r2.from <= at && at < r2.to && (list.slice(r2.from, at + 1).every((x) => /^[ \t]$/.test(x.text)) || list.slice(at, r2.to).every((x) => /^[ \t]$/.test(x.text)))));
+        const exposedSpace = u.before !== void 0 && u.raw && /^[ \t]$/.test(base.source.slice(u.raw.from, u.raw.to)) && [...removedImageAtoms].some((a) => a.body === id && (a.pmTo <= u.before && list.slice(0, at + 1).every((x) => /^[ \t]$/.test(x.text)) || a.pmFrom > u.before && list.slice(at).every((x) => /^[ \t]$/.test(x.text))));
+        const edgeSpace = !code2 && /^[ \t]$/.test(u.text) && (exposedSpace || (u.before === void 0 || changedCode) && (list.slice(list.slice(0, at).map((x) => x.text).lastIndexOf("\n") + 1, at + 1).every((x) => /^[ \t]$/.test(x.text)) || list.slice(at, list.findIndex((x, i) => i > at && x.text === "\n") < 0 ? void 0 : list.findIndex((x, i) => i > at && x.text === "\n")).every((x) => /^[ \t]$/.test(x.text))) || ranges.some((r2) => !r2.keep && ["em", "strong", "strike_through", "highlight"].includes(r2.mark.type.name) && r2.from <= at && at < r2.to && (list.slice(r2.from, at + 1).every((x) => /^[ \t]$/.test(x.text)) || list.slice(at, r2.to).every((x) => /^[ \t]$/.test(x.text)))));
         if (adjacentEntities.has(at)) {
           const scalar = (u.text + (list[at + 1]?.text ?? "")).codePointAt(0);
           output.push({ text: "&#" + scalar + ";" });
@@ -8894,6 +8936,12 @@ function prepareInlineRecipe(base, tr, facts) {
         }
         if (edgeSpace) {
           output.push({ text: u.text === " " ? "&#32;" : "&#9;" });
+          continue;
+        }
+        if (u.image) {
+          if (code2) return no;
+          if (u.atom && u.image.hasMarkup(u.atom.node.type, u.atom.node.attrs, u.image.marks)) output.push({ raw: { from: u.atom.sourceFrom, to: u.atom.sourceTo } });
+          else output.push({ text: serializeSourceInlineBody(target.copy(Fragment3.from(u.image.mark([]))), body.kind === "table-cell") });
           continue;
         }
         if (u.before !== void 0) {
@@ -8928,6 +8976,7 @@ function prepareInlineRecipe(base, tr, facts) {
       const bodyEdits = editsFromOutput(base, body, output);
       if (!bodyEdits) return unmapped;
       edits.push(...bodyEdits);
+      if (!list.length && target.type.name === "paragraph" && removedImages.has(id)) edits.push(...emptyBodyEdits(base, facts, body, body.sourceTo));
     }
     edits.sort((a, b) => a.from - b.from || a.to - b.to);
     if (edits.some((e, i) => i > 0 && edits[i - 1].to > e.from)) return no;
@@ -8941,7 +8990,7 @@ function prepareInlineRecipe(base, tr, facts) {
 import { ReplaceStep as ReplaceStep3, AddMarkStep as AddMarkStep3, RemoveMarkStep as RemoveMarkStep3 } from "prosemirror-transform";
 
 // src/source-structure.ts
-import { AddMarkStep as AddMarkStep2, RemoveMarkStep as RemoveMarkStep2, ReplaceStep as ReplaceStep2, ReplaceAroundStep, AttrStep, AddNodeMarkStep, RemoveNodeMarkStep } from "prosemirror-transform";
+import { AddMarkStep as AddMarkStep2, RemoveMarkStep as RemoveMarkStep2, ReplaceStep as ReplaceStep2, ReplaceAroundStep, AttrStep as AttrStep2, AddNodeMarkStep as AddNodeMarkStep2, RemoveNodeMarkStep as RemoveNodeMarkStep2 } from "prosemirror-transform";
 var UnsupportedSourceStructure = class extends Error {
 };
 function isSourceListBoundary(node) {
@@ -8968,7 +9017,7 @@ function splitsText(doc2, pos) {
   return !!p.textOffset && !!n?.isText && /[\uD800-\uDBFF]/.test(n.text[p.textOffset - 1]) && /[\uDC00-\uDFFF]/.test(n.text[p.textOffset]);
 }
 function stepRange(doc2, step) {
-  if (step instanceof AttrStep || step instanceof AddNodeMarkStep || step instanceof RemoveNodeMarkStep) {
+  if (step instanceof AttrStep2 || step instanceof AddNodeMarkStep2 || step instanceof RemoveNodeMarkStep2) {
     if (!Number.isInteger(step.pos) || step.pos < 0 || step.pos >= doc2.content.size) fail();
     const node = doc2.nodeAt(step.pos);
     if (!node) fail();
@@ -8983,7 +9032,7 @@ function classifyTransaction(base, tr) {
   for (let i = 0; i < tr.steps.length; i++) {
     const step = tr.steps[i], proto = Object.getPrototypeOf(step), before = tr.docs[i];
     if (!before || before.type.schema !== base.doc.type.schema) fail();
-    if (proto !== ReplaceStep2.prototype && proto !== AddMarkStep2.prototype && proto !== RemoveMarkStep2.prototype && proto !== ReplaceAroundStep.prototype && proto !== AttrStep.prototype && proto !== AddNodeMarkStep.prototype && proto !== RemoveNodeMarkStep.prototype) fail();
+    if (proto !== ReplaceStep2.prototype && proto !== AddMarkStep2.prototype && proto !== RemoveMarkStep2.prototype && proto !== ReplaceAroundStep.prototype && proto !== AttrStep2.prototype && proto !== AddNodeMarkStep2.prototype && proto !== RemoveNodeMarkStep2.prototype) fail();
     const { from, to } = stepRange(before, step);
     childWindow(before, from, to);
     if (splitsText(before, from) || splitsText(before, to)) fail();
@@ -8991,8 +9040,9 @@ function classifyTransaction(base, tr) {
       const around = step;
       if (!Number.isInteger(around.gapFrom) || !Number.isInteger(around.gapTo) || around.gapFrom < from || around.gapTo < around.gapFrom || around.gapTo > to || !Number.isInteger(around.insert) || around.insert < 0 || around.insert > around.slice.size || splitsText(before, around.gapFrom) || splitsText(before, around.gapTo)) fail();
       structural = true;
-    } else if (proto === AttrStep.prototype || proto === AddNodeMarkStep.prototype || proto === RemoveNodeMarkStep.prototype) structural = true;
-    else if (proto === ReplaceStep2.prototype) {
+    } else if (proto === AttrStep2.prototype || proto === AddNodeMarkStep2.prototype || proto === RemoveNodeMarkStep2.prototype) {
+      if (!imageStepRange(before, step)) structural = true;
+    } else if (proto === ReplaceStep2.prototype) {
       const s = step, a = before.resolve(from), b = before.resolve(to);
       let inline = true;
       s.slice.content.forEach((n) => {
@@ -9086,7 +9136,7 @@ function stepWindow(before, after, step, ledger) {
 function advanceLedger(ledger, before, after, step, index) {
   const w = stepWindow(before, after, step, ledger), range = stepRange(before, step);
   const isLocal = !(step instanceof ReplaceStep2 || step instanceof ReplaceAroundStep);
-  const kind = step instanceof ReplaceAroundStep ? "around" : step instanceof ReplaceStep2 ? "replace" : step instanceof AttrStep ? "attr" : step instanceof AddNodeMarkStep || step instanceof RemoveNodeMarkStep ? "node-mark" : "mark";
+  const kind = step instanceof ReplaceAroundStep ? "around" : step instanceof ReplaceStep2 ? "replace" : step instanceof AttrStep2 ? "attr" : step instanceof AddNodeMarkStep2 || step instanceof RemoveNodeMarkStep2 ? "node-mark" : "mark";
   const witness = {
     step: index,
     kind,
@@ -9561,7 +9611,7 @@ function prepareEmptyParagraphEdits(base, tr, origin, body) {
   if (!first || Object.getPrototypeOf(first) !== ReplaceStep2.prototype || tr.steps.length !== tr.docs.length || !tr.before.eq(base.doc)) fail();
   const initial = first, parent = base.doc.resolve(initial.from).parent;
   initial.slice.content.forEach((node) => {
-    if (!node.isText && (tr.steps.length !== 1 || initial.slice.content.childCount !== 1 || node.type !== base.doc.type.schema.nodes.note_anchor || !node.isLeaf || node.nodeSize !== 1 || node.marks.length || typeof node.attrs.note !== "string" || /[\r\n]|<<}/.test(node.attrs.note) || !node.eq(node.type.create({ note: node.attrs.note })))) fail();
+    if (!node.isText && !canonicalImage(node) && (tr.steps.length !== 1 || initial.slice.content.childCount !== 1 || node.type !== base.doc.type.schema.nodes.note_anchor || !node.isLeaf || node.nodeSize !== 1 || node.marks.length || typeof node.attrs.note !== "string" || /[\r\n]|<<}/.test(node.attrs.note) || !node.eq(node.type.create({ note: node.attrs.note })))) fail();
   });
   if (initial.from !== initial.to || initial.slice.openStart || initial.slice.openEnd || !initial.slice.size || initial.structure || parent.type.name !== "paragraph" || parent.content.size) fail();
   for (let i = 0; i < tr.steps.length; i++) {
@@ -9588,7 +9638,8 @@ function prepareEmptyParagraphEdits(base, tr, origin, body) {
   const tail = base.source.slice(span.to), next = slots.find((s) => s.from >= span.to && ["body", "protected"].includes(s.kind));
   const between = next ? base.source.slice(span.to, next.from) : tail;
   const previous = slots.filter((s) => s.to <= span.from && ["body", "protected"].includes(s.kind)).at(-1);
-  const prefix = chosen && previous && !/[\r\n][ \t]*(?:\r\n|\r|\n)$/.test(base.source.slice(previous.from, span.from)) ? eol : "";
+  const unit = chosen && base.layout.blankLines[chosen.id], fallback = base.layout.fallback;
+  const prefix = chosen && (previous && !/[\r\n][ \t]*(?:\r\n|\r|\n)$/.test(base.source.slice(previous.from, span.from)) || unit?.role === "empty-paragraph" && fallback && fallback.emission.childTo <= unit.emission.childFrom) ? eol : "";
   const suffix = origin.kind === "blank" ? next && !/[\r\n]/.test(between) ? eol : "" : tail ? next && next.from === span.to ? eol + eol : eol : "";
   const claims = [{ ...span, kind: chosen ? "blank" : "anchor", step: 0, ...chosen ? { unitId: chosen.id } : {} }];
   const pieces = [], kept = [];
@@ -10254,7 +10305,7 @@ function splitsInlineText(position) {
   return node.isText && splitsSurrogate(node.text, position.textOffset);
 }
 function authorizeStepRoots(before, step, ownership, authorized, base, after) {
-  const { from, to } = step;
+  const { from, to } = imageStepRange(before, step) ?? step;
   if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to < from || to > before.content.size)
     throw new UnsupportedBlockTransaction();
   const a = before.resolve(from), b = before.resolve(to);
@@ -10286,7 +10337,7 @@ function changedNaturalRoots(base, tr, ownership) {
   const authorized = /* @__PURE__ */ new Set();
   for (let i = 0; i < tr.steps.length; i++) {
     const step = tr.steps[i], prototype = Object.getPrototypeOf(step);
-    if (prototype !== ReplaceStep4.prototype && prototype !== AddMarkStep4.prototype && prototype !== RemoveMarkStep4.prototype)
+    if (prototype !== ReplaceStep4.prototype && prototype !== AddMarkStep4.prototype && prototype !== RemoveMarkStep4.prototype && !imageStepRange(tr.docs[i], step))
       throw new UnsupportedBlockTransaction();
     const before = tr.docs[i];
     if (before.childCount !== base.doc.childCount) throw new UnsupportedBlockTransaction();
@@ -10479,7 +10530,7 @@ function applySourceBlockTransaction(base, tr) {
       const step = tr.steps[0], from = base.doc.resolve(step.from);
       if (["paragraph", "heading"].includes(from.parent.type.name)) {
         if (step.from === step.to && inlineFacts2?.edges.some((e) => e.family === "link" && (e.pmFrom === step.from || e.pmTo === step.from))) needsInline = true;
-        if (inlineFacts2?.atoms.some((a) => a.node.type.name === "math_inline" && step.from < a.pmTo && step.to > a.pmFrom)) needsInline = true;
+        if (inlineFacts2?.atoms.some((a) => (a.node.type.name === "math_inline" || a.node.type.name === "image") && step.from < a.pmTo && step.to > a.pmFrom || a.node.type.name === "image" && step.from === step.to && (step.from === a.pmFrom || step.from === a.pmTo))) needsInline = true;
         if (inlineFacts2?.critic.some((c2) => c2.kind === "note_anchor" && step.from < c2.pmTo && step.to > c2.pmFrom)) needsInline = true;
         step.slice.content.forEach((n) => {
           if (!n.isText || !n.hasMarkup(n.type, null, step.from < step.to ? from.nodeAfter?.marks ?? from.marks() : from.marks())) needsInline = true;

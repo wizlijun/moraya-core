@@ -3932,7 +3932,7 @@ for (const name of ["emphasis", "strikethrough", "mark"]) wrapCaptureRule(md.inl
   }
   return result;
 });
-for (const name of ["math_inline", "math_inline_double", "footnote_ref", "footnote_ref_orphan"]) wrapCaptureRule(md.inline.ruler, name, (original, state, silent) => {
+for (const name of ["math_inline", "math_inline_double", "footnote_ref", "footnote_ref_orphan", "image"]) wrapCaptureRule(md.inline.ruler, name, (original, state, silent) => {
   const from = state.pos, result = original(state, silent), trace = inlineStateOwners.get(state);
   if (result && !silent && trace) {
     const token = state.tokens.at(-1), view = sliceTrace(trace, from, state.pos);
@@ -4073,7 +4073,7 @@ function captureAtomEmission(state, token, delegate) {
   const frame = state.stack.at(-1), slot = frame.content.length, pmFrom = captureCursor(state);
   delegate();
   const node = frame.content[slot], pmTo = captureCursor(state);
-  if (state.stack.at(-1) !== frame || frame.content.length !== slot + 1 || !node || !["math_inline", "note_anchor", "hardbreak", "footnote_ref"].includes(node.type.name) || !node.isAtom || node.nodeSize !== pmTo - pmFrom) return;
+  if (state.stack.at(-1) !== frame || frame.content.length !== slot + 1 || !node || !["math_inline", "note_anchor", "hardbreak", "footnote_ref", "image"].includes(node.type.name) || !node.isAtom || node.nodeSize !== pmTo - pmFrom) return;
   collector.atoms.push({ body: -1, pmFrom, pmTo, sourceFrom: raw.from, sourceTo: raw.to, node });
   if (critic?.kind === "note_anchor" && node.type.name === "note_anchor") collector.critic.push({ ...critic, id: collector.critic.length, body: -1, pmFrom, pmTo, note: node.attrs.note });
 }
@@ -4936,7 +4936,8 @@ var serializer = new MarkdownSerializer(
       const destination = serializeImageDestination(node.attrs.src || "");
       const title = node.attrs.title;
       if (title) {
-        state.write(`![${alt}](${destination} "${serializeImageTitle(title)}")`);
+        const encoded = serializeImageTitle(title);
+        state.write(`![${alt}](${destination} "${state.options.escapeExtraCharacters ? encoded.replace(/\|/g, "\\|") : encoded}")`);
       } else {
         state.write(`![${alt}](${destination})`);
       }

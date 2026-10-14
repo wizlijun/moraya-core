@@ -1,6 +1,7 @@
 import type {Node as PMNode} from 'prosemirror-model'
 import type {Transaction} from 'prosemirror-state'
 import {AddMarkStep,RemoveMarkStep,ReplaceStep,ReplaceAroundStep,AttrStep,AddNodeMarkStep,RemoveNodeMarkStep} from 'prosemirror-transform'
+import {canonicalImage,imageStepRange} from './source-inline-recipe'
 import type {SourceSession} from './source-fidelity'
 import type {SourceEdit,SourceRoot} from './source-ownership'
 
@@ -83,7 +84,7 @@ export function classifyTransaction(base:SourceSession,tr:Transaction):'stable'|
     ||around.insert<0||around.insert>around.slice.size
     ||splitsText(before,around.gapFrom)||splitsText(before,around.gapTo))fail()
    structural=true
-  }else if(proto===AttrStep.prototype||proto===AddNodeMarkStep.prototype||proto===RemoveNodeMarkStep.prototype)structural=true
+  }else if(proto===AttrStep.prototype||proto===AddNodeMarkStep.prototype||proto===RemoveNodeMarkStep.prototype){if(!imageStepRange(before,step))structural=true}
   else if(proto===ReplaceStep.prototype){
    const s=step as ReplaceStep,a=before.resolve(from),b=before.resolve(to)
    let inline=true;s.slice.content.forEach(n=>{if(!n.isInline)inline=false})
@@ -562,7 +563,7 @@ export function prepareEmptyParagraphEdits(base:SourceSession,tr:Transaction,
  const ledger=createLedger(base),first=tr.steps[0];
  if(!first||Object.getPrototypeOf(first)!==ReplaceStep.prototype||tr.steps.length!==tr.docs.length||!tr.before.eq(base.doc))fail()
  const initial=first as ReplaceStep,parent=base.doc.resolve(initial.from).parent
- initial.slice.content.forEach(node=>{if(!node.isText&&(tr.steps.length!==1||initial.slice.content.childCount!==1||node.type!==base.doc.type.schema.nodes.note_anchor||!node.isLeaf||node.nodeSize!==1||node.marks.length||typeof node.attrs.note!=='string'||/[\r\n]|<<}/.test(node.attrs.note)||!node.eq(node.type.create({note:node.attrs.note}))))fail()})
+ initial.slice.content.forEach(node=>{if(!node.isText&&!canonicalImage(node)&&(tr.steps.length!==1||initial.slice.content.childCount!==1||node.type!==base.doc.type.schema.nodes.note_anchor||!node.isLeaf||node.nodeSize!==1||node.marks.length||typeof node.attrs.note!=='string'||/[\r\n]|<<}/.test(node.attrs.note)||!node.eq(node.type.create({note:node.attrs.note}))))fail()})
  if(initial.from!==initial.to||initial.slice.openStart||initial.slice.openEnd||!initial.slice.size||(initial as ReplaceStep&{structure:boolean}).structure||parent.type.name!=='paragraph'||parent.content.size)fail()
  for(let i=0;i<tr.steps.length;i++){
   const step=tr.steps[i]!,before=tr.docs[i]!,after=tr.docs[i+1]??tr.doc
@@ -590,7 +591,9 @@ export function prepareEmptyParagraphEdits(base:SourceSession,tr:Transaction,
  const tail=base.source.slice(span.to),next=slots.find(s=>s.from>=span.to&&['body','protected'].includes(s.kind))
  const between=next?base.source.slice(span.to,next.from):tail
  const previous=slots.filter(s=>s.to<=span.from&&['body','protected'].includes(s.kind)).at(-1)
- const prefix=chosen&&previous&&!/[\r\n][ \t]*(?:\r\n|\r|\n)$/.test(base.source.slice(previous.from,span.from))?eol:''
+ const unit=chosen&&base.layout.blankLines[chosen.id],fallback=base.layout.fallback
+ const prefix=chosen&&(previous&&!/[\r\n][ \t]*(?:\r\n|\r|\n)$/.test(base.source.slice(previous.from,span.from))
+  ||unit?.role==='empty-paragraph'&&fallback&&fallback.emission.childTo<=unit.emission.childFrom)?eol:''
  const suffix=origin.kind==='blank'?(next&&!/[\r\n]/.test(between)?eol:''):
   (tail?(next&&next.from===span.to?eol+eol:eol):'')
  const claims:Claim[]=[{...span,kind:chosen?'blank':'anchor',step:0,...(chosen?{unitId:chosen.id}:{})}]
