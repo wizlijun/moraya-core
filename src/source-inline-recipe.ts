@@ -370,18 +370,21 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
    for(const raw of claimed){if(raw.from>cursor){const next=[...base.textSpans,...facts.atoms.filter(a=>a.body===id)].filter(s=>s.sourceFrom>=raw.from&&s.pmFrom>=body.pmFrom&&s.pmTo<=body.pmTo).sort((a,b)=>a.sourceFrom-b.sourceFrom)[0];gaps.push({raw:{from:cursor,to:raw.from},before:next?.pmFrom??body.pmTo})}cursor=Math.max(cursor,raw.to)}
    if(cursor<body.sourceTo)gaps.push({raw:{from:cursor,to:body.sourceTo},before:body.pmTo})
    const adjacentEntities=new Set<number>()
-   for(const r of ranges)if(r.keep&&['em','strong'].includes(r.mark.type.name)){
-    // A kept delimiter beside inner punctuation needs an outer punctuation
-    // neighbour. Encode only a newly inserted, unmarked Unicode scalar;
-    // retained text and the original wrapper remain byte-for-byte intact.
+   for(const r of ranges)if(['em','strong'].includes(r.mark.type.name)){
+    // Kept delimiters beside punctuation/images can encode a new outer scalar.
+    // New image wrappers can also require an entity for a retained literal;
+    // existing entity spellings and kept wrappers remain byte-for-byte intact.
     for(const [outer,inner] of [[r.from-1,r.from],[r.to,r.to-1]] as const){
      if(outer<0||outer>=list.length)continue
      const start=(at:number)=>at>0&&/[\uDC00-\uDFFF]/.test(list[at]!.text)&&/[\uD800-\uDBFF]/.test(list[at-1]!.text)?at-1:at
      const at=start(outer),inside=start(inner),scalar=String.fromCodePoint((list[at]!.text+(list[at+1]?.text??'')).codePointAt(0)??0)
      const innerScalar=String.fromCodePoint((list[inside]!.text+(list[inside+1]?.text??'')).codePointAt(0)??0)
      const units=list.slice(at,at+scalar.length)
-     if(units.length===scalar.length&&units.every(u=>u.before===undefined&&!u.marks.length&&!!u.text)
-       &&list[inside]!.before!==undefined&&/[\p{P}\p{S}]/u.test(innerScalar)&&!/[\s\p{P}\p{S}]/u.test(scalar))adjacentEntities.add(at)
+     const imageEdge=!r.keep&&!!list[inside]!.image,previous=list[at]!.before
+     const raw=previous===undefined?undefined:rawRange(base,previous,previous+scalar.length)
+     const literal=previous===undefined||raw&&base.source.slice(raw.from,raw.to)===scalar
+     if(units.length===scalar.length&&units.every(u=>!u.marks.length&&!!u.text)&&!/[\s\p{P}\p{S}]/u.test(scalar)
+       &&(imageEdge&&literal||r.keep&&units.every(u=>u.before===undefined)&&list[inside]!.before!==undefined&&(/[\p{P}\p{S}]/u.test(innerScalar)||list[inside]!.image&&list[inside]!.atom)))adjacentEntities.add(at)
     }
    }
    for(const r of ranges)if(!r.keep&&['em','strong','strike_through','highlight'].includes(r.mark.type.name)){

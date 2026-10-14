@@ -4,6 +4,8 @@ All notable changes to `@moraya/core` are documented here. SemVer.
 
 ## Unreleased
 
+- Bold and italic images preserve adjacent Unicode text through local delimiter-flanking entities, including plain typing beside retained image wrappers. / 粗体和斜体图片通过必要的局部实体保留相邻 Unicode 文本语义，既有图片包裹边界外的普通输入不再丢字。
+
 - Captured image occurrences now support local insertion, marks, resize attributes and deletion without rewriting neighbouring Markdown or reference definitions. Deleting an image preserves newly exposed semantic spaces. Empty-line input retains preceding empty paragraphs; table image titles escape pipes through the existing callback. / 图片发生位置支持局部插入、格式、尺寸属性和删除，保留邻文及引用定义原字节；删除图片保留新暴露的边缘空白语义，空行首次输入保留前置空段，表格图片标题通过既有回调转义管道符。
 
 - Ordinary typing at captured link edges now preserves link wrappers and reference definitions; a new literal exclamation before a link is escaped locally. / 链接边界的普通输入保留原链接外壳与引用定义；链接前新增的字面感叹号只作局部转义。

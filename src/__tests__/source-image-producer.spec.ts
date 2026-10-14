@@ -129,3 +129,34 @@ it.each([
 it('image replacement which retains text does not rewrite existing whitespace',()=>{
  accept('__Keep__ ![](/x) tail',s=>s.tr.insertText('X',6,7),'__Keep__ X tail');
 });
+it.each(['strong','em'] as const)('new %s image wrapper preserves actual adjacent scalar semantics',kind=>{
+ const wrapper=kind==='strong'?'**':'*';
+ accept('__Keep__ AB',s=>s.tr.insert(6,s.schema.nodes.image!.create({src:'/x'},null,[s.schema.marks[kind]!.create()])),'__Keep__ '+wrapper+'![](/x)'+wrapper+'&#65;B');
+});
+it.each(['strong','em'] as const)('changed %s image wrappers classify complete Unicode scalars on both edges',kind=>{
+ const wrapper=kind==='strong'?'**':'*';
+ for(const scalar of ['A','中','𐐀'])for(const left of [false,true]){
+  const raw=left?scalar+'![x](/x)':'![x](/x)'+scalar,at=left?1+scalar.length:1,entity='&#'+scalar.codePointAt(0)+';';
+  accept(raw,s=>s.tr.addNodeMark(at,s.schema.marks[kind]!.create()),left?entity+wrapper+'![x](/x)'+wrapper:wrapper+'![x](/x)'+wrapper+entity);
+ }
+});
+it.each(['&#x41;![x](/x)','![x](/x)&#x41;','! ![x](/x) ?','![x](/x) AB'])('existing encoded/punctuation/space neighbours retain their bytes: %s',raw=>{
+ const b=open(raw),atom=capturedInlineRecipeFacts(b)!.atoms.find(a=>a.node.type.name==='image')!;
+ accept(raw,s=>s.tr.addNodeMark(atom.pmFrom,s.schema.marks.strong!.create()),raw.replace('![x](/x)','**![x](/x)**'));
+});
+it.each(['strong','em'] as const)('kept %s image endpoint typing owns only its new complete scalar',kind=>{
+ const wrapper=kind==='strong'?'**':'*';
+ for(const image of ['![x](/x)','![x][r]'])for(const scalar of ['A','中','𐐀'])for(const left of [false,true]){
+  const suffix=image.includes('[r]')?'\r\n\r\n[r]: /x\r\n':'',raw=wrapper+image+wrapper+suffix,entity='&#'+scalar.codePointAt(0)+';';
+  accept(raw,s=>s.tr.setStoredMarks([]).insertText(scalar,left?1:2),(left?entity:'')+wrapper+image+wrapper+(left?'':entity)+suffix);
+ }
+});
+it.each(['strong','em'] as const)('birth and attrs update %s images keep existing encoded neighbours',kind=>{
+ const wrapper=kind==='strong'?'**':'*';
+ for(const scalar of ['A','中','𐐀'])for(const left of [false,true])for(const encoded of [false,true]){
+  const entity='&#'+scalar.codePointAt(0)+';',text=encoded?entity:scalar,at=left?1+scalar.length:1;
+  accept(text,s=>s.tr.insert(at,s.schema.nodes.image!.create({src:'/x'},null,[s.schema.marks[kind]!.create()])),(left?entity:'')+wrapper+'![](/x)'+wrapper+(left?'':entity));
+  const raw=(left?entity:'')+wrapper+'![x][r]'+wrapper+(left?'':entity)+'\r\n\r\n[r]: /x\r\n';
+  accept(raw,s=>s.tr.setNodeAttribute(at,'title','width=50%'),raw.replace('![x][r]','![x](/x "width=50%")'));
+ }
+});
