@@ -58,6 +58,19 @@ it('passes content width and observes a stable wrapper, ignoring same width, hei
   expect(render).toHaveBeenLastCalledWith(source, { maxWidth: 240 })
   expect(render).toHaveBeenCalledTimes(2)
 })
+it('subtracts initial wrapper padding and borders before rendering content width', async () => {
+  controlWidths()
+  const style = document.createElement('style')
+  style.textContent = '.code-block-wrapper { padding-left: 12px; padding-right: 18px; border-left: 2px solid; border-right: 3px solid; }'
+  document.head.append(style)
+  try {
+    const { render, container } = await mount()
+    expect(getComputedStyle(container.querySelector('.code-block-wrapper')!).paddingLeft).toBe('12px')
+    expect(render).toHaveBeenLastCalledWith(source, { maxWidth: 285 })
+    ControlledResizeObserver.instances[0].emit(240); await settle()
+    expect(render).toHaveBeenLastCalledWith(source, { maxWidth: 240 })
+  } finally { style.remove() }
+})
 it('waits for a hidden initial container to become visible', async () => {
   controlWidths(); width = 0
   const { render, container } = await mount()
