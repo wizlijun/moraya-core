@@ -136,7 +136,10 @@ interface NullMediaResolver extends MediaResolver {
 declare function isNullMediaResolver(r: MediaResolver): r is NullMediaResolver;
 /** Optional Mermaid preview capability. No loader means editable source only. */
 interface MermaidApi {
-    renderMermaid(code: string): Promise<{
+    supportsResponsiveLayout?: boolean;
+    renderMermaid(code: string, options?: {
+        maxWidth?: number;
+    }): Promise<{
         svg: string;
     } | {
         error: string;

@@ -571,6 +571,8 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
     let isMermaid = Boolean(mermaidLoader) && node.attrs.language === 'mermaid'
     let loadedApi: MermaidApi | undefined
     let destroyed = false, renderGeneration = 0
+    let resizeObserver: ResizeObserver | undefined
+    let contentWidth = 0
     let lastRenderedCode = ''
     let renderTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -582,8 +584,32 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
     /** Last successfully loaded renderer module — kept so destroy() can be called. */
     let currentRendererModule: RendererPluginModule | null = null
 
+    function disconnectMermaidResize() {
+      resizeObserver?.disconnect()
+      resizeObserver = undefined
+    }
+
+    function observeMermaidWidth() {
+      if (resizeObserver) return
+      const style = getComputedStyle(wrapper)
+      contentWidth = Math.max(0, wrapper.getBoundingClientRect().width
+        - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0)
+        - (parseFloat(style.borderLeftWidth) || 0) - (parseFloat(style.borderRightWidth) || 0))
+      if (typeof ResizeObserver === 'undefined') return
+      resizeObserver = new ResizeObserver(entries => {
+        if (destroyed || !isMermaid || isEditing) return
+        const width = entries.find(entry => entry.target === wrapper)?.contentRect.width
+        if (width === undefined || !Number.isFinite(width) || width <= 0 || width === contentWidth) return
+        contentWidth = width
+        lastRenderedCode = ''
+        triggerMermaidRender()
+      })
+      resizeObserver.observe(wrapper)
+    }
+
     function syncMermaidMode() {
       const showPreview = isMermaid && !isEditing
+      if (!showPreview) disconnectMermaidResize()
       pre.style.display = (showPreview || (isRenderer && !rendererEditing)) ? 'none' : ''
       mermaidPreview.style.display = showPreview ? 'flex' : 'none'
       toggleBtn.style.display = (isMermaid || isRenderer) ? 'inline-flex' : 'none'
@@ -595,6 +621,7 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
     }
 
     function failMermaid(message: string) {
+      disconnectMermaidResize()
       lastRenderedCode = ''
       isEditing = true
       pre.style.display = ''
@@ -623,7 +650,16 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
           const api = await loadMermaidApi(mermaidLoader)
           if (!valid()) return
           loadedApi = api
-          const result = await api.renderMermaid(codeText)
+          if (api.supportsResponsiveLayout) {
+            observeMermaidWidth()
+            if (!Number.isFinite(contentWidth) || contentWidth <= 0) {
+              lastRenderedCode = ''
+              return
+            }
+          }
+          const result = api.supportsResponsiveLayout
+            ? await api.renderMermaid(codeText, { maxWidth: contentWidth })
+            : await api.renderMermaid(codeText)
           if (!valid()) return
           if ('svg' in result) mermaidPreview.innerHTML = result.svg
           else failMermaid(result.error)
@@ -814,6 +850,7 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
         isMermaid = Boolean(mermaidLoader) && updatedNode.attrs.language === 'mermaid'
         if (isMermaid !== wasMermaid) {
           renderGeneration++; lastRenderedCode = ''
+          disconnectMermaidResize()
           isEditing = false
           if (isMermaid) {
             installThemeObserver()
@@ -856,6 +893,7 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
 
       destroy() {
         destroyed = true; renderGeneration++
+        disconnectMermaidResize()
         if (activePicker) {
           activePicker.destroy()
           activePicker = null

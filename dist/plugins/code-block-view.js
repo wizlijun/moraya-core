@@ -401,6 +401,8 @@ function createCodeBlockNodeViewFactory(opts = {}) {
     let isMermaid = Boolean(mermaidLoader) && node.attrs.language === "mermaid";
     let loadedApi;
     let destroyed = false, renderGeneration = 0;
+    let resizeObserver;
+    let contentWidth = 0;
     let lastRenderedCode = "";
     let renderTimer = null;
     let isRenderer = node.attrs.language !== "mermaid" && rendererLangIds.has(node.attrs.language || "");
@@ -408,8 +410,28 @@ function createCodeBlockNodeViewFactory(opts = {}) {
     let lastRendererCode = "";
     let rendererTimer = null;
     let currentRendererModule = null;
+    function disconnectMermaidResize() {
+      resizeObserver?.disconnect();
+      resizeObserver = void 0;
+    }
+    function observeMermaidWidth() {
+      if (resizeObserver) return;
+      const style = getComputedStyle(wrapper);
+      contentWidth = Math.max(0, wrapper.getBoundingClientRect().width - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0) - (parseFloat(style.borderLeftWidth) || 0) - (parseFloat(style.borderRightWidth) || 0));
+      if (typeof ResizeObserver === "undefined") return;
+      resizeObserver = new ResizeObserver((entries) => {
+        if (destroyed || !isMermaid || isEditing) return;
+        const width = entries.find((entry) => entry.target === wrapper)?.contentRect.width;
+        if (width === void 0 || !Number.isFinite(width) || width <= 0 || width === contentWidth) return;
+        contentWidth = width;
+        lastRenderedCode = "";
+        triggerMermaidRender();
+      });
+      resizeObserver.observe(wrapper);
+    }
     function syncMermaidMode() {
       const showPreview = isMermaid && !isEditing;
+      if (!showPreview) disconnectMermaidResize();
       pre.style.display = showPreview || isRenderer && !rendererEditing ? "none" : "";
       mermaidPreview.style.display = showPreview ? "flex" : "none";
       toggleBtn.style.display = isMermaid || isRenderer ? "inline-flex" : "none";
@@ -420,6 +442,7 @@ function createCodeBlockNodeViewFactory(opts = {}) {
       }
     }
     function failMermaid(message) {
+      disconnectMermaidResize();
       lastRenderedCode = "";
       isEditing = true;
       pre.style.display = "";
@@ -448,7 +471,14 @@ function createCodeBlockNodeViewFactory(opts = {}) {
           const api = await loadMermaidApi(mermaidLoader);
           if (!valid()) return;
           loadedApi = api;
-          const result = await api.renderMermaid(codeText);
+          if (api.supportsResponsiveLayout) {
+            observeMermaidWidth();
+            if (!Number.isFinite(contentWidth) || contentWidth <= 0) {
+              lastRenderedCode = "";
+              return;
+            }
+          }
+          const result = api.supportsResponsiveLayout ? await api.renderMermaid(codeText, { maxWidth: contentWidth }) : await api.renderMermaid(codeText);
           if (!valid()) return;
           if ("svg" in result) mermaidPreview.innerHTML = result.svg;
           else failMermaid(result.error);
@@ -616,6 +646,7 @@ function createCodeBlockNodeViewFactory(opts = {}) {
         if (isMermaid !== wasMermaid) {
           renderGeneration++;
           lastRenderedCode = "";
+          disconnectMermaidResize();
           isEditing = false;
           if (isMermaid) {
             installThemeObserver();
@@ -656,6 +687,7 @@ function createCodeBlockNodeViewFactory(opts = {}) {
       destroy() {
         destroyed = true;
         renderGeneration++;
+        disconnectMermaidResize();
         if (activePicker) {
           activePicker.destroy();
           activePicker = null;

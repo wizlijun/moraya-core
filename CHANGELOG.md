@@ -1,5 +1,7 @@
 ## Unreleased — explicit Mermaid capability
 
+- Opt-in Mermaid APIs can declare `supportsResponsiveLayout` to receive container content width via optional `maxWidth`; previews wait for visible width and refresh on width changes. Legacy APIs retain one-argument rendering without ResizeObserver.
+
 - SDK behavior change: Mermaid preview requires `mermaidLoader`; missing loader always shows editable source. `enableMermaid: false` suppresses injection; true does not create a default. See README migration example to restore the previous preview.
 - Isolate pending/completed enhancement factories by schema, registry and loader; keep per-loader preview cache and prevent late results after language changes or destruction. Loading and syntax failures retain editable source and Preview retry.
 
