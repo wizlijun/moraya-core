@@ -2,6 +2,11 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { createEditor, type MorayaEditorInstance } from '../setup'
 import { BrowserMediaResolver } from '../adapters/browser-media-resolver'
 
+vi.mock('../plugins/mermaid-renderer', () => ({
+  renderMermaid: async () => ({ svg: '<svg id="legacy-namespace"/>' }),
+  updateMermaidTheme() {},
+}))
+
 const source = 'graph TD; A-->B'
 const editors: MorayaEditorInstance[] = []
 let width = 320
@@ -109,4 +114,14 @@ it('disconnects on render failure and reconnects for Preview retry', async () =>
   render.mockResolvedValue({ svg: '<svg><text>retried</text></svg>' }); width = 260; toggle(); await settle()
   expect(render).toHaveBeenLastCalledWith(source, { maxWidth: 260 })
   expect(container.querySelector('.mermaid-preview svg')?.textContent).toBe('retried')
+})
+
+it('renders a legacy module namespace without reading an absent capability export', async () => {
+  controlWidths()
+  const container = document.createElement('div'); document.body.append(container)
+  const editor = await createEditor({ container, initialContent: '```mermaid\n' + source + '\n```',
+    mediaResolver: new BrowserMediaResolver(), mermaidLoader: () => import('../plugins/mermaid-renderer') })
+  editors.push(editor); await settle()
+  expect(container.querySelector('#legacy-namespace')).not.toBeNull()
+  expect(ControlledResizeObserver.instances).toHaveLength(0)
 })

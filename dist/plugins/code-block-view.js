@@ -471,14 +471,15 @@ function createCodeBlockNodeViewFactory(opts = {}) {
           const api = await loadMermaidApi(mermaidLoader);
           if (!valid()) return;
           loadedApi = api;
-          if (api.supportsResponsiveLayout) {
+          const responsive = "supportsResponsiveLayout" in api && api.supportsResponsiveLayout;
+          if (responsive) {
             observeMermaidWidth();
             if (!Number.isFinite(contentWidth) || contentWidth <= 0) {
               lastRenderedCode = "";
               return;
             }
           }
-          const result = api.supportsResponsiveLayout ? await api.renderMermaid(codeText, { maxWidth: contentWidth }) : await api.renderMermaid(codeText);
+          const result = responsive ? await api.renderMermaid(codeText, { maxWidth: contentWidth }) : await api.renderMermaid(codeText);
           if (!valid()) return;
           if ("svg" in result) mermaidPreview.innerHTML = result.svg;
           else failMermaid(result.error);
