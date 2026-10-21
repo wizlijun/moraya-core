@@ -2629,13 +2629,26 @@ for (const name of ["entity", "escape"]) {
     return ok;
   });
 }
+var cjkStrongPunctuation = /^[\u2018\u2019\u201C\u201D\u3001-\u303F\uFF01-\uFF65]$/u;
+var unicodePunctuation = /^\p{P}$/u;
+function isCjkStrongPunctuation(char) {
+  return cjkStrongPunctuation.test(char) && unicodePunctuation.test(char);
+}
 wrapCaptureRule(md.inline.ruler, "emphasis", (original, state, silent) => {
   const from = state.pos;
   const ok = original(state, silent);
+  const count = state.pos - from;
+  if (ok && !silent && state.src[from] === "*" && count >= 2) {
+    const open = isCjkStrongPunctuation(state.src[state.pos] ?? "");
+    const close = isCjkStrongPunctuation(state.src[from - 1] ?? "");
+    for (const delimiter of state.delimiters.slice(-count)) {
+      if (open) delimiter.open = true;
+      if (close) delimiter.close = true;
+    }
+  }
   const collector = collectorFor(state);
   const owner = inlineStateOwners.get(state);
   if (ok && !silent && collector && owner) {
-    const count = state.pos - from;
     state.tokens.slice(-count).forEach((token, i) => tokenSources.set(token, {
       collector,
       runs: [{ trace: sliceTrace(owner, from + i, from + i + 1), text: token.content, kind: "linear" }]

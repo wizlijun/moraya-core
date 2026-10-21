@@ -297,6 +297,11 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     const exact=candidates.find(e=>[-1,1].some(assoc=>tr.mapping.map(e.pmFrom,assoc)===w.afterFrom+at)&&[-1,1].some(assoc=>tr.mapping.map(e.pmTo,assoc)===w.afterFrom+end))
     const ancestor=exact??candidates.find(e=>list.slice(at,end).some(u=>u.before!==undefined&&e.pmFrom<=u.before&&u.before<e.pmTo))
     let open='',close='',keep=!!exact
+    // Extending an existing wrapper with whitespace changes its lexical edge.
+    // Reuse its spelling, but encode the new edge space and required neighbour
+    // through the same recipe used for newly created formatting envelopes.
+    if(keep&&['em','strong','strike_through','highlight'].includes(mark.type.name)
+      &&[list[at]!,list[end-1]!].some(u=>u.before===undefined&&/^[ \t]$/.test(u.text)))keep=false
     if(ancestor){open=base.source.slice(ancestor.open.from,ancestor.open.to);close=base.source.slice(ancestor.close.from,ancestor.close.to)}
     if(mark.type.name==='annotation'&&!canonicalAnnotation(mark))return no
     if(mark.type.name==='annotation'){open='{==';close='==}{>>'+mark.attrs.note+'<<}'}
@@ -418,7 +423,10 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     const edgeSpace=!code&&/^[ \t]$/.test(u.text)&&(exposedSpace||((u.before===undefined||changedCode)&&(list.slice(list.slice(0,at).map(x=>x.text).lastIndexOf('\n')+1,at+1).every(x=>/^[ \t]$/.test(x.text))||list.slice(at,list.findIndex((x,i)=>i>at&&x.text==='\n')<0?undefined:list.findIndex((x,i)=>i>at&&x.text==='\n')).every(x=>/^[ \t]$/.test(x.text))))||ranges.some(r=>!r.keep&&['em','strong','strike_through','highlight'].includes(r.mark.type.name)&&r.from<=at&&at<r.to&&(list.slice(r.from,at+1).every(x=>/^[ \t]$/.test(x.text))||list.slice(at,r.to).every(x=>/^[ \t]$/.test(x.text)))))
     if(adjacentEntities.has(at)){
      const scalar=(u.text+(list[at+1]?.text??'')).codePointAt(0)!
-     output.push({text:'&#'+scalar+';'})
+     const literal=String.fromCodePoint(scalar),raw=u.before===undefined?undefined:rawRange(base,u.before,u.before+literal.length)
+     // An existing entity already supplies punctuation at the raw boundary.
+     // Preserve its original named/hex spelling instead of normalizing it.
+     output.push(raw&&base.source.slice(raw.from,raw.to)!==literal?{raw}:{text:'&#'+scalar+';'})
      if(scalar>0xffff)at++
      continue
     }

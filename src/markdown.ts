@@ -1127,13 +1127,29 @@ for (const name of ['entity', 'escape']) {
     return ok
   })
 }
+// East Asian punctuation belongs to the bold phrase even without surrounding
+// spaces (e.g. **重点。**后). Keep ASCII, single-star runs and underscore flanking
+// unchanged, and let markdown-it pair the original delimiters/source tokens.
+const cjkStrongPunctuation = /^[\u2018\u2019\u201C\u201D\u3001-\u303F\uFF01-\uFF65]$/u
+const unicodePunctuation = /^\p{P}$/u
+function isCjkStrongPunctuation(char: string): boolean {
+  return cjkStrongPunctuation.test(char) && unicodePunctuation.test(char)
+}
 wrapCaptureRule(md.inline.ruler, 'emphasis', (original, state, silent) => {
   const from = state.pos
   const ok = original(state, silent)
+  const count = state.pos - from
+  if (ok && !silent && state.src[from] === '*' && count >= 2) {
+    const open = isCjkStrongPunctuation(state.src[state.pos] ?? '')
+    const close = isCjkStrongPunctuation(state.src[from - 1] ?? '')
+    for (const delimiter of state.delimiters.slice(-count)) {
+      if (open) delimiter.open = true
+      if (close) delimiter.close = true
+    }
+  }
   const collector = collectorFor(state)
   const owner = inlineStateOwners.get(state)
   if (ok && !silent && collector && owner) {
-    const count = state.pos - from
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     state.tokens.slice(-count).forEach((token: any, i: number) => tokenSources.set(token, { collector,
       runs: [{ trace: sliceTrace(owner, from + i, from + i + 1), text: token.content, kind: 'linear' }] }))

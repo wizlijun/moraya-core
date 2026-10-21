@@ -3756,13 +3756,26 @@ for (const name of ["entity", "escape"]) {
     return ok;
   });
 }
+var cjkStrongPunctuation = /^[\u2018\u2019\u201C\u201D\u3001-\u303F\uFF01-\uFF65]$/u;
+var unicodePunctuation = /^\p{P}$/u;
+function isCjkStrongPunctuation(char) {
+  return cjkStrongPunctuation.test(char) && unicodePunctuation.test(char);
+}
 wrapCaptureRule(md.inline.ruler, "emphasis", (original, state, silent) => {
   const from = state.pos;
   const ok = original(state, silent);
+  const count = state.pos - from;
+  if (ok && !silent && state.src[from] === "*" && count >= 2) {
+    const open = isCjkStrongPunctuation(state.src[state.pos] ?? "");
+    const close = isCjkStrongPunctuation(state.src[from - 1] ?? "");
+    for (const delimiter of state.delimiters.slice(-count)) {
+      if (open) delimiter.open = true;
+      if (close) delimiter.close = true;
+    }
+  }
   const collector = collectorFor(state);
   const owner = inlineStateOwners.get(state);
   if (ok && !silent && collector && owner) {
-    const count = state.pos - from;
     state.tokens.slice(-count).forEach((token, i) => tokenSources.set(token, {
       collector,
       runs: [{ trace: sliceTrace(owner, from + i, from + i + 1), text: token.content, kind: "linear" }]
@@ -8748,6 +8761,7 @@ function prepareInlineRecipe(base, tr, facts) {
         const exact = candidates.find((e) => [-1, 1].some((assoc) => tr.mapping.map(e.pmFrom, assoc) === w.afterFrom + at) && [-1, 1].some((assoc) => tr.mapping.map(e.pmTo, assoc) === w.afterFrom + end));
         const ancestor = exact ?? candidates.find((e) => list.slice(at, end).some((u) => u.before !== void 0 && e.pmFrom <= u.before && u.before < e.pmTo));
         let open = "", close = "", keep = !!exact;
+        if (keep && ["em", "strong", "strike_through", "highlight"].includes(mark.type.name) && [list[at], list[end - 1]].some((u) => u.before === void 0 && /^[ \t]$/.test(u.text))) keep = false;
         if (ancestor) {
           open = base.source.slice(ancestor.open.from, ancestor.open.to);
           close = base.source.slice(ancestor.close.from, ancestor.close.to);
@@ -8910,7 +8924,8 @@ function prepareInlineRecipe(base, tr, facts) {
         const edgeSpace = !code2 && /^[ \t]$/.test(u.text) && (exposedSpace || (u.before === void 0 || changedCode) && (list.slice(list.slice(0, at).map((x) => x.text).lastIndexOf("\n") + 1, at + 1).every((x) => /^[ \t]$/.test(x.text)) || list.slice(at, list.findIndex((x, i) => i > at && x.text === "\n") < 0 ? void 0 : list.findIndex((x, i) => i > at && x.text === "\n")).every((x) => /^[ \t]$/.test(x.text))) || ranges.some((r2) => !r2.keep && ["em", "strong", "strike_through", "highlight"].includes(r2.mark.type.name) && r2.from <= at && at < r2.to && (list.slice(r2.from, at + 1).every((x) => /^[ \t]$/.test(x.text)) || list.slice(at, r2.to).every((x) => /^[ \t]$/.test(x.text)))));
         if (adjacentEntities.has(at)) {
           const scalar = (u.text + (list[at + 1]?.text ?? "")).codePointAt(0);
-          output.push({ text: "&#" + scalar + ";" });
+          const literal = String.fromCodePoint(scalar), raw = u.before === void 0 ? void 0 : rawRange2(base, u.before, u.before + literal.length);
+          output.push(raw && base.source.slice(raw.from, raw.to) !== literal ? { raw } : { text: "&#" + scalar + ";" });
           if (scalar > 65535) at++;
           continue;
         }
@@ -10517,6 +10532,7 @@ function applySourceBlockTransaction(base, tr) {
         });
         if (from.marks().some((m) => m.type.name === "code") && step.slice.content.textBetween(0, step.slice.content.size).includes("`")) needsInline = true;
         const inserted = step.slice.content.textBetween(0, step.slice.content.size), to = base.doc.resolve(step.to);
+        if (step.from === step.to && inlineFacts2?.edges.some((e) => ["strong", "em", "strike_through", "highlight"].includes(e.family) && (e.pmFrom === step.from && /^[ \t]/.test(inserted) || e.pmTo === step.to && /[ \t]$/.test(inserted)))) needsInline = true;
         if (/[\\`*_[\]{}<>~^=&|]/.test(inserted)) needsInline = true;
         if (from.parentOffset === 0 && /^[ \t]/.test(inserted) || to.parentOffset === to.parent.content.size && /[ \t]$/.test(inserted)) needsInline = true;
       }

@@ -3,6 +3,26 @@ import {toggleMark} from 'prosemirror-commands';
 import {EditorState} from 'prosemirror-state';
 import {applySourceBlockTransaction} from '../source-fidelity';
 import {open,pos,command} from './source-inline-test-utils';
+it.each(['&Beta;','&#x42;','&#66;','&Afr;'].flatMap(entity=>['left','right'].map(side=>({entity,side}))))(
+ 'edge whitespace preserves existing $entity spelling at $side',({entity,side})=>{
+  const raw=side==='right'?'**A**'+entity:entity+'**A**',base=open(raw),state=EditorState.create({doc:base.doc});
+  const at=side==='right'?2:1+base.doc.firstChild!.firstChild!.nodeSize;
+  const mark=state.schema.marks.strong!.create();
+  const tr=state.tr.setSelection(TextSelection.create(state.doc,at)).setStoredMarks([mark]).insertText(' ');
+  const result=applySourceBlockTransaction(base,tr);expect(result.ok).toBe(true);if(!result.ok)throw Error(result.reason);
+  expect(result.session.source).toBe(side==='right'?'**A&#32;**'+entity:entity+'**&#32;A**');
+  expect(result.session.doc.eq(tr.doc)).toBe(true);
+ });
+it.each(['**','__','*','~~','=='].flatMap(marker=>['left','right'].flatMap(side=>[' ','\t'].map(space=>({marker,side,space})))))(
+ 'typing edge whitespace preserves $marker at $side: $space',({marker,side,space})=>{
+  const raw='前 '+marker+'Alpha'+marker+' 后',base=open(raw),state=EditorState.create({doc:base.doc});
+  const at=side==='left'?3:8,marks=base.doc.nodeAt(3)!.marks;
+  const tr=state.tr.setSelection(TextSelection.create(state.doc,at)).setStoredMarks(marks).insertText(space);
+  const result=applySourceBlockTransaction(base,tr);expect(result.ok).toBe(true);if(!result.ok)throw Error(result.reason);
+  const entity=space===' '?'&#32;':'&#9;',body=side==='left'?entity+'Alpha':'Alpha'+entity;
+  expect(result.session.source).toBe('前 '+marker+body+marker+' 后');
+  expect(result.session.doc.eq(tr.doc)).toBe(true);
+ });
 it.each([
  ['[link](/url)\n',1,'x','x[link](/url)\n'],
  ['[link](/url)\n',5,'!','[link](/url)!\n'],

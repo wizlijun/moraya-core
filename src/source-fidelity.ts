@@ -522,6 +522,10 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
     step.slice.content.forEach(n=>{if(!n.isText||!n.hasMarkup(n.type,null,step.from<step.to?(from.nodeAfter?.marks??from.marks()):from.marks()))needsInline=true})
     if(from.marks().some(m=>m.type.name==='code')&&step.slice.content.textBetween(0,step.slice.content.size).includes('`'))needsInline=true
     const inserted=step.slice.content.textBetween(0,step.slice.content.size),to=base.doc.resolve(step.to)
+    // A space extending a mark needs the inline recipe before any candidate
+    // parse: raw whitespace beside its delimiter would invalidate the mark.
+    if(step.from===step.to&&inlineFacts?.edges.some(e=>['strong','em','strike_through','highlight'].includes(e.family)
+      &&(e.pmFrom===step.from&&/^[ \t]/.test(inserted)||e.pmTo===step.to&&/[ \t]$/.test(inserted))))needsInline=true
     if(/[\\`*_[\]{}<>~^=&|]/.test(inserted))needsInline=true
     if(from.parentOffset===0&&/^[ \t]/.test(inserted)||to.parentOffset===to.parent.content.size&&/[ \t]$/.test(inserted))needsInline=true
    }
