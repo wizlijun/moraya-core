@@ -3486,9 +3486,27 @@ wrapCaptureRule(md.block.ruler, "table", (original, state, ...args) => {
 }, true);
 var inlineEngine = md.inline;
 var OriginalInlineState = inlineEngine.State;
+var cjkPunctuation = /^[\u2018\u2019\u201C\u201D\u3001-\u303F\uFF01-\uFF65]$/u;
+var unicodePunctuation = /^\p{P}$/u;
+var cjkLetter = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+function sourceUnderscoreCanSplitWord(before, after) {
+  return cjkLetter.test(before + after);
+}
 if (typeof OriginalInlineState !== "function") captureAvailable = false;
 inlineEngine.State = function(...args) {
   const state = new OriginalInlineState(...args);
+  const scanDelims = state.scanDelims.bind(state);
+  state.scanDelims = (start, canSplitWord) => {
+    let scanned = scanDelims(start, canSplitWord);
+    if (!"*_~=".includes(state.src[start])) return scanned;
+    const before = start > 0 ? state.src[start - 1] : "";
+    const end = start + scanned.length;
+    const after = end < state.posMax ? state.src[end] : "";
+    if (state.src[start] === "_" && sourceUnderscoreCanSplitWord(before, after)) scanned = scanDelims(start, true);
+    if (cjkPunctuation.test(after) && unicodePunctuation.test(after)) scanned.can_open = true;
+    if (cjkPunctuation.test(before) && unicodePunctuation.test(before)) scanned.can_close = true;
+    return scanned;
+  };
   const collector = collectorFor(state);
   const owner = owners.get(args[3]);
   if (collector && owner) {
@@ -3756,23 +3774,10 @@ for (const name of ["entity", "escape"]) {
     return ok;
   });
 }
-var cjkStrongPunctuation = /^[\u2018\u2019\u201C\u201D\u3001-\u303F\uFF01-\uFF65]$/u;
-var unicodePunctuation = /^\p{P}$/u;
-function isCjkStrongPunctuation(char) {
-  return cjkStrongPunctuation.test(char) && unicodePunctuation.test(char);
-}
 wrapCaptureRule(md.inline.ruler, "emphasis", (original, state, silent) => {
   const from = state.pos;
   const ok = original(state, silent);
   const count = state.pos - from;
-  if (ok && !silent && state.src[from] === "*" && count >= 2) {
-    const open = isCjkStrongPunctuation(state.src[state.pos] ?? "");
-    const close = isCjkStrongPunctuation(state.src[from - 1] ?? "");
-    for (const delimiter of state.delimiters.slice(-count)) {
-      if (open) delimiter.open = true;
-      if (close) delimiter.close = true;
-    }
-  }
   const collector = collectorFor(state);
   const owner = inlineStateOwners.get(state);
   if (ok && !silent && collector && owner) {
@@ -8761,7 +8766,7 @@ function prepareInlineRecipe(base, tr, facts) {
         const exact = candidates.find((e) => [-1, 1].some((assoc) => tr.mapping.map(e.pmFrom, assoc) === w.afterFrom + at) && [-1, 1].some((assoc) => tr.mapping.map(e.pmTo, assoc) === w.afterFrom + end));
         const ancestor = exact ?? candidates.find((e) => list.slice(at, end).some((u) => u.before !== void 0 && e.pmFrom <= u.before && u.before < e.pmTo));
         let open = "", close = "", keep = !!exact;
-        if (keep && ["em", "strong", "strike_through", "highlight"].includes(mark.type.name) && [list[at], list[end - 1]].some((u) => u.before === void 0 && /^[ \t]$/.test(u.text))) keep = false;
+        if (keep && (["em", "strong", "strike_through"].includes(mark.type.name) || mark.type.name === "highlight" && mark.attrs.delimiter === "equals") && [list[at], list[end - 1]].some((u) => /^[ \t]$/.test(u.text) && (u.before === void 0 || u.raw && /^[ \t]$/.test(base.source.slice(u.raw.from, u.raw.to))))) keep = false;
         if (ancestor) {
           open = base.source.slice(ancestor.open.from, ancestor.open.to);
           close = base.source.slice(ancestor.close.from, ancestor.close.to);
@@ -8799,7 +8804,7 @@ function prepareInlineRecipe(base, tr, facts) {
               break;
           }
         }
-        if (!keep && /^_+$/.test(open) && (!/^[ \t]/.test(list[at].text) && at > 0 && /[\p{L}\p{N}]/u.test(list[at - 1].text) || !/[ \t]$/.test(list[end - 1].text) && end < list.length && /[\p{L}\p{N}]/u.test(list[end].text))) {
+        if (!keep && /^_+$/.test(open) && (!/^[ \t]/.test(list[at].text) && at > 0 && /[\p{L}\p{N}]/u.test(list[at - 1].text) && !sourceUnderscoreCanSplitWord(list[at - 1].text, list[at].text) || !/[ \t]$/.test(list[end - 1].text) && end < list.length && /[\p{L}\p{N}]/u.test(list[end].text) && !sourceUnderscoreCanSplitWord(list[end - 1].text, list[end].text))) {
           open = close = "*".repeat(open.length);
         }
         ranges.push({ from: at, to: end, mark, ...ancestor ? { old: ancestor } : {}, open, close, keep, index: ranges.length });
@@ -10532,7 +10537,15 @@ function applySourceBlockTransaction(base, tr) {
         });
         if (from.marks().some((m) => m.type.name === "code") && step.slice.content.textBetween(0, step.slice.content.size).includes("`")) needsInline = true;
         const inserted = step.slice.content.textBetween(0, step.slice.content.size), to = base.doc.resolve(step.to);
-        if (step.from === step.to && inlineFacts2?.edges.some((e) => ["strong", "em", "strike_through", "highlight"].includes(e.family) && (e.pmFrom === step.from && /^[ \t]/.test(inserted) || e.pmTo === step.to && /[ \t]$/.test(inserted)))) needsInline = true;
+        if (inlineFacts2?.edges.some((e) => {
+          if (!["strong", "em", "strike_through", "highlight"].includes(e.family)) return false;
+          if (e.pmFrom === step.from && /^[ \t]/.test(inserted) || e.pmTo === step.to && /[ \t]$/.test(inserted)) return true;
+          if (step.from === step.to) return false;
+          const left = step.from <= e.pmFrom && e.pmFrom <= step.to, right = step.from <= e.pmTo && e.pmTo <= step.to;
+          if (!left && !right) return false;
+          const text2 = tr.doc.textBetween(tr.mapping.map(e.pmFrom, -1), tr.mapping.map(e.pmTo, 1));
+          return left && /^[ \t]/.test(text2) || right && /[ \t]$/.test(text2);
+        })) needsInline = true;
         if (/[\\`*_[\]{}<>~^=&|]/.test(inserted)) needsInline = true;
         if (from.parentOffset === 0 && /^[ \t]/.test(inserted) || to.parentOffset === to.parent.content.size && /[ \t]$/.test(inserted)) needsInline = true;
       }

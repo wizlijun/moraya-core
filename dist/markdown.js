@@ -2359,9 +2359,27 @@ wrapCaptureRule(md.block.ruler, "table", (original, state, ...args) => {
 }, true);
 var inlineEngine = md.inline;
 var OriginalInlineState = inlineEngine.State;
+var cjkPunctuation = /^[\u2018\u2019\u201C\u201D\u3001-\u303F\uFF01-\uFF65]$/u;
+var unicodePunctuation = /^\p{P}$/u;
+var cjkLetter = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+function sourceUnderscoreCanSplitWord(before, after) {
+  return cjkLetter.test(before + after);
+}
 if (typeof OriginalInlineState !== "function") captureAvailable = false;
 inlineEngine.State = function(...args) {
   const state = new OriginalInlineState(...args);
+  const scanDelims = state.scanDelims.bind(state);
+  state.scanDelims = (start, canSplitWord) => {
+    let scanned = scanDelims(start, canSplitWord);
+    if (!"*_~=".includes(state.src[start])) return scanned;
+    const before = start > 0 ? state.src[start - 1] : "";
+    const end = start + scanned.length;
+    const after = end < state.posMax ? state.src[end] : "";
+    if (state.src[start] === "_" && sourceUnderscoreCanSplitWord(before, after)) scanned = scanDelims(start, true);
+    if (cjkPunctuation.test(after) && unicodePunctuation.test(after)) scanned.can_open = true;
+    if (cjkPunctuation.test(before) && unicodePunctuation.test(before)) scanned.can_close = true;
+    return scanned;
+  };
   const collector = collectorFor(state);
   const owner = owners.get(args[3]);
   if (collector && owner) {
@@ -2629,23 +2647,10 @@ for (const name of ["entity", "escape"]) {
     return ok;
   });
 }
-var cjkStrongPunctuation = /^[\u2018\u2019\u201C\u201D\u3001-\u303F\uFF01-\uFF65]$/u;
-var unicodePunctuation = /^\p{P}$/u;
-function isCjkStrongPunctuation(char) {
-  return cjkStrongPunctuation.test(char) && unicodePunctuation.test(char);
-}
 wrapCaptureRule(md.inline.ruler, "emphasis", (original, state, silent) => {
   const from = state.pos;
   const ok = original(state, silent);
   const count = state.pos - from;
-  if (ok && !silent && state.src[from] === "*" && count >= 2) {
-    const open = isCjkStrongPunctuation(state.src[state.pos] ?? "");
-    const close = isCjkStrongPunctuation(state.src[from - 1] ?? "");
-    for (const delimiter of state.delimiters.slice(-count)) {
-      if (open) delimiter.open = true;
-      if (close) delimiter.close = true;
-    }
-  }
   const collector = collectorFor(state);
   const owner = inlineStateOwners.get(state);
   if (ok && !silent && collector && owner) {
@@ -5063,6 +5068,7 @@ export {
   sourceCodeDelimiter,
   sourceEmDelimiter,
   sourceFenceLength,
-  sourceRootHasClosedFences
+  sourceRootHasClosedFences,
+  sourceUnderscoreCanSplitWord
 };
 //# sourceMappingURL=markdown.js.map

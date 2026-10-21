@@ -888,9 +888,30 @@ wrapCaptureRule(md.block.ruler,'table',(original,state,...args)=>{
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const inlineEngine = md.inline as any
 const OriginalInlineState = inlineEngine.State
+const cjkPunctuation = /^[\u2018\u2019\u201C\u201D\u3001-\u303F\uFF01-\uFF65]$/u
+const unicodePunctuation = /^\p{P}$/u
+const cjkLetter = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u
+export function sourceUnderscoreCanSplitWord(before: string, after: string): boolean {
+  return cjkLetter.test(before + after)
+}
 if (typeof OriginalInlineState !== 'function') captureAvailable = false
 inlineEngine.State = function (...args: unknown[]) {
   const state = new OriginalInlineState(...args)
+  // Share CJK flanking across emphasis, strike and equals-highlight before
+  // tokenization (mark can omit delimiters when both flags are false).
+  // Keep the original run lengths, pairing, whitespace and ASCII word rules.
+  const scanDelims = state.scanDelims.bind(state)
+  state.scanDelims = (start: number, canSplitWord: boolean) => {
+    let scanned = scanDelims(start, canSplitWord)
+    if (!'*_~='.includes(state.src[start])) return scanned
+    const before = start > 0 ? state.src[start - 1] : ''
+    const end = start + scanned.length
+    const after = end < state.posMax ? state.src[end] : ''
+    if (state.src[start] === '_' && sourceUnderscoreCanSplitWord(before, after)) scanned = scanDelims(start, true)
+    if (cjkPunctuation.test(after) && unicodePunctuation.test(after)) scanned.can_open = true
+    if (cjkPunctuation.test(before) && unicodePunctuation.test(before)) scanned.can_close = true
+    return scanned
+  }
   const collector = collectorFor(state)
   const owner = owners.get(args[3] as object)
   if (collector && owner) {
@@ -1127,26 +1148,10 @@ for (const name of ['entity', 'escape']) {
     return ok
   })
 }
-// East Asian punctuation belongs to the bold phrase even without surrounding
-// spaces (e.g. **重点。**后). Keep ASCII, single-star runs and underscore flanking
-// unchanged, and let markdown-it pair the original delimiters/source tokens.
-const cjkStrongPunctuation = /^[\u2018\u2019\u201C\u201D\u3001-\u303F\uFF01-\uFF65]$/u
-const unicodePunctuation = /^\p{P}$/u
-function isCjkStrongPunctuation(char: string): boolean {
-  return cjkStrongPunctuation.test(char) && unicodePunctuation.test(char)
-}
 wrapCaptureRule(md.inline.ruler, 'emphasis', (original, state, silent) => {
   const from = state.pos
   const ok = original(state, silent)
   const count = state.pos - from
-  if (ok && !silent && state.src[from] === '*' && count >= 2) {
-    const open = isCjkStrongPunctuation(state.src[state.pos] ?? '')
-    const close = isCjkStrongPunctuation(state.src[from - 1] ?? '')
-    for (const delimiter of state.delimiters.slice(-count)) {
-      if (open) delimiter.open = true
-      if (close) delimiter.close = true
-    }
-  }
   const collector = collectorFor(state)
   const owner = inlineStateOwners.get(state)
   if (ok && !silent && collector && owner) {

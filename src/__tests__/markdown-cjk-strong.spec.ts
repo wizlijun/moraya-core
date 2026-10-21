@@ -29,7 +29,7 @@ it.each([
   expect(parsed.firstChild!.lastChild!.marks).toEqual([])
 })
 
-it.each(['**bold.**after', '__重点。__后', '*重点。*后', '** 重点。**后', '**重点。 **后', '\\*\\*重点。\\*\\*后', '`**重点。**后`', '$**重点。**后$'])('keeps other delimiter, whitespace and opaque rules: %s', source => {
+it.each(['**bold.**after', '** 重点。**后', '**重点。 **后', '\\*\\*重点。\\*\\*后', '`**重点。**后`', '$**重点。**后$'])('keeps ASCII, whitespace and opaque rules: %s', source => {
   const doc = parseMarkdown(source)
   let strong = false
   doc.descendants(node => { if (node.marks.some(mark => mark.type.name === 'strong')) strong = true })

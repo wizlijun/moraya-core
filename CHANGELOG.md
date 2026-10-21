@@ -11,7 +11,7 @@ All notable changes to `@moraya/core` are documented here. SemVer.
 
 ## Unreleased
 
-- Support East Asian punctuation at double-star emphasis boundaries without rewriting source; retain native delimiter pairing and fidelity checks. Mark-edge whitespace uses the existing inline recipe and preserves adjacent entity spellings. / 双星号强调支持中文标点边界，保留原始源码、原生配对与保真校验；格式边缘的空格可正常输入，并保留邻接实体的原始拼写。
+- Share East Asian delimiter boundaries across bold, italic, strikethrough and equals highlight, including underscore emphasis beside CJK text. Preserve native ASCII word rules and caret highlighting. Inserted, replaced or exposed edge whitespace uses the existing inline recipe without normalizing adjacent entities. / 粗体、斜体、删除线及等号高亮统一支持中文标点与邻接中文，下划线保留英文单词规则，尖号高亮沿用原语法；格式边缘插入、替换或删除后露出的空白可正常编辑，并保留邻接实体原拼写。
 
 - Bold and italic images preserve adjacent Unicode text through local delimiter-flanking entities, including plain typing beside retained image wrappers. / 粗体和斜体图片通过必要的局部实体保留相邻 Unicode 文本语义，既有图片包裹边界外的普通输入不再丢字。
 

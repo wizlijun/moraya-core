@@ -5,7 +5,7 @@ import {AddMarkStep,RemoveMarkStep,ReplaceStep,AttrStep,AddNodeMarkStep,RemoveNo
 import type {SourceSession,TextSourceSpan} from './source-fidelity'
 import type {SourceEdit,ProtectedSource} from './source-ownership'
 import type {EmptyBody} from './source-empty-body'
-import {capturedEmptyBodies,capturedInlineRecipeFacts,serializeSourceInlineBody,sourceFenceLength,sourceCodeDelimiter,sourceEmDelimiter} from './markdown'
+import {capturedEmptyBodies,capturedInlineRecipeFacts,serializeSourceInlineBody,sourceFenceLength,sourceCodeDelimiter,sourceEmDelimiter,sourceUnderscoreCanSplitWord} from './markdown'
 export type InlineRawRange=Readonly<{from:number;to:number}>
 export type InlineEdge=Readonly<{id:number;body:number;family:string;pmFrom:number;pmTo:number;open:InlineRawRange;close:InlineRawRange;marks:readonly Mark[]}>
 export type InlineOccurrence=Readonly<{body:number;pmFrom:number;pmTo:number;sourceFrom:number;sourceTo:number;kind:'paragraph'|'heading'|'table-cell'}>
@@ -297,11 +297,11 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     const exact=candidates.find(e=>[-1,1].some(assoc=>tr.mapping.map(e.pmFrom,assoc)===w.afterFrom+at)&&[-1,1].some(assoc=>tr.mapping.map(e.pmTo,assoc)===w.afterFrom+end))
     const ancestor=exact??candidates.find(e=>list.slice(at,end).some(u=>u.before!==undefined&&e.pmFrom<=u.before&&u.before<e.pmTo))
     let open='',close='',keep=!!exact
-    // Extending an existing wrapper with whitespace changes its lexical edge.
-    // Reuse its spelling, but encode the new edge space and required neighbour
-    // through the same recipe used for newly created formatting envelopes.
-    if(keep&&['em','strong','strike_through','highlight'].includes(mark.type.name)
-      &&[list[at]!,list[end-1]!].some(u=>u.before===undefined&&/^[ \t]$/.test(u.text)))keep=false
+    // Inserting/replacing text or deleting an edge word can expose whitespace.
+    // Keep the wrapper's spelling, but encode its newly exposed literal space.
+    // Caret highlight has no flanking restriction; existing entities stay raw.
+    if(keep&&(['em','strong','strike_through'].includes(mark.type.name)||mark.type.name==='highlight'&&mark.attrs.delimiter==='equals')
+      &&[list[at]!,list[end-1]!].some(u=>/^[ \t]$/.test(u.text)&&(u.before===undefined||u.raw&&/^[ \t]$/.test(base.source.slice(u.raw.from,u.raw.to)))))keep=false
     if(ancestor){open=base.source.slice(ancestor.open.from,ancestor.open.to);close=base.source.slice(ancestor.close.from,ancestor.close.to)}
     if(mark.type.name==='annotation'&&!canonicalAnnotation(mark))return no
     if(mark.type.name==='annotation'){open='{==';close='==}{>>'+mark.attrs.note+'<<}'}
@@ -315,7 +315,7 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
       case 'code':break
      }
     }
-    if(!keep&&/^_+$/.test(open)&&(!/^[ \t]/.test(list[at]!.text)&&at>0&&/[\p{L}\p{N}]/u.test(list[at-1]!.text)||!/[ \t]$/.test(list[end-1]!.text)&&end<list.length&&/[\p{L}\p{N}]/u.test(list[end]!.text))){open=close='*'.repeat(open.length)}
+    if(!keep&&/^_+$/.test(open)&&(!/^[ \t]/.test(list[at]!.text)&&at>0&&/[\p{L}\p{N}]/u.test(list[at-1]!.text)&&!sourceUnderscoreCanSplitWord(list[at-1]!.text,list[at]!.text)||!/[ \t]$/.test(list[end-1]!.text)&&end<list.length&&/[\p{L}\p{N}]/u.test(list[end]!.text)&&!sourceUnderscoreCanSplitWord(list[end-1]!.text,list[end]!.text))){open=close='*'.repeat(open.length)}
     ranges.push({from:at,to:end,mark,...(ancestor?{old:ancestor}:{}),open,close,keep,index:ranges.length})
    }
    for(const edge of old)if(!families.includes(edge.family)){
