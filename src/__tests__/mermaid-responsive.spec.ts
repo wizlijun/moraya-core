@@ -43,19 +43,21 @@ function controlWidths() {
 it('keeps legacy rendering single-argument and creates no observer', async () => {
   controlWidths(); const { render, container } = await mount(false)
   expect(render).toHaveBeenCalledWith(source)
+  expect(render.mock.calls[0]).toHaveLength(1)
   expect(container.querySelector('.mermaid-preview svg')?.textContent).toBe('ready')
   expect(ControlledResizeObserver.instances).toHaveLength(0)
 })
 it('passes content width and observes a stable wrapper, ignoring same width, height and zero changes', async () => {
   controlWidths(); const { render, container } = await mount()
-  expect(render).toHaveBeenLastCalledWith(source, { maxWidth: 320 })
+  expect(render).toHaveBeenLastCalledWith(source, { maxWidth: 320, container: container.querySelector('.mermaid-preview') })
+  expect((render.mock.calls[0]?.[1] as { container?: HTMLElement })?.container).toBe(container.querySelector('.mermaid-preview'))
   expect(ControlledResizeObserver.instances).toHaveLength(1)
   const observer = ControlledResizeObserver.instances[0]
   expect(observer.target).toBe(container.querySelector('.mermaid-preview')!.parentElement)
   observer.emit(320, 900); observer.emit(0); await settle()
   expect(render).toHaveBeenCalledTimes(1)
   observer.emit(240); await settle()
-  expect(render).toHaveBeenLastCalledWith(source, { maxWidth: 240 })
+  expect(render).toHaveBeenLastCalledWith(source, { maxWidth: 240, container: container.querySelector('.mermaid-preview') })
   expect(render).toHaveBeenCalledTimes(2)
 })
 it('subtracts initial wrapper padding and borders before rendering content width', async () => {
@@ -66,9 +68,9 @@ it('subtracts initial wrapper padding and borders before rendering content width
   try {
     const { render, container } = await mount()
     expect(getComputedStyle(container.querySelector('.code-block-wrapper')!).paddingLeft).toBe('12px')
-    expect(render).toHaveBeenLastCalledWith(source, { maxWidth: 285 })
+    expect(render).toHaveBeenLastCalledWith(source, { maxWidth: 285, container: container.querySelector('.mermaid-preview') })
     ControlledResizeObserver.instances[0].emit(240); await settle()
-    expect(render).toHaveBeenLastCalledWith(source, { maxWidth: 240 })
+    expect(render).toHaveBeenLastCalledWith(source, { maxWidth: 240, container: container.querySelector('.mermaid-preview') })
   } finally { style.remove() }
 })
 it('waits for a hidden initial container to become visible', async () => {
@@ -77,7 +79,7 @@ it('waits for a hidden initial container to become visible', async () => {
   expect(render).not.toHaveBeenCalled()
   expect(ControlledResizeObserver.instances).toHaveLength(1)
   ControlledResizeObserver.instances[0].emit(280); await settle()
-  expect(render).toHaveBeenCalledWith(source, { maxWidth: 280 })
+  expect(render).toHaveBeenCalledWith(source, { maxWidth: 280, container: container.querySelector('.mermaid-preview') })
   expect(container.querySelector('.mermaid-preview svg')?.textContent).toBe('ready')
 })
 it('invalidates a pending old-width result immediately, before resize debounce finishes', async () => {
@@ -96,7 +98,7 @@ it('disconnects on Edit, reconnects with fresh width and preserves theme renderi
   const observer = ControlledResizeObserver.instances[0]
   toggle(); expect(observer.target).toBeUndefined()
   width = 210; toggle(); await settle()
-  expect(render).toHaveBeenLastCalledWith(source, { maxWidth: 210 })
+  expect(render).toHaveBeenLastCalledWith(source, { maxWidth: 210, container: container.querySelector('.mermaid-preview') })
   document.documentElement.setAttribute('data-theme', 'dark'); await settle()
   expect(render).toHaveBeenCalledTimes(3)
   expect(container.querySelector('.mermaid-preview svg')).not.toBeNull()
@@ -125,7 +127,7 @@ it('disconnects on render failure and reconnects for Preview retry', async () =>
   expect(ControlledResizeObserver.instances).toHaveLength(1)
   expect(ControlledResizeObserver.instances[0].target).toBeUndefined()
   render.mockResolvedValue({ svg: '<svg><text>retried</text></svg>' }); width = 260; toggle(); await settle()
-  expect(render).toHaveBeenLastCalledWith(source, { maxWidth: 260 })
+  expect(render).toHaveBeenLastCalledWith(source, { maxWidth: 260, container: container.querySelector('.mermaid-preview') })
   expect(container.querySelector('.mermaid-preview svg')?.textContent).toBe('retried')
 })
 

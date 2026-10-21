@@ -53,6 +53,7 @@ function installThemeObserver() {
   observer.observe(document.documentElement, {
     attributes: true,
     attributeFilter: ['data-theme'],
+    subtree: true,
   })
   // Hosts that follow the OS appearance may never mutate <html data-theme>
   // (e.g. scope data-theme to the editor container and restyle via
@@ -659,7 +660,7 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
             }
           }
           const result = responsive
-            ? await api.renderMermaid(codeText, { maxWidth: contentWidth })
+            ? await api.renderMermaid(codeText, { maxWidth: contentWidth, container: mermaidPreview })
             : await api.renderMermaid(codeText)
           if (!valid()) return
           if ('svg' in result) mermaidPreview.innerHTML = result.svg

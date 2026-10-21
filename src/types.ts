@@ -165,7 +165,7 @@ export function isNullMediaResolver(r: MediaResolver): r is NullMediaResolver {
 /** Optional Mermaid preview capability. No loader means editable source only. */
 export interface MermaidApi {
   supportsResponsiveLayout?: boolean
-  renderMermaid(code: string, options?: { maxWidth?: number }): Promise<{ svg: string } | { error: string }>
+  renderMermaid(code: string, options?: { maxWidth?: number; container?: HTMLElement }): Promise<{ svg: string } | { error: string }>
   updateMermaidTheme(): void
 }
 export type MermaidLoader = () => Promise<MermaidApi>

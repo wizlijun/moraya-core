@@ -1,5 +1,7 @@
 ## Unreleased — explicit Mermaid capability
 
+- Responsive Mermaid renderers receive the actual preview element through optional `container` context so hosts can match its computed background. Scoped `data-theme` changes now refresh previews alongside document and OS theme changes; legacy renderer calls and PNG copy behavior remain unchanged. / 响应式 Mermaid 渲染器可获得实际预览元素，宿主据此匹配渲染框底色；编辑器局部 `data-theme` 切换同样刷新图表，既有渲染接口调用及 PNG 复制行为不变。
+
 - Opt-in Mermaid APIs can declare `supportsResponsiveLayout` to receive container content width via optional `maxWidth`; previews wait for visible width and refresh on width changes. Legacy APIs retain one-argument rendering without ResizeObserver.
 
 - SDK behavior change: Mermaid preview requires `mermaidLoader`; missing loader always shows editable source. `enableMermaid: false` suppresses injection; true does not create a default. See README migration example to restore the previous preview.

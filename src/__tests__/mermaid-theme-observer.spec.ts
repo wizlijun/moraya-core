@@ -84,4 +84,29 @@ describe('mermaid theme observer', () => {
     expect(nodeView.api.updateMermaidTheme).toHaveBeenCalled()
     expect(nodeView.api.renderMermaid).toHaveBeenCalledTimes(2)
   })
+
+  test('re-renders when the actual editor host switches scoped data-theme', async () => {
+    stubMatchMedia()
+    const { dom, api } = await mountMermaidNodeView()
+    dom.setAttribute('data-theme', 'effie')
+    await vi.waitFor(() => expect(api.renderMermaid).toHaveBeenCalledTimes(2))
+    expect(api.updateMermaidTheme).toHaveBeenCalledOnce()
+    dom.setAttribute('data-theme', 'dark')
+    await vi.waitFor(() => expect(api.renderMermaid).toHaveBeenCalledTimes(3))
+    expect(api.updateMermaidTheme).toHaveBeenCalledTimes(2)
+    expect(document.documentElement.hasAttribute('data-theme')).toBe(false)
+  })
+
+  test('does not re-render for subtree style, other attributes or rendered child changes', async () => {
+    stubMatchMedia()
+    const { dom, api } = await mountMermaidNodeView()
+    const preview = dom.querySelector<HTMLElement>('.mermaid-preview')!
+    dom.style.backgroundColor = 'rgb(242, 238, 228)'
+    dom.setAttribute('data-unrelated', 'changed')
+    preview.append(document.createElement('span'))
+    await new Promise(resolve => setTimeout(resolve, 220))
+    expect(api.renderMermaid).toHaveBeenCalledOnce()
+    expect(api.updateMermaidTheme).not.toHaveBeenCalled()
+  })
+
 })
