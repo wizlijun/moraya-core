@@ -139,6 +139,7 @@ interface MermaidApi {
     supportsResponsiveLayout?: boolean;
     renderMermaid(code: string, options?: {
         maxWidth?: number;
+        container?: HTMLElement;
     }): Promise<{
         svg: string;
     } | {

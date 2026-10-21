@@ -22,7 +22,8 @@ function installThemeObserver() {
   const observer = new MutationObserver(notifyThemeChange);
   observer.observe(document.documentElement, {
     attributes: true,
-    attributeFilter: ["data-theme"]
+    attributeFilter: ["data-theme"],
+    subtree: true
   });
   if (typeof window !== "undefined" && window.matchMedia) {
     window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", notifyThemeChange);
@@ -479,7 +480,7 @@ function createCodeBlockNodeViewFactory(opts = {}) {
               return;
             }
           }
-          const result = responsive ? await api.renderMermaid(codeText, { maxWidth: contentWidth }) : await api.renderMermaid(codeText);
+          const result = responsive ? await api.renderMermaid(codeText, { maxWidth: contentWidth, container: mermaidPreview }) : await api.renderMermaid(codeText);
           if (!valid()) return;
           if ("svg" in result) mermaidPreview.innerHTML = result.svg;
           else failMermaid(result.error);
