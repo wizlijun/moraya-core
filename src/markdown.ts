@@ -447,7 +447,7 @@ type SourceRun = { text: string; kind?: undefined; trace?: undefined }
 type Capture = {
   file?: FileCaptureState
   separators:{left?:number;right?:number;range:RawRange;definition?:ProtectedSource}[]; critic:CriticPayload[]; atoms:InlineAtomOccurrence[]; edges:InlineEdge[]; fences:ClosedFenceBody[]; emptyBodies: EmptyBody[]; bodies: InlineBody[]; emissions: InlineEmission[]
-  source: string; blankLines: BlankDraft[]; fallback?: FallbackEmpty; lists: ListDraft[]
+  source: string; blankLines: BlankDraft[]; fallback?: FallbackEmpty; lists: ListDraft[]; tasks: TaskDraft[]
   trace: SourceTrace; lineStarts: number[]; protectedSources: ProtectedSource[]; runs: CapturedTextRun[]; roots: SourceRoot[]
   synthetic: { gapIndex: number; emission: SyntheticEmission }[]
 }
@@ -487,7 +487,7 @@ const activeEdges=new WeakMap<object,Map<number,{pmFrom:number;marks:readonly Ma
 const capturedFenceClosed = new WeakMap<object, boolean>()
 const capturedRootFencesClosed = new WeakMap<SourceRoot, boolean>()
 const capturedListLayouts = new WeakMap<SourceLayout, {
-  source: string; doc: PmNode; roots: readonly SourceRoot[]; lists: readonly SourceListLexeme[]; emptyBodies:readonly EmptyBody[]; bodies: readonly InlineBody[]; recipe:InlineRecipeFacts
+  source: string; doc: PmNode; roots: readonly SourceRoot[]; lists: readonly SourceListLexeme[]; tasks:readonly SourceTaskCheckbox[]; emptyBodies:readonly EmptyBody[]; bodies: readonly InlineBody[]; recipe:InlineRecipeFacts
 }>()
 let captureAvailable = true
 
@@ -496,6 +496,13 @@ export function capturedSourceLists(source: string, doc: PmNode, roots: readonly
   const bound = capturedListLayouts.get(layout)
   return bound && bound.source === source && bound.doc === doc && bound.roots === roots
     && bound.lists === layout.lists ? bound.lists : undefined
+}
+
+export type SourceTaskCheckbox = Readonly<{pmFrom:number;sourceFrom:number;rootId:number;checked:boolean}>
+/** Only the parser-consumed checkbox prefix grants a source write range. */
+export function capturedTaskCheckboxes(base:SourceSession):readonly SourceTaskCheckbox[]|undefined {
+  const bound=capturedListLayouts.get(base.layout)
+  return bound&&bound.source===base.source&&bound.doc===base.doc&&bound.roots===base.roots&&bound.lists===base.layout.lists?bound.tasks:undefined
 }
 
 export function capturedInlineBodies(source:string,doc:PmNode,roots:readonly SourceRoot[],layout:SourceLayout):readonly InlineBody[]|undefined {
@@ -1473,11 +1480,14 @@ type ListDraft = {
 }
 const listStarts = new WeakMap<object, ListDraft>()
 const listEnds = new WeakMap<object, ListDraft>()
+type TaskDraft = {sourceFrom?:number;checked?:boolean;parent?:{content:PmNode[]};slot?:number;node?:PmNode}
+const taskStarts = new WeakMap<object, TaskDraft>()
+const taskEnds = new WeakMap<object, TaskDraft>()
 
 // One pass over the actual token sequence; only paragraphs directly inside an
 // item of this list determine tightness. Empty items have no visible paragraph.
 function prepareListEvents(tokens: InlineToken[], collector: Capture): void {
-  const stack: { token: InlineToken; list: ListDraft | undefined }[] = []
+  const stack: { token: InlineToken; list: ListDraft | undefined; task?:TaskDraft }[] = []
   for (const token of tokens) {
     if (token.nesting === -1) {
       const open = stack.pop()
@@ -1486,6 +1496,7 @@ function prepareListEvents(tokens: InlineToken[], collector: Capture): void {
         if (token.markup !== open.list.marker) throw new UnsupportedSourceCapture()
         listEnds.set(token, open.list)
       }
+      if(open.task)taskEnds.set(token,open.task)
       continue
     }
     let list: ListDraft | undefined
@@ -1509,7 +1520,11 @@ function prepareListEvents(tokens: InlineToken[], collector: Capture): void {
         if (!token.hidden) direct.tight = false
       }
     }
-    if (token.nesting === 1) stack.push({ token, list })
+    if (token.nesting === 1) {
+      const task=token.type==='list_item_open'?{}:undefined
+      if(task){collector.tasks.push(task);taskStarts.set(token,task)}
+      stack.push({ token, list, ...(task?{task}:{}) })
+    }
   }
   if (stack.length) throw new UnsupportedSourceCapture()
 }
@@ -1518,7 +1533,7 @@ function prepareListEvents(tokens: InlineToken[], collector: Capture): void {
 // may later insert an empty paragraph before a list in its containing item.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function captureListEmission(state: any, token: any, delegate: () => void): void {
-  const start = listStarts.get(token), end = listEnds.get(token)
+  const start = listStarts.get(token)??taskStarts.get(token), end = listEnds.get(token)??taskEnds.get(token)
   if (start) {
     const parent = state.stack?.[state.stack.length - 1]
     if (!parent || !Array.isArray(parent.content) || start.parent) throw new UnsupportedSourceCapture()
@@ -1530,7 +1545,9 @@ function captureListEmission(state: any, token: any, delegate: () => void): void
     if (!parent || parent !== end.parent || end.slot === undefined
       || parent.content.length !== end.slot + 1 || end.node) throw new UnsupportedSourceCapture()
     const node: PmNode = parent.content[end.slot]
-    if (node.type.name !== end.kind + '_list' || (end.kind === 'ordered' && node.attrs.order !== end.order)) throw new UnsupportedSourceCapture()
+    if ('kind' in end
+      ? node.type.name !== end.kind + '_list' || (end.kind === 'ordered' && node.attrs.order !== end.order)
+      : node.type.name !== 'list_item' || end.checked!==undefined&&node.attrs.checked!==end.checked) throw new UnsupportedSourceCapture()
     end.node = node
   }
 }
@@ -1561,6 +1578,26 @@ function finishSourceLists(doc: PmNode, collector: Capture): readonly SourceList
       sourceFrom: draft.sourceFrom, sourceTo: draft.sourceTo, kind: draft.kind, marker: draft.marker, tight: draft.tight }))
   })
   if (seen.size !== collector.lists.length) throw new UnsupportedSourceCapture()
+  return Object.freeze(facts)
+}
+
+function finishTaskCheckboxes(doc:PmNode,collector:Capture):readonly SourceTaskCheckbox[] {
+  const byNode=new Map<PmNode,TaskDraft>(),facts:SourceTaskCheckbox[]=[]
+  for(const task of collector.tasks)if(task.sourceFrom!==undefined){
+    if(!task.node||byNode.has(task.node))throw new UnsupportedSourceCapture()
+    byNode.set(task.node,task)
+  }
+  let rootIndex=0
+  doc.descendants((node,pmFrom)=>{
+    const task=byNode.get(node);if(!task)return
+    byNode.delete(node)
+    while(collector.roots[rootIndex]&&collector.roots[rootIndex]!.pmTo<=pmFrom)rootIndex++
+    const root=collector.roots[rootIndex],sourceFrom=task.sourceFrom!
+    if(!root||root.pmFrom>pmFrom||root.pmTo<pmFrom+node.nodeSize||sourceFrom<root.sourceFrom||sourceFrom+1>root.sourceTo
+      ||typeof task.checked!=='boolean'||node.attrs.checked!==task.checked)throw new UnsupportedSourceCapture()
+    facts.push(Object.freeze({pmFrom,sourceFrom,rootId:root.id,checked:task.checked}))
+  })
+  if(byNode.size)throw new UnsupportedSourceCapture()
   return Object.freeze(facts)
 }
 
@@ -1765,6 +1802,10 @@ const parserTokens: Record<string, import('prosemirror-markdown').ParseSpec> = {
             const fact=inlineFacts.get(t)
             if(fact?.trace){
               if(fact.trace.text!==t.content)throw new UnsupportedSourceCapture()
+              const task=taskStarts.get(_token),marker=rawRange(fact.trace,0,3)
+              if(task&&marker&&marker.to-marker.from===3&&/^\[[ xX]\]$/.test(fact.collector.source.slice(marker.from,marker.to))){
+                task.sourceFrom=marker.from+1;task.checked=checked
+              }
               const at=rawPoint(fact.trace,match[0].length)
               const empty=match[0].length===fact.trace.text.length&&at!==undefined
                 ?{kind:'inline' as const,range:{from:fact.trimEnd??at,to:fact.trimEnd??at},before:(fact.trimEnd??at)>at||/\s$/.test(match[0])?'':' ',after:''}:undefined
@@ -3015,7 +3056,7 @@ function finalizeCapturedDocument(collector: Capture, doc: PmNode): CapturedDocu
       pmEnd = run.pmTo
       sourceEnd = run.sourceTo
     }
-    const lists = finishSourceLists(doc, collector)
+    const lists = finishSourceLists(doc, collector), tasks = finishTaskCheckboxes(doc, collector)
     const layout = finishSourceLayout(collector.blankLines, collector.fallback, lists)
     const layoutBody=(pmFrom:number,place:EmptyPlace)=>{
       const parent=emptyParents.get(pmFrom+1)
@@ -3024,7 +3065,7 @@ function finalizeCapturedDocument(collector: Capture, doc: PmNode): CapturedDocu
     }
     for(const u of layout.blankLines)if(u.role==='empty-paragraph')layoutBody(u.emission.pmFrom,{kind:'layout',origin:{kind:'blank',id:u.id}})
     if(layout.fallback)layoutBody(layout.fallback.emission.pmFrom,{kind:'layout',origin:{kind:'fallback'}})
-    capturedListLayouts.set(layout, { recipe:Object.freeze({definitionSeparators:Object.freeze(collector.separators.filter(s=>s.definition&&(s.left!==undefined||s.right!==undefined)&&collector.protectedSources.some(p=>p.kind===s.definition!.kind&&p.scope===s.definition!.scope&&p.sourceFrom===s.definition!.sourceFrom&&p.sourceTo===s.definition!.sourceTo)).map(s=>Object.freeze({body:s.left??s.right!,side:s.left!==undefined?'after' as const:'before' as const,definition:Object.freeze(s.definition!),range:Object.freeze(s.range)}))),separators:Object.freeze(collector.separators.filter(s=>s.left!==undefined&&s.right!==undefined).map(s=>Object.freeze({left:s.left!,right:s.right!,range:Object.freeze(s.range)}))),critic:Object.freeze(collector.critic.filter(c=>c.body>=0).map(c=>Object.freeze(c))),atoms:Object.freeze(collector.atoms.filter(a=>a.body>=0).map(a=>Object.freeze(a))),bodies:Object.freeze(collector.bodies.map((b,body)=>Object.freeze({...b,body}))),edges:Object.freeze(collector.edges.filter(e=>e.body>=0).map(e=>Object.freeze(e))),fences:Object.freeze(collector.fences.map(f=>Object.freeze(f)))}),emptyBodies:Object.freeze(collector.emptyBodies.map(f=>Object.freeze(f))), source, doc, roots: collector.roots, lists, bodies:Object.freeze(collector.bodies.map(body=>Object.freeze(body))) })
+    capturedListLayouts.set(layout, { tasks, recipe:Object.freeze({definitionSeparators:Object.freeze(collector.separators.filter(s=>s.definition&&(s.left!==undefined||s.right!==undefined)&&collector.protectedSources.some(p=>p.kind===s.definition!.kind&&p.scope===s.definition!.scope&&p.sourceFrom===s.definition!.sourceFrom&&p.sourceTo===s.definition!.sourceTo)).map(s=>Object.freeze({body:s.left??s.right!,side:s.left!==undefined?'after' as const:'before' as const,definition:Object.freeze(s.definition!),range:Object.freeze(s.range)}))),separators:Object.freeze(collector.separators.filter(s=>s.left!==undefined&&s.right!==undefined).map(s=>Object.freeze({left:s.left!,right:s.right!,range:Object.freeze(s.range)}))),critic:Object.freeze(collector.critic.filter(c=>c.body>=0).map(c=>Object.freeze(c))),atoms:Object.freeze(collector.atoms.filter(a=>a.body>=0).map(a=>Object.freeze(a))),bodies:Object.freeze(collector.bodies.map((b,body)=>Object.freeze({...b,body}))),edges:Object.freeze(collector.edges.filter(e=>e.body>=0).map(e=>Object.freeze(e))),fences:Object.freeze(collector.fences.map(f=>Object.freeze(f)))}),emptyBodies:Object.freeze(collector.emptyBodies.map(f=>Object.freeze(f))), source, doc, roots: collector.roots, lists, bodies:Object.freeze(collector.bodies.map(body=>Object.freeze(body))) })
     return { doc, textRuns: collector.runs,
       protectedSources: Object.freeze(collector.protectedSources),
       layout,
@@ -3099,7 +3140,7 @@ export function preprocessFileSource(source: string): SourceTrace {
 }
 
 function newFileCollector(source: string, trace: SourceTrace, work: FileWorkAccumulator): Capture {
-  return { source, trace, separators:[], critic:[], atoms:[], edges:[], fences:[], emptyBodies:[], bodies: [], emissions: [], lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [], lists: [],
+  return { source, trace, separators:[], critic:[], atoms:[], edges:[], fences:[], emptyBodies:[], bodies: [], emissions: [], lineStarts: [], protectedSources: [], runs: [], roots: [], synthetic: [], blankLines: [], lists: [], tasks: [],
     file: { work, checkpoints: [], definitions: [], blockTokens: [], effects: [] } }
 }
 

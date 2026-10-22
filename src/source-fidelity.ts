@@ -1,6 +1,7 @@
 import {imageStepRange,prepareInlineRecipe,prepareClosedFenceRecipe} from './source-inline-recipe'
 import {capturedInlineRecipeFacts} from './markdown'
 import {prepareEmptyBodyTransaction} from './source-empty-body'
+import {prepareTaskCheckboxEdits} from './source-task-checkbox'
 import { prepareRawFileSourceEdits, createFileSourceSession, emptyFileParseWork, prepareVerifiedFileBase, finishUnchangedFile, prepareCandidate, preparePreservingSourceCandidate, type VerifiedFileBase } from './source-file-cache'
 import { Fragment, Slice, type Node as PmNode, type ResolvedPos, type Schema } from 'prosemirror-model'
 import { EditorState, type Transaction } from 'prosemirror-state'
@@ -470,6 +471,13 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
    if(result.failed||!result.doc||!result.doc.eq(after))throw new UnsupportedBlockTransaction()
   }
   tr.doc.check()
+  const checkbox=prepareTaskCheckboxEdits(base,tr)
+  if(checkbox){
+   if(!checkbox.edits.length)return {...finishUnchangedFile(verified,work),mode:'unchanged',edits:[],changedRoots:[]}
+   const parsed=preparePreservingSourceCandidate(verified,checkbox.edits.map(edit=>({...edit,removed:base.source.slice(edit.from,edit.to)})),work,tr.doc)
+   if(!parsed.ok)return {ok:false,reason:parsed.reason}
+   return {ok:true,session:parsed.session,file:parsed.file,mode:'fragment-render',...checkbox}
+  }
   const empty=prepareEmptyBodyTransaction(base,tr,capturedEmptyBodies(base.source,base.doc,base.roots,base.layout)??[])
   if(empty.kind==='unsupported')throw new UnsupportedBlockTransaction()
   if(empty.kind==='ready'){

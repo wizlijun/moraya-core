@@ -2986,6 +2986,8 @@ var rootStarts = /* @__PURE__ */ new WeakMap();
 var rootEnds = /* @__PURE__ */ new WeakMap();
 var listStarts = /* @__PURE__ */ new WeakMap();
 var listEnds = /* @__PURE__ */ new WeakMap();
+var taskStarts = /* @__PURE__ */ new WeakMap();
+var taskEnds = /* @__PURE__ */ new WeakMap();
 function prepareListEvents(tokens, collector) {
   const stack = [];
   for (const token of tokens) {
@@ -2996,6 +2998,7 @@ function prepareListEvents(tokens, collector) {
         if (token.markup !== open.list.marker) throw new UnsupportedSourceCapture();
         listEnds.set(token, open.list);
       }
+      if (open.task) taskEnds.set(token, open.task);
       continue;
     }
     let list;
@@ -3025,12 +3028,19 @@ function prepareListEvents(tokens, collector) {
         if (!token.hidden) direct.tight = false;
       }
     }
-    if (token.nesting === 1) stack.push({ token, list });
+    if (token.nesting === 1) {
+      const task = token.type === "list_item_open" ? {} : void 0;
+      if (task) {
+        collector.tasks.push(task);
+        taskStarts.set(token, task);
+      }
+      stack.push({ token, list, ...task ? { task } : {} });
+    }
   }
   if (stack.length) throw new UnsupportedSourceCapture();
 }
 function captureListEmission(state, token, delegate) {
-  const start = listStarts.get(token), end = listEnds.get(token);
+  const start = listStarts.get(token) ?? taskStarts.get(token), end = listEnds.get(token) ?? taskEnds.get(token);
   if (start) {
     const parent = state.stack?.[state.stack.length - 1];
     if (!parent || !Array.isArray(parent.content) || start.parent) throw new UnsupportedSourceCapture();
@@ -3042,7 +3052,7 @@ function captureListEmission(state, token, delegate) {
     const parent = state.stack?.[state.stack.length - 1];
     if (!parent || parent !== end.parent || end.slot === void 0 || parent.content.length !== end.slot + 1 || end.node) throw new UnsupportedSourceCapture();
     const node = parent.content[end.slot];
-    if (node.type.name !== end.kind + "_list" || end.kind === "ordered" && node.attrs.order !== end.order) throw new UnsupportedSourceCapture();
+    if ("kind" in end ? node.type.name !== end.kind + "_list" || end.kind === "ordered" && node.attrs.order !== end.order : node.type.name !== "list_item" || end.checked !== void 0 && node.attrs.checked !== end.checked) throw new UnsupportedSourceCapture();
     end.node = node;
   }
 }
@@ -3270,6 +3280,11 @@ var parserTokens = {
             const fact = inlineFacts.get(t);
             if (fact?.trace) {
               if (fact.trace.text !== t.content) throw new UnsupportedSourceCapture();
+              const task = taskStarts.get(_token), marker = rawRange(fact.trace, 0, 3);
+              if (task && marker && marker.to - marker.from === 3 && /^\[[ xX]\]$/.test(fact.collector.source.slice(marker.from, marker.to))) {
+                task.sourceFrom = marker.from + 1;
+                task.checked = checked;
+              }
               const at = rawPoint(fact.trace, match[0].length);
               const empty = match[0].length === fact.trace.text.length && at !== void 0 ? { kind: "inline", range: { from: fact.trimEnd ?? at, to: fact.trimEnd ?? at }, before: (fact.trimEnd ?? at) > at || /\s$/.test(match[0]) ? "" : " ", after: "" } : void 0;
               inlineFacts.set(t, { ...fact, trace: sliceTrace(fact.trace, match[0].length, fact.trace.text.length), ...empty ? { empty } : {} });
