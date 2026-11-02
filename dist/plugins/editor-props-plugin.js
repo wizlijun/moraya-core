@@ -4605,38 +4605,8 @@ function createEditorPropsPlugin(opts) {
             } catch {
             }
             const docSize = view.state.doc.content.size;
-            let isAllSelected = false;
             const sel = view.state.selection;
-            if (sel instanceof AllSelection || docSize > 0 && sel.from <= 1 && sel.to >= docSize - 1) {
-              isAllSelected = true;
-            }
-            if (!isAllSelected && docSize > 0) {
-              try {
-                const domSel = window.getSelection();
-                if (domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
-                  const range = domSel.getRangeAt(0);
-                  const editorRange = document.createRange();
-                  editorRange.selectNodeContents(view.dom);
-                  if (range.compareBoundaryPoints(Range.START_TO_START, editorRange) <= 0 && range.compareBoundaryPoints(Range.END_TO_END, editorRange) >= 0) {
-                    isAllSelected = true;
-                  }
-                }
-              } catch {
-              }
-            }
-            if (!isAllSelected && docSize > 0) {
-              try {
-                const domSel = window.getSelection();
-                if (domSel && !domSel.isCollapsed) {
-                  const selectedText = domSel.toString();
-                  const fullText = view.dom.textContent || "";
-                  if (selectedText.length > 0 && fullText.length > 0 && selectedText.length >= fullText.length * 0.9) {
-                    isAllSelected = true;
-                  }
-                }
-              } catch {
-              }
-            }
+            const isAllSelected = sel instanceof AllSelection || docSize > 0 && sel.from <= 1 && sel.to >= docSize - 1;
             if (isAllSelected) {
               event.preventDefault();
               const paragraphType = view.state.schema.nodes.paragraph;

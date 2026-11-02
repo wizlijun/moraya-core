@@ -13,6 +13,8 @@ All notable changes to `@moraya/core` are documented here. SemVer.
 
 ## Unreleased
 
+- Backspace and Delete use the synchronized editor selection for whole-document deletion. Large partial selections no longer delete unselected text or frontmatter. / 退格与 Delete 按同步后的编辑器选区判断全文删除；选中大部分正文时不再误删未选中的文字或 frontmatter。
+
 - Rich task checkboxes now patch only the parser-captured state character. Toggling works in documents with consecutive footnote/reference definitions and nested tables, preserves adjacent Markdown spelling and line endings, and retains exact source patches for undo/redo. / Rich 任务复选框仅修改解析器捕获的状态字符，修复含连续脚注、引用定义或嵌套表格时点击无响应，并保留相邻 Markdown 写法、换行及精确撤销重做数据。
 
 - Share East Asian delimiter boundaries across bold, italic, strikethrough and equals highlight, including underscore emphasis beside CJK text. Preserve native ASCII word rules and caret highlighting. Inserted, replaced or exposed edge whitespace uses the existing inline recipe without normalizing adjacent entities. / 粗体、斜体、删除线及等号高亮统一支持中文标点与邻接中文，下划线保留英文单词规则，尖号高亮沿用原语法；格式边缘插入、替换或删除后露出的空白可正常编辑，并保留邻接实体原拼写。

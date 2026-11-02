@@ -385,54 +385,18 @@ export function createEditorPropsPlugin(opts: EditorPropsPluginOptions): Plugin 
           if ((event.key === 'Backspace' || event.key === 'Delete') &&
               !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
             // Fast AllSelection / full-range deletion
-            // On macOS Cmd+A is handled by native PredefinedMenuItem::select_all
-            // which changes the DOM selection but ProseMirror's selectionchange
-            // observer may NOT have synced yet. Force flush + DOM Range comparison.
+            // Flush pending DOM changes, then trust the model selection. DOM
+            // text length/range heuristics can mistake a large partial selection
+            // for the whole document, deleting unselected text or frontmatter.
             try {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               ;(view as any).domObserver?.flush?.()
             } catch { /* internal API */ }
 
             const docSize = view.state.doc.content.size
-            let isAllSelected = false
-
-            // Check 1: ProseMirror's internal selection
             const sel = view.state.selection
-            if (sel instanceof AllSelection ||
-              (docSize > 0 && sel.from <= 1 && sel.to >= docSize - 1)) {
-              isAllSelected = true
-            }
-
-            // Check 2: DOM Range comparison
-            if (!isAllSelected && docSize > 0) {
-              try {
-                const domSel = window.getSelection()
-                if (domSel && !domSel.isCollapsed && domSel.rangeCount > 0) {
-                  const range = domSel.getRangeAt(0)
-                  const editorRange = document.createRange()
-                  editorRange.selectNodeContents(view.dom)
-                  if (range.compareBoundaryPoints(Range.START_TO_START, editorRange) <= 0 &&
-                    range.compareBoundaryPoints(Range.END_TO_END, editorRange) >= 0) {
-                    isAllSelected = true
-                  }
-                }
-              } catch { /* Range API edge cases */ }
-            }
-
-            // Check 3: Text content length comparison (last resort)
-            if (!isAllSelected && docSize > 0) {
-              try {
-                const domSel = window.getSelection()
-                if (domSel && !domSel.isCollapsed) {
-                  const selectedText = domSel.toString()
-                  const fullText = view.dom.textContent || ''
-                  if (selectedText.length > 0 && fullText.length > 0 &&
-                    selectedText.length >= fullText.length * 0.9) {
-                    isAllSelected = true
-                  }
-                }
-              } catch { /* ignore */ }
-            }
+            const isAllSelected = sel instanceof AllSelection ||
+              (docSize > 0 && sel.from <= 1 && sel.to >= docSize - 1)
 
             if (isAllSelected) {
               event.preventDefault()
