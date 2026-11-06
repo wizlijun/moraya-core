@@ -452,7 +452,69 @@ function plainMarkBody(base:SourceSession,tr:Transaction):SourceEdit|undefined {
  return {from:body.sourceFrom,to:body.sourceTo,text:serializeSourceInlineBody(after.parent)}
 }
 
+/** Only complete body deletion can use the empty-body recipe. Protected raw
+ * definitions remain byte-identical; unsupported nested ownership stays closed. */
+function prepareBodyClearEdits(base:SourceSession,tr:Transaction):SourceEdit[]|undefined {
+ if(tr.steps.length!==1||tr.docs.length!==1||Object.getPrototypeOf(tr.steps[0]!)!==ReplaceStep.prototype
+  ||!tr.before.eq(base.doc)||!tr.docs[0]!.eq(base.doc))return
+ const step=tr.steps[0] as ReplaceStep & {structure:boolean}
+ if(step.structure||step.from>=step.to||step.slice.openStart||step.slice.openEnd||!step.apply(base.doc).doc?.eq(tr.doc))return
+ tr.doc.check()
+ const paragraph=base.doc.type.schema.nodes.paragraph?.create()
+ if(!paragraph)return
+ const frontmatter=base.doc.firstChild?.type.name==='frontmatter'?base.doc.firstChild:undefined
+ const retained=frontmatter&&tr.doc.childCount===2&&tr.doc.firstChild!.eq(frontmatter)
+ const start=retained?frontmatter.nodeSize:0
+ if(tr.doc.childCount!==(retained?2:1)||!tr.doc.lastChild!.eq(paragraph))return
+ const complete=step.from===start&&step.to===base.doc.content.size
+ const first=base.doc.child(retained?1:0),last=base.doc.lastChild!
+ let plain=true
+ base.doc.nodesBetween(start,base.doc.content.size,node=>{
+  if(node.isInline&&!node.isText&&node.type.name!=='hardbreak')plain=false
+ })
+ const interior=plain&&!step.slice.size&&first.type.name==='paragraph'&&last.type.name==='paragraph'
+  &&step.from===start+1&&step.to===base.doc.content.size-1
+ if(!complete&&!interior)return
+ if(step.slice.size&&!(step.slice.content.childCount===1&&step.slice.content.firstChild!.eq(paragraph)))return
+ let sourceFrom=0,eol=base.source.match(/\r\n|\r|\n/)?.[0]??'\n'
+ if(retained){
+  const root=base.roots.find(r=>r.tokenType==='front_matter'&&r.childFrom===0&&r.childTo===1&&r.pmFrom===0&&r.pmTo===start&&r.sourceFrom===0)
+  if(!root)return
+  sourceFrom=root.sourceTo;eol=base.source.slice(root.tailFrom,root.sourceTo).match(/\r\n|\r|\n/)?.[0]??eol
+ }
+ const protectedSources=base.protectedSources
+ if(protectedSources.some(p=>p.scope!=='top-level'||p.sourceFrom<sourceFrom))return
+ const edits:SourceEdit[]=[];let at=sourceFrom
+ for(const protectedSource of protectedSources){
+  if(at<protectedSource.sourceFrom)edits.push({from:at,to:protectedSource.sourceFrom,text:''})
+  at=protectedSource.sourceTo
+ }
+ // Beside retained frontmatter, definitions consume the adjacent separator;
+ // two following blank lines emit the empty paragraph. Without frontmatter
+ // the parser already supplies its one fallback paragraph.
+ const text=protectedSources.length?(retained?eol.repeat(/[\r\n]$/.test(base.source.slice(0,at))?2:3):''):retained?eol:''
+ if(base.source.slice(at)!==text)edits.push({from:at,to:base.source.length,text})
+ return edits
+}
+
 export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):SourceBlockResult {
+ const result=applySourceBlockTransactionOrdinary(base,tr)
+ if(result.ok)return result
+ // Preserve every already-supported recipe and its exact source spelling.
+ // This finite fallback accepts only the standard complete empty-body shape.
+ try{
+  const work=emptyFileParseWork(),verified=prepareVerifiedFileBase(base,work)
+  if('ok' in verified)return result
+  const edits=prepareBodyClearEdits(verified.verifiedBase,tr)
+  if(!edits)return result
+  const parsed=preparePreservingSourceCandidate(verified,edits.map(edit=>({...edit,removed:base.source.slice(edit.from,edit.to)})),work,tr.doc)
+  if(!parsed.ok)return {ok:false,reason:parsed.reason}
+  return {ok:true,session:parsed.session,file:parsed.file,mode:'root-render',edits,
+   changedRoots:base.roots.filter(root=>edits.some(edit=>root.sourceFrom<edit.to&&edit.from<root.sourceTo)).map(root=>root.id)}
+ }catch{return result}
+}
+
+function applySourceBlockTransactionOrdinary(base:SourceSession,tr:Transaction):SourceBlockResult {
  if(!tr.before.eq(base.doc))return {ok:false,reason:'stale-document'}
  try {
   const work=emptyFileParseWork(),verified=prepareVerifiedFileBase(base,work)
