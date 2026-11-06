@@ -543,6 +543,13 @@ export function applySourceBlockTransaction(base:SourceSession,tr:Transaction):S
     }))needsInline=true
     if(/[\\`*_[\]{}<>~^=&|]/.test(inserted))needsInline=true
     if(from.parentOffset===0&&/^[ \t]/.test(inserted)||to.parentOffset===to.parent.content.size&&/[ \t]$/.test(inserted))needsInline=true
+    // Deleting an edge word can expose whitespace or remove an entire mark
+    // occurrence. Choose its source recipe before the single candidate parse.
+    if(step.from<step.to&&from.sameParent(to)){
+     const after=tr.doc.resolve(step.from).parent
+     if(/^[ \t]|[ \t]$/.test(after.textContent)
+       ||!step.slice.size&&inlineFacts?.edges.some(e=>step.from<=e.pmFrom&&step.to>=e.pmTo))needsInline=true
+    }
    }
   }
   if(needsInline&&inlineFacts){const inline=prepareInlineRecipe(base,tr,inlineFacts);return inline.ok?preserving(inline.edits):inline}

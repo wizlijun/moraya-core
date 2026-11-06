@@ -8643,7 +8643,7 @@ function prepareInlineRecipe(base, tr, facts) {
     const pointRecipe = preparePointRecipe(base, tr, facts);
     if (pointRecipe) return pointRecipe;
     const work = facts.bodies.map((b) => ({ body: b.body, beforeFrom: b.pmFrom, beforeTo: b.pmTo, afterFrom: b.pmFrom, afterTo: b.pmTo, pieces: [{ kind: "retained", beforeFrom: b.pmFrom, beforeTo: b.pmTo, afterFrom: b.pmFrom, afterTo: b.pmTo }], dirtyEdges: [] }));
-    const units = /* @__PURE__ */ new Map(), changed = /* @__PURE__ */ new Set(), removedImages = /* @__PURE__ */ new Set(), removedImageAtoms = /* @__PURE__ */ new Set();
+    const units = /* @__PURE__ */ new Map(), changed = /* @__PURE__ */ new Set(), removedBodies = /* @__PURE__ */ new Set(), removedBounds = /* @__PURE__ */ new Map();
     for (const b of facts.bodies) {
       const list = [];
       base.doc.resolve(b.pmFrom).parent.forEach((node, offset) => {
@@ -8695,12 +8695,15 @@ function prepareInlineRecipe(base, tr, facts) {
         const list = units.get(body.body), start = step.from - body.afterFrom, end = step.to - body.afterFrom;
         for (let k = start; k < end; k++) {
           const u = list[k];
-          if (u.image) {
-            removedImages.add(body.body);
-            if (u.atom) removedImageAtoms.add(u.atom);
-            continue;
+          removedBodies.add(body.body);
+          if (u.before !== void 0) {
+            const bounds = removedBounds.get(body.body);
+            if (bounds) {
+              bounds.from = Math.min(bounds.from, u.before);
+              bounds.to = Math.max(bounds.to, u.before);
+            } else removedBounds.set(body.body, { from: u.before, to: u.before });
           }
-          if (u.text) continue;
+          if (u.image || u.text) continue;
           if (u.atom?.node.type.name !== "math_inline" && !u.math) return no;
           const first = list.findIndex((x) => u.atom ? x.atom === u.atom : x.math === u.math), size = u.atom ? u.atom.pmTo - u.atom.pmFrom : u.math.node.nodeSize;
           if (first < start || first + size > end) return no;
@@ -8754,7 +8757,10 @@ function prepareInlineRecipe(base, tr, facts) {
     const edits = [];
     for (const id of changed) {
       const body = facts.bodies.find((b) => b.body === id), w = work.find((b) => b.body === id), list = units.get(id), old = facts.edges.filter((e) => e.body === id);
-      const target = tr.doc.resolve(w.afterFrom).parent;
+      const target = tr.doc.resolve(w.afterFrom).parent, removed = removedBounds.get(id);
+      let leadingSpaceEnd = 0, trailingSpaceStart = list.length;
+      while (leadingSpaceEnd < list.length && /^[ \t]$/.test(list[leadingSpaceEnd].text)) leadingSpaceEnd++;
+      while (trailingSpaceStart > 0 && /^[ \t]$/.test(list[trailingSpaceStart - 1].text)) trailingSpaceStart--;
       let offset = 0, valid = true;
       target.forEach((n) => {
         for (let j = 0; j < n.nodeSize; j++, offset++) {
@@ -8935,7 +8941,7 @@ function prepareInlineRecipe(base, tr, facts) {
           output.push({ text: "\\!" });
           continue;
         }
-        const exposedSpace = u.before !== void 0 && u.raw && /^[ \t]$/.test(base.source.slice(u.raw.from, u.raw.to)) && [...removedImageAtoms].some((a) => a.body === id && (a.pmTo <= u.before && list.slice(0, at + 1).every((x) => /^[ \t]$/.test(x.text)) || a.pmFrom > u.before && list.slice(at).every((x) => /^[ \t]$/.test(x.text))));
+        const exposedSpace = u.before !== void 0 && u.raw && /^[ \t]$/.test(base.source.slice(u.raw.from, u.raw.to)) && !ranges.some((r2) => r2.from <= at && at < r2.to) && removed && (removed.from < u.before && at < leadingSpaceEnd || removed.to > u.before && at >= trailingSpaceStart);
         const edgeSpace = !code2 && /^[ \t]$/.test(u.text) && (exposedSpace || (u.before === void 0 || changedCode) && (list.slice(list.slice(0, at).map((x) => x.text).lastIndexOf("\n") + 1, at + 1).every((x) => /^[ \t]$/.test(x.text)) || list.slice(at, list.findIndex((x, i) => i > at && x.text === "\n") < 0 ? void 0 : list.findIndex((x, i) => i > at && x.text === "\n")).every((x) => /^[ \t]$/.test(x.text))) || ranges.some((r2) => !r2.keep && ["em", "strong", "strike_through", "highlight"].includes(r2.mark.type.name) && r2.from <= at && at < r2.to && (list.slice(r2.from, at + 1).every((x) => /^[ \t]$/.test(x.text)) || list.slice(at, r2.to).every((x) => /^[ \t]$/.test(x.text)))));
         if (adjacentEntities.has(at)) {
           const scalar = (u.text + (list[at + 1]?.text ?? "")).codePointAt(0);
@@ -8986,7 +8992,7 @@ function prepareInlineRecipe(base, tr, facts) {
       const bodyEdits = editsFromOutput(base, body, output);
       if (!bodyEdits) return unmapped;
       edits.push(...bodyEdits);
-      if (!list.length && target.type.name === "paragraph" && removedImages.has(id)) edits.push(...emptyBodyEdits(base, facts, body, body.sourceTo));
+      if (!list.length && target.type.name === "paragraph" && removedBodies.has(id)) edits.push(...emptyBodyEdits(base, facts, body, body.sourceTo));
     }
     edits.sort((a, b) => a.from - b.from || a.to - b.to);
     if (edits.some((e, i) => i > 0 && edits[i - 1].to > e.from)) return no;
@@ -10598,6 +10604,10 @@ function applySourceBlockTransaction(base, tr) {
         })) needsInline = true;
         if (/[\\`*_[\]{}<>~^=&|]/.test(inserted)) needsInline = true;
         if (from.parentOffset === 0 && /^[ \t]/.test(inserted) || to.parentOffset === to.parent.content.size && /[ \t]$/.test(inserted)) needsInline = true;
+        if (step.from < step.to && from.sameParent(to)) {
+          const after = tr.doc.resolve(step.from).parent;
+          if (/^[ \t]|[ \t]$/.test(after.textContent) || !step.slice.size && inlineFacts2?.edges.some((e) => step.from <= e.pmFrom && step.to >= e.pmTo)) needsInline = true;
+        }
       }
     }
     if (needsInline && inlineFacts2) {

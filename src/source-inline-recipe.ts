@@ -192,7 +192,7 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
   const pointRecipe=preparePointRecipe(base,tr,facts)
   if(pointRecipe)return pointRecipe
   const work:BodyWork[]=facts.bodies.map(b=>({body:b.body,beforeFrom:b.pmFrom,beforeTo:b.pmTo,afterFrom:b.pmFrom,afterTo:b.pmTo,pieces:[{kind:'retained',beforeFrom:b.pmFrom,beforeTo:b.pmTo,afterFrom:b.pmFrom,afterTo:b.pmTo}],dirtyEdges:[]}))
-  const units=new Map<number,Unit[]>(),changed=new Set<number>(),removedImages=new Set<number>(),removedImageAtoms=new Set<InlineAtomOccurrence>()
+  const units=new Map<number,Unit[]>(),changed=new Set<number>(),removedBodies=new Set<number>(),removedBounds=new Map<number,{from:number;to:number}>()
   for(const b of facts.bodies){
    const list:Unit[]=[]
    base.doc.resolve(b.pmFrom).parent.forEach((node,offset)=>{
@@ -232,7 +232,13 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     // Only whole mathematical occurrences may be removed; payload positions
     // never acquire text authority, even for an atom born earlier in this chain.
     for(let k=start;k<end;k++){
-     const u=list[k]!;if(u.image){removedImages.add(body.body);if(u.atom)removedImageAtoms.add(u.atom);continue}if(u.text)continue
+     const u=list[k]!;removedBodies.add(body.body)
+     if(u.before!==undefined){
+      const bounds=removedBounds.get(body.body)
+      if(bounds){bounds.from=Math.min(bounds.from,u.before);bounds.to=Math.max(bounds.to,u.before)}
+      else removedBounds.set(body.body,{from:u.before,to:u.before})
+     }
+     if(u.image||u.text)continue
      if(u.atom?.node.type.name!=='math_inline'&&!u.math)return no
      const first=list.findIndex(x=>u.atom?x.atom===u.atom:x.math===u.math),size=u.atom?u.atom.pmTo-u.atom.pmFrom:u.math!.node.nodeSize
      if(first<start||first+size>end)return no
@@ -279,7 +285,10 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
   const edits:SourceEdit[]=[]
   for(const id of changed){
    const body=facts.bodies.find(b=>b.body===id)!,w=work.find(b=>b.body===id)!,list=units.get(id)!,old=facts.edges.filter(e=>e.body===id)
-   const target=tr.doc.resolve(w.afterFrom).parent
+   const target=tr.doc.resolve(w.afterFrom).parent,removed=removedBounds.get(id)
+   let leadingSpaceEnd=0,trailingSpaceStart=list.length
+   while(leadingSpaceEnd<list.length&&/^[ \t]$/.test(list[leadingSpaceEnd]!.text))leadingSpaceEnd++
+   while(trailingSpaceStart>0&&/^[ \t]$/.test(list[trailingSpaceStart-1]!.text))trailingSpaceStart--
    // Verify every projected unit against the actual final document, including
    // full Mark objects and attributes, before constructing source events.
    let offset=0,valid=true
@@ -419,7 +428,8 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
     const u=list[at]!,code=u.marks.some(m=>m.type.name==='code'),changedCode=u.before!==undefined&&u.beforeCode!==code
     if(u.before===undefined&&!u.marks.length&&u.text==='!'&&ordered.some(r=>r.keep&&r.mark.type.name==='link'&&r.from===at+1&&base.source.slice(r.old!.open.from,r.old!.open.to)==='[')){output.push({text:'\\!'});continue}
     const exposedSpace=u.before!==undefined&&u.raw&&/^[ \t]$/.test(base.source.slice(u.raw.from,u.raw.to))
-     &&[...removedImageAtoms].some(a=>a.body===id&&(a.pmTo<=u.before!&&list.slice(0,at+1).every(x=>/^[ \t]$/.test(x.text))||a.pmFrom>u.before!&&list.slice(at).every(x=>/^[ \t]$/.test(x.text))))
+     &&!ranges.some(r=>r.from<=at&&at<r.to)
+     &&removed&&(removed.from<u.before&&at<leadingSpaceEnd||removed.to>u.before&&at>=trailingSpaceStart)
     const edgeSpace=!code&&/^[ \t]$/.test(u.text)&&(exposedSpace||((u.before===undefined||changedCode)&&(list.slice(list.slice(0,at).map(x=>x.text).lastIndexOf('\n')+1,at+1).every(x=>/^[ \t]$/.test(x.text))||list.slice(at,list.findIndex((x,i)=>i>at&&x.text==='\n')<0?undefined:list.findIndex((x,i)=>i>at&&x.text==='\n')).every(x=>/^[ \t]$/.test(x.text))))||ranges.some(r=>!r.keep&&['em','strong','strike_through','highlight'].includes(r.mark.type.name)&&r.from<=at&&at<r.to&&(list.slice(r.from,at+1).every(x=>/^[ \t]$/.test(x.text))||list.slice(at,r.to).every(x=>/^[ \t]$/.test(x.text)))))
     if(adjacentEntities.has(at)){
      const scalar=(u.text+(list[at+1]?.text??'')).codePointAt(0)!
@@ -468,7 +478,7 @@ export function prepareInlineRecipe(base:SourceSession,tr:Transaction,facts:Inli
    const bodyEdits=editsFromOutput(base,body,output)
    if(!bodyEdits)return unmapped
    edits.push(...bodyEdits)
-   if(!list.length&&target.type.name==='paragraph'&&removedImages.has(id))edits.push(...emptyBodyEdits(base,facts,body,body.sourceTo))
+   if(!list.length&&target.type.name==='paragraph'&&removedBodies.has(id))edits.push(...emptyBodyEdits(base,facts,body,body.sourceTo))
   }
   edits.sort((a,b)=>a.from-b.from||a.to-b.to)
   if(edits.some((e,i)=>i>0&&edits[i-1]!.to>e.from))return no
