@@ -15,7 +15,7 @@
  * ensuring this runs before the base keymap's hardbreak / splitBlock handlers.
  */
 
-import { Plugin, PluginKey, TextSelection } from 'prosemirror-state'
+import { AllSelection, NodeSelection, Plugin, PluginKey, TextSelection, type Command } from 'prosemirror-state'
 import type { Schema, Node as PmNode } from 'prosemirror-model'
 import {
   splitBlock,
@@ -79,6 +79,17 @@ function buildTableFromHeaders(schema: Schema, headers: string[]): PmNode | null
   return tableType.create(null, [headerRow, dataRow])
 }
 
+// A non-text range can select complete blocks without being a NodeSelection.
+// Replace that range through Selection.replace instead of adding a paragraph
+// beside it. Keep the standard AllSelection and NodeSelection paths unchanged.
+const replaceBlockRange: Command = (state, dispatch) => {
+  const selection = state.selection
+  if (selection.empty || selection instanceof NodeSelection || selection instanceof AllSelection ||
+      selection.$from.parent.inlineContent || selection.$to.parent.inlineContent) return false
+  if (dispatch) dispatch(state.tr.deleteSelection().scrollIntoView())
+  return true
+}
+
 /**
  * Enter handler plugin. Operates entirely off `view.state.schema`, so it works
  * against any consumer-injected schema produced by `createSchema(config)`.
@@ -86,6 +97,7 @@ function buildTableFromHeaders(schema: Schema, headers: string[]): PmNode | null
 export function createEnterHandlerPlugin(): Plugin {
   const enterCommand = chainCommands(
     newlineInCode,
+    replaceBlockRange,
     createParagraphNear,
     liftEmptyBlock,
     splitBlock,

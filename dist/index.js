@@ -6308,9 +6308,9 @@ function gfmTableCommand(action) {
 
 // src/setup.ts
 import {
-  AllSelection as AllSelection2,
+  AllSelection as AllSelection3,
   EditorState,
-  NodeSelection,
+  NodeSelection as NodeSelection2,
   Plugin as Plugin9,
   PluginKey as PluginKey9,
   Selection,
@@ -6496,7 +6496,7 @@ function createDefListInputRule(schema2) {
 }
 
 // src/plugins/enter-handler.ts
-import { Plugin, PluginKey, TextSelection as TextSelection2 } from "prosemirror-state";
+import { AllSelection, NodeSelection, Plugin, PluginKey, TextSelection as TextSelection2 } from "prosemirror-state";
 import {
   splitBlock,
   chainCommands,
@@ -6533,9 +6533,16 @@ function buildTableFromHeaders(schema2, headers) {
   const dataRow = dataRowType.create(null, emptyCells);
   return tableType.create(null, [headerRow, dataRow]);
 }
+var replaceBlockRange = (state, dispatch) => {
+  const selection = state.selection;
+  if (selection.empty || selection instanceof NodeSelection || selection instanceof AllSelection || selection.$from.parent.inlineContent || selection.$to.parent.inlineContent) return false;
+  if (dispatch) dispatch(state.tr.deleteSelection().scrollIntoView());
+  return true;
+};
 function createEnterHandlerPlugin() {
   const enterCommand = chainCommands(
     newlineInCode,
+    replaceBlockRange,
     createParagraphNear,
     liftEmptyBlock,
     splitBlock
@@ -7166,7 +7173,7 @@ function createInlineCodeConvertPlugin(enableBacktickCollapse = true) {
 
 // src/plugins/editor-props-plugin.ts
 import { Fragment as Fragment2, Slice } from "prosemirror-model";
-import { AllSelection, Plugin as Plugin5, PluginKey as PluginKey5, TextSelection as TextSelection4 } from "prosemirror-state";
+import { AllSelection as AllSelection2, Plugin as Plugin5, PluginKey as PluginKey5, TextSelection as TextSelection4 } from "prosemirror-state";
 import { Decoration as Decoration3, DecorationSet as DecorationSet3 } from "prosemirror-view";
 var editorPropsKey = new PluginKey5("moraya-editor-props");
 function isLocalFilePath(href) {
@@ -7424,7 +7431,7 @@ function createEditorPropsPlugin(opts) {
             }
             const docSize = view.state.doc.content.size;
             const sel = view.state.selection;
-            const isAllSelected = sel instanceof AllSelection || docSize > 0 && sel.from <= 1 && sel.to >= docSize - 1;
+            const isAllSelected = sel instanceof AllSelection2 || docSize > 0 && sel.from <= 1 && sel.to >= docSize - 1;
             if (isAllSelected) {
               event.preventDefault();
               const paragraphType = view.state.schema.nodes.paragraph;
@@ -7535,7 +7542,7 @@ function createEditorPropsPlugin(opts) {
         if (event.key === "Backspace" || event.key === "Delete") {
           const sel = view.state.selection;
           const docSize = view.state.doc.content.size;
-          const isAllSelected = sel instanceof AllSelection || docSize > 0 && sel.from <= 1 && sel.to >= docSize - 1;
+          const isAllSelected = sel instanceof AllSelection2 || docSize > 0 && sel.from <= 1 && sel.to >= docSize - 1;
           if (isAllSelected) {
             event.preventDefault();
             const paragraphType = view.state.schema.nodes.paragraph;
@@ -8053,7 +8060,7 @@ function buildKeymap(schema2) {
       }
     }
     if (dispatch) {
-      dispatch(state.tr.setSelection(new AllSelection2(state.doc)));
+      dispatch(state.tr.setSelection(new AllSelection3(state.doc)));
     }
     return true;
   };
@@ -8069,7 +8076,7 @@ function buildKeymap(schema2) {
     const sel = state.selection;
     {
       const docSize = state.doc.content.size;
-      const isAllSelected = sel instanceof AllSelection2 || docSize > 0 && sel.from <= 1 && sel.to >= docSize - 1;
+      const isAllSelected = sel instanceof AllSelection3 || docSize > 0 && sel.from <= 1 && sel.to >= docSize - 1;
       if (isAllSelected && dispatch) {
         const paragraphType = state.schema.nodes.paragraph;
         if (!paragraphType) return false;
@@ -8082,7 +8089,7 @@ function buildKeymap(schema2) {
       }
       if (isAllSelected) return true;
     }
-    if (sel instanceof NodeSelection && sel.node.isBlock && sel.node.type.spec.atom) {
+    if (sel instanceof NodeSelection2 && sel.node.isBlock && sel.node.type.spec.atom) {
       const before = Selection.findFrom(state.doc.resolve(sel.from), -1, true);
       if (before && dispatch) {
         dispatch(state.tr.setSelection(before).scrollIntoView());
@@ -8155,7 +8162,7 @@ function buildKeymap(schema2) {
   };
   bindings["Delete"] = (state, dispatch) => {
     const sel = state.selection;
-    if (sel instanceof NodeSelection && sel.node.isBlock && sel.node.type.spec.atom) {
+    if (sel instanceof NodeSelection2 && sel.node.isBlock && sel.node.type.spec.atom) {
       const after = Selection.findFrom(state.doc.resolve(sel.to), 1, true);
       if (after && dispatch) {
         dispatch(state.tr.setSelection(after).scrollIntoView());

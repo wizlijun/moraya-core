@@ -1,5 +1,5 @@
 // src/plugins/enter-handler.ts
-import { Plugin, PluginKey, TextSelection as TextSelection2 } from "prosemirror-state";
+import { AllSelection, NodeSelection, Plugin, PluginKey, TextSelection as TextSelection2 } from "prosemirror-state";
 import {
   splitBlock,
   chainCommands,
@@ -161,9 +161,16 @@ function buildTableFromHeaders(schema, headers) {
   const dataRow = dataRowType.create(null, emptyCells);
   return tableType.create(null, [headerRow, dataRow]);
 }
+var replaceBlockRange = (state, dispatch) => {
+  const selection = state.selection;
+  if (selection.empty || selection instanceof NodeSelection || selection instanceof AllSelection || selection.$from.parent.inlineContent || selection.$to.parent.inlineContent) return false;
+  if (dispatch) dispatch(state.tr.deleteSelection().scrollIntoView());
+  return true;
+};
 function createEnterHandlerPlugin() {
   const enterCommand = chainCommands(
     newlineInCode,
+    replaceBlockRange,
     createParagraphNear,
     liftEmptyBlock,
     splitBlock
