@@ -2,15 +2,13 @@ import { Plugin, PluginKey, TextSelection } from 'prosemirror-state'
 import type { EditorView } from 'prosemirror-view'
 
 export interface DiagramInteractionLabels {
-  zoomIn: string; zoomOut: string; reset: string; fit: string
-  panLeft: string; panRight: string; panUp: string; panDown: string
+  reset: string
   region: string; hint: string; preview: string; edit: string; copy: string
 }
 export type DiagramInteractionOptions = boolean | { labels?: Partial<DiagramInteractionLabels> }
 export const diagramLabels: DiagramInteractionLabels = {
-  zoomIn: 'Zoom in', zoomOut: 'Zoom out', reset: 'Restore default size (100%)', fit: 'Fit diagram',
-  panLeft: 'Move left', panRight: 'Move right', panUp: 'Move up', panDown: 'Move down',
-  region: 'Diagram viewer', hint: 'Scroll or pinch to zoom; drag to move',
+  reset: 'Restore default size (100%)',
+  region: 'Diagram viewer', hint: 'Scroll or pinch to zoom; drag to move. Keyboard: +/− zoom, 0 reset, F fit, arrows move, Shift+arrows move faster.',
   preview: 'Preview', edit: 'Code', copy: 'Copy',
 }
 export interface DiagramSnapshot { source: string; language: string; scale: number; x: number; y: number; width?: number; height?: number; naturalWidth?: number; naturalHeight?: number }
@@ -51,7 +49,7 @@ export function diagramSnapshot(view: EditorView, pos: number, source: string, l
 }
 
 interface WheelTarget {
-  viewport: HTMLElement; wheel(e: WheelEvent): void; nativeActive(): boolean
+  viewport: HTMLElement; wheel(e: WheelEvent): void; nativeActive(): boolean; excluded(e: Event): boolean
   gestureStart(e: Event): void; gestureChange(e: Event): void; gestureEnd(e: Event): void
 }
 interface WheelRouter { targets: Set<WheelTarget>; last: number; owner: WheelTarget | null; handler: (e: WheelEvent) => void; dispose(): void }
@@ -76,13 +74,14 @@ function registerWheel(root: HTMLElement, target: WheelTarget): () => void {
     let gestureActive = false, gestureOwner: WheelTarget | null = null, gestureTail = 0
     const gestureStart = (e: Event) => {
       gestureActive = true
-      gestureOwner = [...current.targets].find(t => hit(t.viewport, e as MouseEvent) || t.viewport.contains(e.target as Node)) ?? null
+      gestureOwner = [...current.targets].find(t => !t.excluded(e) && (hit(t.viewport, e as MouseEvent) || t.viewport.contains(e.target as Node))) ?? null
       if (gestureOwner && e.cancelable) { e.preventDefault(); gestureOwner.gestureStart(e) }
       else gestureOwner = null
     }
     const gestureChange = (e: Event) => {
       if (!gestureActive || !gestureOwner || !e.cancelable) return
-      e.preventDefault(); gestureOwner.gestureChange(e)
+      e.preventDefault()
+      if (!gestureOwner.excluded(e)) gestureOwner.gestureChange(e)
     }
     const gestureEnd = (e: Event) => {
       if (!gestureActive) return
@@ -108,14 +107,14 @@ function registerWheel(root: HTMLElement, target: WheelTarget): () => void {
         if (gestureOwner && e.cancelable) e.preventDefault()
         return
       }
-      if (now - current.last > 150) current.owner = [...current.targets].find(t => hit(t.viewport, e)) ?? null
+      if (now - current.last > 150) current.owner = [...current.targets].find(t => !t.excluded(e) && hit(t.viewport, e)) ?? null
       current.last = now
       const owner = current.owner
       if (!owner) return
       // A wheel transaction keeps its original consumer, even when its target is latched by WebKit.
       if (!e.cancelable) return
       e.preventDefault()
-      if (current.targets.has(owner) && hit(owner.viewport, e) && !owner.nativeActive()) owner.wheel(e)
+      if (current.targets.has(owner) && hit(owner.viewport, e) && !owner.excluded(e) && !owner.nativeActive()) owner.wheel(e)
     }
     root.addEventListener('wheel', router.handler, { capture: true, passive: false })
     routers.set(root, router)
@@ -137,10 +136,10 @@ export interface DiagramController {
   originalSize(svg: SVGSVGElement): { width: number; height: number } | undefined
 }
 export function createDiagramController(args: {
-  preview: HTMLElement; wrapper: HTMLElement; toolbar: HTMLElement; toolbarRight: HTMLElement
+  preview: HTMLElement; wrapper: HTMLElement; toolbar: HTMLElement
   view: EditorView; getPos(): number | undefined; snapshot: DiagramSnapshot; labels: DiagramInteractionLabels
 }): DiagramController {
-  const { preview, wrapper, toolbar, toolbarRight, view, getPos, snapshot, labels } = args
+  const { preview, wrapper, toolbar, view, getPos, snapshot, labels } = args
   const originalStyle = preview.getAttribute('style')
   const layer = document.createElement('div')
   layer.className = 'diagram-transform'
@@ -151,21 +150,24 @@ export function createDiagramController(args: {
   preview.tabIndex = 0
   preview.setAttribute('role', 'region')
   preview.setAttribute('aria-label', labels.region)
+  preview.setAttribute('aria-keyshortcuts', 'Plus = - 0 F ArrowLeft ArrowRight ArrowUp ArrowDown Shift+ArrowLeft Shift+ArrowRight Shift+ArrowUp Shift+ArrowDown Escape')
   preview.title = labels.hint
   Object.assign(preview.style, { display: 'block', position: 'relative', overflow: 'hidden', padding: '0', marginLeft: '24px', marginRight: '24px', touchAction: 'none', minHeight: '0' })
   Object.assign(layer.style, { position: 'absolute', left: '0', top: '0', transformOrigin: '0 0' })
   wrapper.classList.add('diagram-interactive')
-  const controls = document.createElement('div')
-  controls.className = 'diagram-controls'
-  controls.dataset.diagramInteraction = ''
-  controls.setAttribute('role', 'group')
-  controls.setAttribute('aria-label', labels.region)
-  toolbarRight.prepend(controls)
+  const resetButton = document.createElement('button')
+  resetButton.type = 'button'
+  resetButton.className = 'diagram-zoom-reset'
+  resetButton.title = labels.reset
+  resetButton.hidden = true
+  resetButton.tabIndex = -1
+  Object.assign(resetButton.style, { position: 'absolute', right: '0', bottom: '0' })
+  preview.appendChild(resetButton)
   const status = document.createElement('span')
   status.className = 'diagram-status'
   status.setAttribute('aria-live', 'polite')
   Object.assign(status.style, { position: 'absolute', width: '1px', height: '1px', overflow: 'hidden', clipPath: 'inset(50%)' })
-  controls.appendChild(status)
+  preview.appendChild(status)
   let dead = false, frame = 0, activeTimer: ReturnType<typeof setTimeout> | undefined
   let width = snapshot.width ?? 0, height = snapshot.height ?? 0, naturalWidth = snapshot.naturalWidth ?? 0, naturalHeight = snapshot.naturalHeight ?? 0, fit = 1
   let native = false, nativeUntil = 0, nativeScale = 1
@@ -176,13 +178,6 @@ export function createDiagramController(args: {
   function on(el: EventTarget, event: string, handler: EventListener, options?: AddEventListenerOptions) {
     el.addEventListener(event, handler, options)
     cleanup.push(() => el.removeEventListener(event, handler, options))
-  }
-  const buttons: Record<string, HTMLButtonElement> = {}
-  function button(key: string, text: string, label: string, action: () => void) {
-    const b = document.createElement('button')
-    b.type = 'button'; b.className = `diagram-control diagram-${key}`; b.textContent = text; b.title = label; b.setAttribute('aria-label', label)
-    b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); action() })
-    controls.appendChild(b); buttons[key] = b
   }
   const minimum = () => Math.min(.5, fit)
   function constrain() {
@@ -197,14 +192,11 @@ export function createDiagramController(args: {
     constrain()
     layer.style.transform = `translate(${snapshot.x}px, ${snapshot.y}px) scale(${snapshot.scale})`
     const percent = `${Math.round(snapshot.scale * 100)}%`
-    buttons['zoom-reset']!.textContent = percent
-    buttons['zoom-reset']!.setAttribute('aria-label', `${labels.reset}: ${percent}`)
-    buttons['zoom-out']!.disabled = snapshot.scale <= minimum() + 1e-6
-    buttons['zoom-in']!.disabled = snapshot.scale >= 4 - 1e-6
-    buttons['pan-left']!.disabled = snapshot.x >= 0
-    buttons['pan-right']!.disabled = snapshot.x <= width - naturalWidth * snapshot.scale
-    buttons['pan-up']!.disabled = snapshot.y >= 0
-    buttons['pan-down']!.disabled = snapshot.y <= height - naturalHeight * snapshot.scale
+    resetButton.textContent = percent
+    resetButton.setAttribute('aria-label', `${labels.reset}: ${percent}`)
+    resetButton.hidden = Math.round(snapshot.scale * 100) === 100
+    resetButton.tabIndex = resetButton.hidden ? -1 : 0
+    if (resetButton.hidden && document.activeElement === resetButton) preview.focus({ preventScroll: true })
     preview.style.cursor = pointer?.dragged ? 'grabbing' : naturalWidth * snapshot.scale > width || naturalHeight * snapshot.scale > height ? 'grab' : ''
   }
   function schedule() { if (!frame) frame = requestAnimationFrame(draw) }
@@ -222,14 +214,17 @@ export function createDiagramController(args: {
   }
   function reset(scale: number) { snapshot.scale = scale; snapshot.x = (width - naturalWidth * scale) / 2; snapshot.y = scale === 1 && naturalHeight > height ? 0 : (height - naturalHeight * scale) / 2; constrain(); schedule(); activity() }
   function pan(x: number, y: number) { snapshot.x += x; snapshot.y += y; constrain(); schedule(); activity() }
-  button('zoom-out', '−', labels.zoomOut, () => zoom(snapshot.scale / 1.25))
-  button('zoom-reset', '100%', labels.reset, () => reset(1))
-  button('zoom-in', '+', labels.zoomIn, () => zoom(snapshot.scale * 1.25))
-  button('zoom-fit', '⤢', labels.fit, () => reset(fit))
-  button('pan-left', '←', labels.panLeft, () => pan(40, 0))
-  button('pan-right', '→', labels.panRight, () => pan(-40, 0))
-  button('pan-up', '↑', labels.panUp, () => pan(0, 40))
-  button('pan-down', '↓', labels.panDown, () => pan(0, -40))
+  on(resetButton, 'click', event => {
+    event.preventDefault(); event.stopPropagation()
+    suppressClick = false
+    reset(1)
+    preview.focus({ preventScroll: true })
+  })
+  function overReset(event: Event): boolean {
+    if (resetButton.hidden) return false
+    const e = event as MouseEvent
+    return resetButton.contains(event.target as Node) || hit(resetButton, e)
+  }
   let root = scrollRoot(view.dom)
   let unregisterWheel: (() => void) | undefined
   function refresh() {
@@ -264,7 +259,7 @@ export function createDiagramController(args: {
   }
   function point(e: MouseEvent) { const r = preview.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top } }
   const wheelTarget: WheelTarget = {
-    viewport: preview, nativeActive: () => native || performance.now() < nativeUntil,
+    viewport: preview, excluded: overReset, nativeActive: () => native || performance.now() < nativeUntil,
     wheel(e) { const p = point(e); lastPoint = p; const delta = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? height : 1); zoom(snapshot.scale * Math.exp(-Math.max(-120, Math.min(120, delta)) * .002), p.x, p.y) },
     gestureStart, gestureChange, gestureEnd,
   }
@@ -285,11 +280,13 @@ export function createDiagramController(args: {
     const e = event as PointerEvent
     if (e.button !== 0) return
     suppressClick = false
+    if (resetButton.contains(e.target as Node) || overReset(e)) return
     preview.focus({ preventScroll: true })
     pointer = { id: e.pointerId, x: e.clientX, y: e.clientY, startX: e.clientX, startY: e.clientY, dragged: false }
   }) as EventListener)
   on(preview, 'pointermove', (event => {
     const e = event as PointerEvent
+    if (!pointer && (resetButton.contains(e.target as Node) || overReset(e))) return
     lastPoint = point(e)
     if (!pointer || pointer.id !== e.pointerId) return
     if (!pointer.dragged && Math.hypot(e.clientX - pointer.startX, e.clientY - pointer.startY) > 4 && (naturalWidth * snapshot.scale > width || naturalHeight * snapshot.scale > height)) {
@@ -302,9 +299,15 @@ export function createDiagramController(args: {
   on(window, 'pointercancel', finishPointer)
   on(window, 'blur', () => { finishPointer(); native = false })
   on(preview, 'lostpointercapture', finishPointer)
-  on(preview, 'click', (event => { if (suppressClick) { event.preventDefault(); event.stopImmediatePropagation(); suppressClick = false } }) as EventListener, { capture: true })
+  on(preview, 'click', (event => {
+    if (!suppressClick) return
+    suppressClick = false
+    // Keyboard activation has no pointer click count; only suppress the click generated by dragging.
+    if ((event as MouseEvent).detail === 0) return
+    event.preventDefault(); event.stopImmediatePropagation()
+  }) as EventListener, { capture: true })
   on(preview, 'dragstart', e => e.preventDefault())
-  on(preview, 'mousedown', e => e.preventDefault())
+  on(preview, 'mousedown', e => { if (!resetButton.contains(e.target as Node)) e.preventDefault() })
   function exitViewer() {
     finishPointer(); native = false
     const pos = getPos(), node = pos === undefined ? undefined : view.state.doc.nodeAt(pos)
@@ -319,13 +322,15 @@ export function createDiagramController(args: {
   on(preview, 'keydown', (event => {
     const e = event as KeyboardEvent
     if (e.target !== preview || e.defaultPrevented || e.isComposing || e.keyCode === 229 || view.composing || e.metaKey || e.ctrlKey || e.altKey) return
+    const step = e.shiftKey ? 160 : 40
     if (e.key === '+' || e.key === '=') zoom(snapshot.scale * 1.25)
     else if (e.key === '-') zoom(snapshot.scale / 1.25)
     else if (e.key === '0') reset(1)
-    else if (e.key === 'ArrowLeft') pan(40, 0)
-    else if (e.key === 'ArrowRight') pan(-40, 0)
-    else if (e.key === 'ArrowUp') pan(0, 40)
-    else if (e.key === 'ArrowDown') pan(0, -40)
+    else if (e.key === 'f' || e.key === 'F') reset(fit)
+    else if (e.key === 'ArrowLeft') pan(step, 0)
+    else if (e.key === 'ArrowRight') pan(-step, 0)
+    else if (e.key === 'ArrowUp') pan(0, step)
+    else if (e.key === 'ArrowDown') pan(0, -step)
     else if (e.key === 'Escape') { exitViewer()
     } else return
     e.preventDefault(); e.stopPropagation()
@@ -358,9 +363,9 @@ export function createDiagramController(args: {
     destroy() {
       dead = true; finishPointer(); unregisterWheel?.(); cancelAnimationFrame(frame); clearTimeout(activeTimer); observer?.disconnect()
       for (const clean of cleanup) clean()
-      controls.remove(); wrapper.classList.remove('diagram-interactive', 'diagram-gesture-active')
+      resetButton.remove(); status.remove(); wrapper.classList.remove('diagram-interactive', 'diagram-gesture-active')
       preview.classList.remove('diagram-viewport'); delete preview.dataset.diagramInteraction
-      preview.removeAttribute('tabindex'); preview.removeAttribute('role'); preview.removeAttribute('aria-label'); preview.removeAttribute('title')
+      preview.removeAttribute('tabindex'); preview.removeAttribute('role'); preview.removeAttribute('aria-label'); preview.removeAttribute('aria-keyshortcuts'); preview.removeAttribute('title')
       if (originalStyle === null) preview.removeAttribute('style'); else preview.setAttribute('style', originalStyle)
       while (layer.firstChild) preview.insertBefore(layer.firstChild, layer)
       layer.remove()

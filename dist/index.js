@@ -65,7 +65,7 @@ function registerWheel(root, target) {
     let gestureActive = false, gestureOwner = null, gestureTail = 0;
     const gestureStart = (e) => {
       gestureActive = true;
-      gestureOwner = [...current.targets].find((t) => hit(t.viewport, e) || t.viewport.contains(e.target)) ?? null;
+      gestureOwner = [...current.targets].find((t) => !t.excluded(e) && (hit(t.viewport, e) || t.viewport.contains(e.target))) ?? null;
       if (gestureOwner && e.cancelable) {
         e.preventDefault();
         gestureOwner.gestureStart(e);
@@ -74,7 +74,7 @@ function registerWheel(root, target) {
     const gestureChange = (e) => {
       if (!gestureActive || !gestureOwner || !e.cancelable) return;
       e.preventDefault();
-      gestureOwner.gestureChange(e);
+      if (!gestureOwner.excluded(e)) gestureOwner.gestureChange(e);
     };
     const gestureEnd = (e) => {
       if (!gestureActive) return;
@@ -109,13 +109,13 @@ function registerWheel(root, target) {
         if (gestureOwner && e.cancelable) e.preventDefault();
         return;
       }
-      if (now - current.last > 150) current.owner = [...current.targets].find((t) => hit(t.viewport, e)) ?? null;
+      if (now - current.last > 150) current.owner = [...current.targets].find((t) => !t.excluded(e) && hit(t.viewport, e)) ?? null;
       current.last = now;
       const owner = current.owner;
       if (!owner) return;
       if (!e.cancelable) return;
       e.preventDefault();
-      if (current.targets.has(owner) && hit(owner.viewport, e) && !owner.nativeActive()) owner.wheel(e);
+      if (current.targets.has(owner) && hit(owner.viewport, e) && !owner.excluded(e) && !owner.nativeActive()) owner.wheel(e);
     };
     root.addEventListener("wheel", router.handler, { capture: true, passive: false });
     routers.set(root, router);
@@ -131,7 +131,7 @@ function registerWheel(root, target) {
   };
 }
 function createDiagramController(args) {
-  const { preview, wrapper, toolbar, toolbarRight, view, getPos, snapshot, labels } = args;
+  const { preview, wrapper, toolbar, view, getPos, snapshot, labels } = args;
   const originalStyle = preview.getAttribute("style");
   const layer = document.createElement("div");
   layer.className = "diagram-transform";
@@ -142,21 +142,24 @@ function createDiagramController(args) {
   preview.tabIndex = 0;
   preview.setAttribute("role", "region");
   preview.setAttribute("aria-label", labels.region);
+  preview.setAttribute("aria-keyshortcuts", "Plus = - 0 F ArrowLeft ArrowRight ArrowUp ArrowDown Shift+ArrowLeft Shift+ArrowRight Shift+ArrowUp Shift+ArrowDown Escape");
   preview.title = labels.hint;
   Object.assign(preview.style, { display: "block", position: "relative", overflow: "hidden", padding: "0", marginLeft: "24px", marginRight: "24px", touchAction: "none", minHeight: "0" });
   Object.assign(layer.style, { position: "absolute", left: "0", top: "0", transformOrigin: "0 0" });
   wrapper.classList.add("diagram-interactive");
-  const controls = document.createElement("div");
-  controls.className = "diagram-controls";
-  controls.dataset.diagramInteraction = "";
-  controls.setAttribute("role", "group");
-  controls.setAttribute("aria-label", labels.region);
-  toolbarRight.prepend(controls);
+  const resetButton = document.createElement("button");
+  resetButton.type = "button";
+  resetButton.className = "diagram-zoom-reset";
+  resetButton.title = labels.reset;
+  resetButton.hidden = true;
+  resetButton.tabIndex = -1;
+  Object.assign(resetButton.style, { position: "absolute", right: "0", bottom: "0" });
+  preview.appendChild(resetButton);
   const status = document.createElement("span");
   status.className = "diagram-status";
   status.setAttribute("aria-live", "polite");
   Object.assign(status.style, { position: "absolute", width: "1px", height: "1px", overflow: "hidden", clipPath: "inset(50%)" });
-  controls.appendChild(status);
+  preview.appendChild(status);
   let dead = false, frame = 0, activeTimer;
   let width = snapshot.width ?? 0, height = snapshot.height ?? 0, naturalWidth = snapshot.naturalWidth ?? 0, naturalHeight = snapshot.naturalHeight ?? 0, fit = 1;
   let native = false, nativeUntil = 0, nativeScale = 1;
@@ -167,22 +170,6 @@ function createDiagramController(args) {
   function on(el, event, handler, options) {
     el.addEventListener(event, handler, options);
     cleanup.push(() => el.removeEventListener(event, handler, options));
-  }
-  const buttons = {};
-  function button(key, text2, label, action) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = `diagram-control diagram-${key}`;
-    b.textContent = text2;
-    b.title = label;
-    b.setAttribute("aria-label", label);
-    b.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      action();
-    });
-    controls.appendChild(b);
-    buttons[key] = b;
   }
   const minimum = () => Math.min(0.5, fit);
   function constrain() {
@@ -197,14 +184,11 @@ function createDiagramController(args) {
     constrain();
     layer.style.transform = `translate(${snapshot.x}px, ${snapshot.y}px) scale(${snapshot.scale})`;
     const percent = `${Math.round(snapshot.scale * 100)}%`;
-    buttons["zoom-reset"].textContent = percent;
-    buttons["zoom-reset"].setAttribute("aria-label", `${labels.reset}: ${percent}`);
-    buttons["zoom-out"].disabled = snapshot.scale <= minimum() + 1e-6;
-    buttons["zoom-in"].disabled = snapshot.scale >= 4 - 1e-6;
-    buttons["pan-left"].disabled = snapshot.x >= 0;
-    buttons["pan-right"].disabled = snapshot.x <= width - naturalWidth * snapshot.scale;
-    buttons["pan-up"].disabled = snapshot.y >= 0;
-    buttons["pan-down"].disabled = snapshot.y <= height - naturalHeight * snapshot.scale;
+    resetButton.textContent = percent;
+    resetButton.setAttribute("aria-label", `${labels.reset}: ${percent}`);
+    resetButton.hidden = Math.round(snapshot.scale * 100) === 100;
+    resetButton.tabIndex = resetButton.hidden ? -1 : 0;
+    if (resetButton.hidden && document.activeElement === resetButton) preview.focus({ preventScroll: true });
     preview.style.cursor = pointer?.dragged ? "grabbing" : naturalWidth * snapshot.scale > width || naturalHeight * snapshot.scale > height ? "grab" : "";
   }
   function schedule() {
@@ -245,14 +229,18 @@ function createDiagramController(args) {
     schedule();
     activity();
   }
-  button("zoom-out", "\u2212", labels.zoomOut, () => zoom(snapshot.scale / 1.25));
-  button("zoom-reset", "100%", labels.reset, () => reset(1));
-  button("zoom-in", "+", labels.zoomIn, () => zoom(snapshot.scale * 1.25));
-  button("zoom-fit", "\u2922", labels.fit, () => reset(fit));
-  button("pan-left", "\u2190", labels.panLeft, () => pan(40, 0));
-  button("pan-right", "\u2192", labels.panRight, () => pan(-40, 0));
-  button("pan-up", "\u2191", labels.panUp, () => pan(0, 40));
-  button("pan-down", "\u2193", labels.panDown, () => pan(0, -40));
+  on(resetButton, "click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    suppressClick = false;
+    reset(1);
+    preview.focus({ preventScroll: true });
+  });
+  function overReset(event) {
+    if (resetButton.hidden) return false;
+    const e = event;
+    return resetButton.contains(event.target) || hit(resetButton, e);
+  }
   let root = scrollRoot(view.dom);
   let unregisterWheel;
   function refresh() {
@@ -306,6 +294,7 @@ function createDiagramController(args) {
   }
   const wheelTarget = {
     viewport: preview,
+    excluded: overReset,
     nativeActive: () => native || performance.now() < nativeUntil,
     wheel(e) {
       const p = point2(e);
@@ -334,11 +323,13 @@ function createDiagramController(args) {
     const e = event;
     if (e.button !== 0) return;
     suppressClick = false;
+    if (resetButton.contains(e.target) || overReset(e)) return;
     preview.focus({ preventScroll: true });
     pointer = { id: e.pointerId, x: e.clientX, y: e.clientY, startX: e.clientX, startY: e.clientY, dragged: false };
   }));
   on(preview, "pointermove", ((event) => {
     const e = event;
+    if (!pointer && (resetButton.contains(e.target) || overReset(e))) return;
     lastPoint = point2(e);
     if (!pointer || pointer.id !== e.pointerId) return;
     if (!pointer.dragged && Math.hypot(e.clientX - pointer.startX, e.clientY - pointer.startY) > 4 && (naturalWidth * snapshot.scale > width || naturalHeight * snapshot.scale > height)) {
@@ -360,14 +351,16 @@ function createDiagramController(args) {
   });
   on(preview, "lostpointercapture", finishPointer);
   on(preview, "click", ((event) => {
-    if (suppressClick) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      suppressClick = false;
-    }
+    if (!suppressClick) return;
+    suppressClick = false;
+    if (event.detail === 0) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
   }), { capture: true });
   on(preview, "dragstart", (e) => e.preventDefault());
-  on(preview, "mousedown", (e) => e.preventDefault());
+  on(preview, "mousedown", (e) => {
+    if (!resetButton.contains(e.target)) e.preventDefault();
+  });
   function exitViewer() {
     finishPointer();
     native = false;
@@ -390,13 +383,15 @@ function createDiagramController(args) {
   on(preview, "keydown", ((event) => {
     const e = event;
     if (e.target !== preview || e.defaultPrevented || e.isComposing || e.keyCode === 229 || view.composing || e.metaKey || e.ctrlKey || e.altKey) return;
+    const step = e.shiftKey ? 160 : 40;
     if (e.key === "+" || e.key === "=") zoom(snapshot.scale * 1.25);
     else if (e.key === "-") zoom(snapshot.scale / 1.25);
     else if (e.key === "0") reset(1);
-    else if (e.key === "ArrowLeft") pan(40, 0);
-    else if (e.key === "ArrowRight") pan(-40, 0);
-    else if (e.key === "ArrowUp") pan(0, 40);
-    else if (e.key === "ArrowDown") pan(0, -40);
+    else if (e.key === "f" || e.key === "F") reset(fit);
+    else if (e.key === "ArrowLeft") pan(step, 0);
+    else if (e.key === "ArrowRight") pan(-step, 0);
+    else if (e.key === "ArrowUp") pan(0, step);
+    else if (e.key === "ArrowDown") pan(0, -step);
     else if (e.key === "Escape") {
       exitViewer();
     } else return;
@@ -454,13 +449,15 @@ function createDiagramController(args) {
       clearTimeout(activeTimer);
       observer?.disconnect();
       for (const clean of cleanup) clean();
-      controls.remove();
+      resetButton.remove();
+      status.remove();
       wrapper.classList.remove("diagram-interactive", "diagram-gesture-active");
       preview.classList.remove("diagram-viewport");
       delete preview.dataset.diagramInteraction;
       preview.removeAttribute("tabindex");
       preview.removeAttribute("role");
       preview.removeAttribute("aria-label");
+      preview.removeAttribute("aria-keyshortcuts");
       preview.removeAttribute("title");
       if (originalStyle === null) preview.removeAttribute("style");
       else preview.setAttribute("style", originalStyle);
@@ -474,16 +471,9 @@ var init_diagram_interaction = __esm({
   "src/plugins/diagram-interaction.ts"() {
     "use strict";
     diagramLabels = {
-      zoomIn: "Zoom in",
-      zoomOut: "Zoom out",
       reset: "Restore default size (100%)",
-      fit: "Fit diagram",
-      panLeft: "Move left",
-      panRight: "Move right",
-      panUp: "Move up",
-      panDown: "Move down",
       region: "Diagram viewer",
-      hint: "Scroll or pinch to zoom; drag to move",
+      hint: "Scroll or pinch to zoom; drag to move. Keyboard: +/\u2212 zoom, 0 reset, F fit, arrows move, Shift+arrows move faster.",
       preview: "Preview",
       edit: "Code",
       copy: "Copy"
@@ -1236,7 +1226,6 @@ function createCodeBlockNodeViewFactory(opts = {}) {
         preview,
         wrapper,
         toolbar,
-        toolbarRight,
         view,
         getPos,
         snapshot: diagramSnapshot(view, pos, node.textContent, String(node.attrs.language)),

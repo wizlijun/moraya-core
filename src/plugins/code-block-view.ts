@@ -612,7 +612,7 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
       clearDiagram()
       const pos = getPos()
       if (pos === undefined) return
-      diagram = createDiagramController({ preview, wrapper, toolbar, toolbarRight, view, getPos,
+      diagram = createDiagramController({ preview, wrapper, toolbar, view, getPos,
         snapshot: diagramSnapshot(view, pos, node.textContent, String(node.attrs.language)), labels })
       if (focusPreviewAfterRender) {
         focusPreviewAfterRender = false

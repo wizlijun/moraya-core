@@ -2,14 +2,7 @@ import { Plugin } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
 
 interface DiagramInteractionLabels {
-    zoomIn: string;
-    zoomOut: string;
     reset: string;
-    fit: string;
-    panLeft: string;
-    panRight: string;
-    panUp: string;
-    panDown: string;
     region: string;
     hint: string;
     preview: string;
@@ -46,7 +39,6 @@ declare function createDiagramController(args: {
     preview: HTMLElement;
     wrapper: HTMLElement;
     toolbar: HTMLElement;
-    toolbarRight: HTMLElement;
     view: EditorView;
     getPos(): number | undefined;
     snapshot: DiagramSnapshot;

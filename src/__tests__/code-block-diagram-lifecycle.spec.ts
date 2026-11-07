@@ -46,7 +46,7 @@ it('commits only the latest source and cleans the old result without destroying 
   r.pending[1].finish(); await ready(root, 'second')
   r.pending[0].finish(); await vi.waitFor(() => expect(r.module.destroy).toHaveBeenCalledWith(r.pending[0].output))
   expect(root.querySelector('.renderer-preview svg')?.textContent).toBe('second')
-  expect(root.querySelectorAll('.diagram-controls')).toHaveLength(1)
+  expect(root.querySelectorAll('.diagram-zoom-reset')).toHaveLength(1)
   expect(r.module.destroy).not.toHaveBeenCalledWith(r.pending[1].output)
   expect(view.state.doc.firstChild?.textContent).toBe('second')
 })
@@ -80,7 +80,7 @@ it.each(['delete', 'destroy', 'source'] as const)('a render arriving after %s ca
   expect(r.module.destroy).toHaveBeenCalledTimes(2)
   expect(preview.querySelector('svg')).toBeNull()
   expect(preview.querySelector('.diagram-transform')).toBeNull()
-  expect(root.querySelector('.diagram-controls')).toBeNull()
+  expect(root.querySelector('.diagram-zoom-reset')).toBeNull()
 })
 
 it('a late loader never starts rendering after its language has been replaced', async () => {
@@ -100,7 +100,7 @@ it('a late loader never starts rendering after its language has been replaced', 
 
 it('pending and settled factory caches isolate opt-in and localized capabilities on the same schema and registry', async () => {
   const r = deferredRenderer(), reg = registry({ dot: r.module })
-  const localized = { labels: { region: 'Localized diagram', zoomIn: 'Localized zoom' } }
+  const localized = { labels: { region: 'Localized diagram', reset: 'Localized reset' } }
   const first = preloadEnhancementPlugins(schema, reg, undefined, false)
   const second = preloadEnhancementPlugins(schema, reg, undefined, localized)
   expect(first).not.toBe(second)
@@ -113,7 +113,7 @@ it('pending and settled factory caches isolate opt-in and localized capabilities
   r.pending[0].finish('first'); await ready(a.root, 'first')
   expect(a.root.querySelector('.diagram-viewport')).toBeNull()
   expect(b.root.querySelector('.diagram-viewport')?.getAttribute('aria-label')).toBe('Localized diagram')
-  expect(b.root.querySelector('.diagram-zoom-in')?.getAttribute('aria-label')).toBe('Localized zoom')
+  expect(b.root.querySelector('.diagram-zoom-reset')?.getAttribute('aria-label')).toBe('Localized reset: 100%')
   const againOff = await preloadEnhancementPlugins(schema, reg, undefined, false)
   const c = mount(againOff.codeBlockView!)
   await vi.waitFor(() => expect(r.pending).toHaveLength(3))
