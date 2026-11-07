@@ -66,6 +66,9 @@ export interface RendererPluginModule {
   /**
    * Destroy the rendered content within `container` (optional).
    * Called from NodeView.destroy() to free canvas / SVG / event listeners.
+   * Must be idempotent for a given container: a pending render is cleaned on
+   * cancellation and again after it settles, because its async work may allocate
+   * new resources after cancellation. Each output has its own container.
    *
    * Error propagation: if this method throws, the core catches and `console.warn`s
    * (does not report to Sentry, does not rethrow). This is a cleanup path; throwing

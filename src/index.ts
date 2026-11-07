@@ -90,3 +90,5 @@ export type { SourceRoot, SourceGap, SyntheticEmission, SourceEdit, ProtectedSou
 export type { LayoutContainer, BlankLineUnit, FallbackEmpty, SourceLayout } from './source-layout'
 
 export { prepareSourceListBoundarySteps, type SourceListBoundaryResult } from './source-fidelity'
+
+export type { DiagramInteractionOptions, DiagramInteractionLabels } from './plugins/diagram-interaction'

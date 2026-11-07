@@ -1,6 +1,8 @@
 import { Node as Node$1 } from 'prosemirror-model';
 import { EditorView } from 'prosemirror-view';
+import { DiagramInteractionOptions } from './diagram-interaction.js';
 import { MermaidLoader, RendererRegistry } from '../types.js';
+import 'prosemirror-state';
 
 /**
  * CodeBlock NodeView — toolbar with language label, language picker, copy button,
@@ -25,6 +27,7 @@ import { MermaidLoader, RendererRegistry } from '../types.js';
  */
 
 interface CodeBlockNodeViewOptions {
+    diagramInteraction?: DiagramInteractionOptions;
     mermaidLoader?: MermaidLoader;
     rendererRegistry?: RendererRegistry;
 }

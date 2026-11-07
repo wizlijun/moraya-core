@@ -5,6 +5,7 @@ import { Schema } from 'prosemirror-model';
 import { InlineSyntaxScope } from './plugins/cursor-syntax.js';
 import { MermaidLoader, MediaResolver, RendererRegistry, LinkOpener, Platform, SpreadsheetViewFactory, FrontmatterViewFactory } from './types.js';
 import { DocCache } from './doc-cache.js';
+import { DiagramInteractionOptions } from './plugins/diagram-interaction.js';
 
 /**
  * Editor lifecycle factory for `@moraya/core`.
@@ -42,9 +43,11 @@ interface Tier1Plugins {
  * (schema, rendererRegistry, mermaidLoader) so consumers with different injection produce
  * different cached factories.
  */
-declare function preloadEnhancementPlugins(schema: Schema, rendererRegistry?: RendererRegistry, mermaidLoader?: MermaidLoader): Promise<Tier1Plugins>;
+declare function preloadEnhancementPlugins(schema: Schema, rendererRegistry?: RendererRegistry, mermaidLoader?: MermaidLoader, diagramInteraction?: DiagramInteractionOptions): Promise<Tier1Plugins>;
 declare function buildInputRules(schema: Schema, tier1: Tier1Plugins, enableInlineMarks?: boolean): Plugin;
 interface EditorPluginOptions {
+    /** Opt-in diagram viewing gestures; never affects Markdown or history. */
+    diagramInteraction?: DiagramInteractionOptions;
     /** Render features */
     enableMath?: boolean;
     enableMermaid?: boolean;

@@ -22,6 +22,8 @@
 
 import type { Node as PmNode } from 'prosemirror-model'
 import type { EditorView } from 'prosemirror-view'
+import { TextSelection } from 'prosemirror-state'
+import { createDiagramController, diagramLabels, diagramSnapshot, type DiagramController, type DiagramInteractionOptions } from './diagram-interaction'
 import type { RendererRegistry, RendererPluginModule, MermaidLoader, MermaidApi } from '../types'
 
 // ── Mermaid lazy-load wrapper ─────────────────────
@@ -416,7 +418,7 @@ function resolveBackground(el: HTMLElement): string {
 }
 
 /** Rasterize an <svg> to a PNG Blob at 2x scale on a solid background. */
-async function svgToPngBlob(svg: SVGSVGElement, background: string): Promise<Blob> {
+async function svgToPngBlob(svg: SVGSVGElement, background: string, originalSize?: { width: number; height: number }): Promise<Blob> {
   const scale = 2
   let w = 0
   let h = 0
@@ -425,7 +427,7 @@ async function svgToPngBlob(svg: SVGSVGElement, background: string): Promise<Blo
     w = vb.width
     h = vb.height
   } else {
-    const rect = svg.getBoundingClientRect()
+    const rect = originalSize ?? svg.getBoundingClientRect()
     w = rect.width
     h = rect.height
   }
@@ -463,7 +465,7 @@ async function svgToPngBlob(svg: SVGSVGElement, background: string): Promise<Blo
  * Falls back to copying `codeEl` text when there is no SVG, the clipboard
  * image API is unavailable, or rasterization/write fails (e.g. foreignObject).
  */
-function copyPreviewAsImage(btn: HTMLButtonElement, preview: HTMLElement, codeEl: HTMLElement) {
+function copyPreviewAsImage(btn: HTMLButtonElement, preview: HTMLElement, codeEl: HTMLElement, controller?: DiagramController) {
   const svg = preview.querySelector('svg') as SVGSVGElement | null
   const canWriteImage =
     typeof ClipboardItem !== 'undefined' &&
@@ -475,7 +477,7 @@ function copyPreviewAsImage(btn: HTMLButtonElement, preview: HTMLElement, codeEl
   }
   // Build the ClipboardItem synchronously inside the user-gesture handler,
   // deferring the async rasterization via a Promise (WebKit/Safari requirement).
-  const blobPromise = svgToPngBlob(svg, resolveBackground(preview))
+  const blobPromise = svgToPngBlob(svg, resolveBackground(preview), controller?.originalSize(svg))
   navigator.clipboard
     .write([new ClipboardItem({ 'image/png': blobPromise })])
     .then(() => markCopied(btn))
@@ -485,6 +487,7 @@ function copyPreviewAsImage(btn: HTMLButtonElement, preview: HTMLElement, codeEl
 // ── NodeView Factory ──────────────────────────────
 
 export interface CodeBlockNodeViewOptions {
+  diagramInteraction?: DiagramInteractionOptions
   mermaidLoader?: MermaidLoader
   rendererRegistry?: RendererRegistry
 }
@@ -498,7 +501,8 @@ export interface CodeBlockNodeViewOptions {
  * static map.
  */
 export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = {}) {
-  const { rendererRegistry, mermaidLoader } = opts
+  const { rendererRegistry, mermaidLoader, diagramInteraction } = opts
+  const labels = { ...diagramLabels, ...(typeof diagramInteraction === 'object' ? diagramInteraction.labels : {}) }
   const langLists = buildLanguageLists(rendererRegistry)
   const { rendererLangIds, all: allLanguages } = langLists
 
@@ -527,7 +531,8 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
 
     const copyBtn = document.createElement('button')
     copyBtn.className = 'code-copy-btn'
-    copyBtn.title = 'Copy'
+    copyBtn.title = diagramInteraction ? labels.copy : 'Copy'
+    copyBtn.setAttribute('aria-label', copyBtn.title)
     copyBtn.type = 'button'
     copyBtn.innerHTML =
       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
@@ -584,6 +589,52 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
     let rendererTimer: ReturnType<typeof setTimeout> | null = null
     /** Last successfully loaded renderer module — kept so destroy() can be called. */
     let currentRendererModule: RendererPluginModule | null = null
+    let currentRendererContainer: HTMLElement | null = null
+    let rendererGeneration = 0
+    type PendingRenderer = { output: HTMLElement; staging: HTMLElement; module?: RendererPluginModule; started: boolean; disposed: boolean; finalized: boolean }
+    const pendingRenderers = new Set<PendingRenderer>()
+    function disposePendingRenderer(pending: PendingRenderer, settled = false) {
+      // Cancellation cannot abort arbitrary renderer Promises. Free existing resources now,
+      // then sweep this same isolated output once more when late async work settles.
+      if (pending.finalized || (pending.disposed && !settled)) return
+      pending.disposed = true
+      pending.finalized = settled
+      if (pending.started) { try { pending.module?.destroy?.(pending.output) } catch {} }
+      pending.staging.remove(); pendingRenderers.delete(pending)
+    }
+    function disposePendingRenderers() { for (const pending of pendingRenderers) disposePendingRenderer(pending) }
+    let diagram: DiagramController | undefined
+    let focusPreviewAfterRender = false
+    const canInteract = () => Boolean(diagramInteraction) && (isMermaid || ['dot', 'graphviz'].includes(String(node.attrs.language)))
+    function clearDiagram() { diagram?.destroy(); diagram = undefined }
+    function bindDiagram(preview: HTMLElement) {
+      if (!canInteract() || destroyed || !preview.querySelector('svg')) return
+      clearDiagram()
+      const pos = getPos()
+      if (pos === undefined) return
+      diagram = createDiagramController({ preview, wrapper, toolbar, toolbarRight, view, getPos,
+        snapshot: diagramSnapshot(view, pos, node.textContent, String(node.attrs.language)), labels })
+      if (focusPreviewAfterRender) {
+        focusPreviewAfterRender = false
+        if (document.activeElement === toggleBtn) preview.focus({ preventScroll: true })
+      }
+    }
+    function focusCode() {
+      const pos = getPos()
+      if (view.editable && pos !== undefined) view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, pos + 1)).setMeta('addToHistory', false))
+      view.focus()
+    }
+    function disposeRenderer() {
+      if (currentRendererContainer) {
+        try { currentRendererModule?.destroy?.(currentRendererContainer) } catch { /* renderer cleanup is best effort */ }
+      }
+      currentRendererModule = null; currentRendererContainer = null
+    }
+    toolbar.addEventListener('focusin', () => {
+      if (!diagram || !view.editable) return
+      const pos = getPos()
+      if (pos !== undefined) view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, pos + 1)).setMeta('addToHistory', false))
+    })
 
     function disconnectMermaidResize() {
       resizeObserver?.disconnect()
@@ -609,25 +660,27 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
     }
 
     function syncMermaidMode() {
+      if (canInteract()) toolbar.dataset.diagramInteraction = ''; else delete toolbar.dataset.diagramInteraction
       const showPreview = isMermaid && !isEditing
-      if (!showPreview) disconnectMermaidResize()
+      if (!showPreview) { clearDiagram(); disconnectMermaidResize() }
       pre.style.display = (showPreview || (isRenderer && !rendererEditing)) ? 'none' : ''
-      mermaidPreview.style.display = showPreview ? 'flex' : 'none'
+      mermaidPreview.style.display = showPreview ? (diagram ? 'block' : 'flex') : 'none'
       toggleBtn.style.display = (isMermaid || isRenderer) ? 'inline-flex' : 'none'
       wrapper.classList.toggle('mermaid-preview-mode', showPreview)
       if (isMermaid) {
-        toggleBtn.textContent = isEditing ? '👁 Preview' : '✏️ Edit'
+        toggleBtn.textContent = diagramInteraction ? (isEditing ? labels.preview : labels.edit) : (isEditing ? '👁 Preview' : '✏️ Edit')
         if (showPreview) triggerMermaidRender()
       }
     }
 
     function failMermaid(message: string) {
+      clearDiagram()
       disconnectMermaidResize()
       lastRenderedCode = ''
       isEditing = true
       pre.style.display = ''
       wrapper.classList.remove('mermaid-preview-mode')
-      toggleBtn.textContent = '👁 Preview'
+      toggleBtn.textContent = diagramInteraction ? labels.preview : '👁 Preview'
       mermaidPreview.style.display = 'flex'
       mermaidPreview.innerHTML = `<div class="mermaid-error">${escapeText(message)}</div>`
     }
@@ -638,6 +691,7 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
       const generation = ++renderGeneration
       if (renderTimer) clearTimeout(renderTimer)
       if (!codeText.trim()) {
+        clearDiagram()
         mermaidPreview.innerHTML = '<div class="mermaid-empty">Empty diagram</div>'
         lastRenderedCode = ''
         return
@@ -646,6 +700,7 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
       const valid = () => !destroyed && isMermaid && !isEditing && generation === renderGeneration && node.textContent === codeText
       renderTimer = setTimeout(async () => {
         if (!valid()) return
+        clearDiagram()
         mermaidPreview.innerHTML = '<div class="mermaid-loading"><div class="mermaid-spinner"></div>Loading diagram...</div>'
         try {
           const api = await loadMermaidApi(mermaidLoader)
@@ -663,7 +718,7 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
             ? await api.renderMermaid(codeText, { maxWidth: contentWidth, container: mermaidPreview })
             : await api.renderMermaid(codeText)
           if (!valid()) return
-          if ('svg' in result) mermaidPreview.innerHTML = result.svg
+          if ('svg' in result) { mermaidPreview.innerHTML = result.svg; bindDiagram(mermaidPreview) }
           else failMermaid(result.error)
         } catch {
           if (valid()) failMermaid('Render failed — try Preview again')
@@ -673,52 +728,69 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
 
     // ── Renderer plugin sync ──
     function syncRendererMode() {
+      if (canInteract()) toolbar.dataset.diagramInteraction = ''; else delete toolbar.dataset.diagramInteraction
       const showPreview = isRenderer && !rendererEditing
+      if (!showPreview) clearDiagram()
       pre.style.display = (showPreview || (isMermaid && !isEditing)) ? 'none' : ''
       rendererPreview.style.display = showPreview ? 'block' : 'none'
       toggleBtn.style.display = (isMermaid || isRenderer) ? 'inline-flex' : 'none'
       wrapper.classList.toggle('renderer-preview-mode', showPreview)
       if (isRenderer) {
-        toggleBtn.textContent = rendererEditing ? '👁 Preview' : '✏️ Edit'
+        toggleBtn.textContent = diagramInteraction ? (rendererEditing ? labels.preview : labels.edit) : (rendererEditing ? '👁 Preview' : '✏️ Edit')
         if (showPreview) triggerRendererRender()
       }
     }
 
     function triggerRendererRender() {
-      const source = code.textContent || ''
+      const source = node.textContent
       const lang = (node.attrs.language as string) || ''
-      if (!rendererRegistry || !rendererRegistry.has(lang)) return
-
+      if (destroyed || rendererEditing || !rendererRegistry || !rendererRegistry.has(lang)) return
+      if (source === lastRendererCode && source.trim()) {
+        if (!diagram && currentRendererContainer) bindDiagram(rendererPreview)
+        return
+      }
+      const generation = ++rendererGeneration
+      disposePendingRenderers()
+      if (rendererTimer) clearTimeout(rendererTimer)
       if (!source.trim()) {
+        clearDiagram(); disposeRenderer()
         rendererPreview.innerHTML = '<div class="renderer-empty">Empty block</div>'
         lastRendererCode = ''
         return
       }
-      if (source === lastRendererCode) return
       lastRendererCode = source
-
-      if (rendererTimer) clearTimeout(rendererTimer)
+      const valid = () => !destroyed && !rendererEditing && isRenderer && generation === rendererGeneration && node.attrs.language === lang && node.textContent === source
       rendererTimer = setTimeout(async () => {
+        if (!valid()) return
+        clearDiagram(); disposeRenderer()
         rendererPreview.innerHTML = '<div class="renderer-loading"><div class="renderer-spinner"></div>Rendering...</div>'
+        let module: RendererPluginModule | undefined
+        const staging = document.createElement('div')
+        const output = document.createElement('div')
+        staging.appendChild(output)
+        const pending: PendingRenderer = { output, staging, started: false, disposed: false, finalized: false }
+        pendingRenderers.add(pending)
+        output.className = 'renderer-content'
         try {
-          const module = await rendererRegistry.load(lang)
-          if (code.textContent !== source) return // source changed during load
-          // Dispose previous renderer (frees canvases / observers)
-          if (currentRendererModule?.destroy) {
-            try { currentRendererModule.destroy(rendererPreview) } catch { /* swallow per §4.5 */ }
-          }
-          currentRendererModule = module
-          rendererPreview.innerHTML = ''
-          try {
-            await module.render(source, rendererPreview)
-          } catch (e) {
-            // §3.3 RendererPluginModule error contract: NodeView shows
-            // .renderer-error fallback; serializer keeps fenced source via
-            // node.attrs (not DOM), so roundtrip is safe.
-            rendererPreview.innerHTML =
-              `<div class="renderer-error" data-language="${escapeText(lang)}" data-error="${escapeText(String(e))}">[Renderer ${escapeText(lang)} failed]</div>`
-          }
+          module = await rendererRegistry.load(lang)
+          if (!valid() || pending.disposed) { disposePendingRenderer(pending, true); return }
+          pending.module = module
+          // A connected but isolated staging container gives layout-dependent renderers real width.
+          // Stale async work only ever writes to its own output, never the current preview.
+          Object.assign(staging.style, { position: 'absolute', left: '0', top: '0', visibility: 'hidden', pointerEvents: 'none', width: `${rendererPreview.clientWidth || wrapper.clientWidth}px` })
+          wrapper.appendChild(staging)
+          pending.started = true
+          await module.render(source, output)
+          if (!valid() || pending.disposed) { disposePendingRenderer(pending, true); return }
+          pendingRenderers.delete(pending)
+          rendererPreview.replaceChildren(output)
+          staging.remove()
+          currentRendererModule = module; currentRendererContainer = output
+          bindDiagram(rendererPreview)
         } catch (e) {
+          disposePendingRenderer(pending, true)
+          if (!valid()) return
+          lastRendererCode = ''
           rendererPreview.innerHTML =
             `<div class="renderer-error" data-language="${escapeText(lang)}" data-error="${escapeText(String(e))}">[Renderer ${escapeText(lang)} failed]</div>`
         }
@@ -742,7 +814,7 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
     } else if (isRenderer) {
       // Hide pre and show toggle button immediately, then re-trigger after content arrives
       syncRendererMode()
-      requestAnimationFrame(() => syncRendererMode())
+      requestAnimationFrame(() => { if (!destroyed) syncRendererMode() })
     } else {
       syncMermaidMode()
     }
@@ -751,6 +823,7 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
     let activePicker: { destroy: () => void } | null = null
 
     langLabel.addEventListener('mousedown', (e) => {
+      if (!view.editable) return
       e.preventDefault()
       e.stopPropagation()
 
@@ -791,22 +864,29 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
     })
 
     // ── Mermaid / Renderer toggle button ──
-    toggleBtn.addEventListener('mousedown', (e) => {
+    toggleBtn.addEventListener('mousedown', e => e.preventDefault())
+    toggleBtn.addEventListener(diagramInteraction ? 'click' : 'mousedown', (e) => {
       e.preventDefault()
       e.stopPropagation()
       if (isMermaid) {
         isEditing = !isEditing
+        focusPreviewAfterRender = Boolean(diagramInteraction) && !isEditing
+        if (focusPreviewAfterRender) toggleBtn.focus({ preventScroll: true })
         if (isEditing) { renderGeneration++; lastRenderedCode = '' }
         syncMermaidMode()
       } else if (isRenderer) {
         rendererEditing = !rendererEditing
+        focusPreviewAfterRender = Boolean(diagramInteraction) && !rendererEditing
+        if (focusPreviewAfterRender) toggleBtn.focus({ preventScroll: true })
+        if (rendererEditing) { rendererGeneration++; disposePendingRenderers(); if (!currentRendererContainer) lastRendererCode = '' }
         syncRendererMode()
       }
-      if (isEditing || rendererEditing) view.focus()
+      if (isEditing || rendererEditing) { if (diagramInteraction) focusCode(); else view.focus() }
     })
 
     // Click SVG preview → enter edit mode
     mermaidPreview.addEventListener('mousedown', (e) => {
+      if (canInteract()) return
       e.preventDefault()
       e.stopPropagation()
       isEditing = true
@@ -818,13 +898,14 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
     // ── Copy button ──
     // In a rendered preview (mermaid / renderer SVG) copy the image as PNG;
     // in edit mode or a plain code block copy the source text.
-    copyBtn.addEventListener('mousedown', (e) => {
+    copyBtn.addEventListener('mousedown', e => e.preventDefault())
+    copyBtn.addEventListener(diagramInteraction ? 'click' : 'mousedown', (e) => {
       e.preventDefault()
       e.stopPropagation()
       if (isMermaid && !isEditing) {
-        copyPreviewAsImage(copyBtn, mermaidPreview, code)
+        copyPreviewAsImage(copyBtn, mermaidPreview, code, diagram)
       } else if (isRenderer && !rendererEditing) {
-        copyPreviewAsImage(copyBtn, rendererPreview, code)
+        copyPreviewAsImage(copyBtn, rendererPreview, code, diagram)
       } else {
         handleCopy(copyBtn, code)
       }
@@ -845,6 +926,9 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
 
       update(updatedNode: PmNode) {
         if (updatedNode.type.name !== 'code_block') return false
+        const languageChanged = node.attrs.language !== updatedNode.attrs.language
+        const sourceChanged = node.textContent !== updatedNode.textContent
+        if (languageChanged || sourceChanged) { clearDiagram(); rendererGeneration++; disposePendingRenderers(); renderGeneration++; lastRendererCode = ''; lastRenderedCode = '' }
         node = updatedNode
         langLabel.textContent = findLanguageLabel((updatedNode.attrs.language as string) || '', allLanguages)
 
@@ -864,15 +948,11 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
 
         const wasRenderer = isRenderer
         isRenderer = updatedNode.attrs.language !== 'mermaid' && rendererLangIds.has((updatedNode.attrs.language as string) || '')
-        if (isRenderer !== wasRenderer) {
+        if (isRenderer !== wasRenderer || languageChanged) {
           rendererEditing = false
           lastRendererCode = ''
           rendererPreview.innerHTML = ''
-          // Dispose old renderer module when switching away
-          if (!isRenderer && currentRendererModule?.destroy) {
-            try { currentRendererModule.destroy(rendererPreview) } catch { /* swallow */ }
-            currentRendererModule = null
-          }
+          disposeRenderer()
         }
 
         if (isRenderer) {
@@ -894,7 +974,9 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
       },
 
       destroy() {
-        destroyed = true; renderGeneration++
+        destroyed = true; renderGeneration++; rendererGeneration++
+        disposePendingRenderers()
+        clearDiagram()
         disconnectMermaidResize()
         if (activePicker) {
           activePicker.destroy()
@@ -902,10 +984,7 @@ export function createCodeBlockNodeViewFactory(opts: CodeBlockNodeViewOptions = 
         }
         if (renderTimer) clearTimeout(renderTimer)
         if (rendererTimer) clearTimeout(rendererTimer)
-        if (currentRendererModule?.destroy) {
-          try { currentRendererModule.destroy(rendererPreview) } catch { /* swallow */ }
-        }
-        currentRendererModule = null
+        disposeRenderer()
         mermaidReRenderCallbacks.delete(onThemeChange)
       },
     }

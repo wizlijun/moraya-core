@@ -73,6 +73,7 @@ import type {
   FrontmatterViewFactory,
 } from './types'
 import { createDocCache, type DocCache } from './doc-cache'
+import { createDiagramStatePlugin, type DiagramInteractionOptions } from './plugins/diagram-interaction'
 
 // ── Tier 1: Enhancement plugins (dynamic imports, loaded in parallel) ──
 
@@ -88,6 +89,7 @@ interface Tier1Plugins {
 }
 
 interface Tier1CacheKey {
+  diagramInteraction?: DiagramInteractionOptions
   mermaidLoader?: MermaidLoader
   schema: Schema
   rendererRegistry?: RendererRegistry
@@ -96,7 +98,7 @@ interface Tier1CacheKey {
 let tier1Cache: { key: Tier1CacheKey; plugins: Tier1Plugins } | null = null
 let tier1Loading: { key: Tier1CacheKey; promise: Promise<Tier1Plugins> } | null = null
 function sameTier1Key(a: Tier1CacheKey, b: Tier1CacheKey): boolean {
-  return a.schema === b.schema && a.rendererRegistry === b.rendererRegistry && a.mermaidLoader === b.mermaidLoader
+  return a.schema === b.schema && a.rendererRegistry === b.rendererRegistry && a.mermaidLoader === b.mermaidLoader && a.diagramInteraction === b.diagramInteraction
 }
 
 /**
@@ -113,8 +115,9 @@ export function preloadEnhancementPlugins(
   schema: Schema,
   rendererRegistry?: RendererRegistry,
   mermaidLoader?: MermaidLoader,
+  diagramInteraction?: DiagramInteractionOptions,
 ): Promise<Tier1Plugins> {
-  const key: Tier1CacheKey = { schema, ...(rendererRegistry ? { rendererRegistry } : {}), ...(mermaidLoader ? { mermaidLoader } : {}) }
+  const key: Tier1CacheKey = { schema, ...(diagramInteraction !== undefined ? { diagramInteraction } : {}), ...(rendererRegistry ? { rendererRegistry } : {}), ...(mermaidLoader ? { mermaidLoader } : {}) }
   if (tier1Cache && sameTier1Key(tier1Cache.key, key)) return Promise.resolve(tier1Cache.plugins)
   if (tier1Loading && sameTier1Key(tier1Loading.key, key)) return tier1Loading.promise
 
@@ -132,6 +135,7 @@ export function preloadEnhancementPlugins(
     }
     if (cbv.status === 'fulfilled') {
       plugins.codeBlockView = cbv.value.createCodeBlockNodeViewFactory({
+        ...(diagramInteraction !== undefined ? { diagramInteraction } : {}),
         ...(rendererRegistry ? { rendererRegistry } : {}),
         ...(mermaidLoader ? { mermaidLoader } : {}),
       })
@@ -685,6 +689,8 @@ function createLazyChangePlugin(onChange: (markdown: string) => void, debounceMs
 // ── Public types ────────────────────────────────────────────────
 
 export interface EditorPluginOptions {
+  /** Opt-in diagram viewing gestures; never affects Markdown or history. */
+  diagramInteraction?: DiagramInteractionOptions
   /** Render features */
   enableMath?: boolean              // default true (KaTeX in toDOM, no plugin)
   enableMermaid?: boolean           // false suppresses injection; true never creates a default loader
@@ -807,9 +813,10 @@ export async function createEditorPlugins(
     },
   }
 
-  const tier1 = await preloadEnhancementPlugins(schema, opts.rendererRegistry, opts.enableMermaid === false ? undefined : opts.mermaidLoader)
+  const tier1 = await preloadEnhancementPlugins(schema, opts.rendererRegistry, opts.enableMermaid === false ? undefined : opts.mermaidLoader, opts.diagramInteraction)
 
   const plugins: Plugin[] = [
+    ...(opts.diagramInteraction ? [createDiagramStatePlugin()] : []),
     // List shortcuts using event.code (reliable on macOS where Option+key
     // produces special chars). Must come before keymap so this handler has
     // highest priority.
@@ -913,7 +920,7 @@ export async function createEditor(opts: CreateEditorOptions): Promise<MorayaEdi
 
   // Tier 1 nodeViews: code_block replaced with toolbar+picker+mermaid+renderer NodeView.
   // We don't await preloadEnhancementPlugins again — createEditorPlugins already did.
-  const tier1 = await preloadEnhancementPlugins(schema, opts.rendererRegistry, opts.enableMermaid === false ? undefined : opts.mermaidLoader)
+  const tier1 = await preloadEnhancementPlugins(schema, opts.rendererRegistry, opts.enableMermaid === false ? undefined : opts.mermaidLoader, opts.diagramInteraction)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const nodeViews: Record<string, any> = {}
   if (tier1.codeBlockView) {

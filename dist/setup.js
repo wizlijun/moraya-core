@@ -8,12 +8,499 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
+// src/plugins/diagram-interaction.ts
+import { Plugin as Plugin7, PluginKey as PluginKey7, TextSelection as TextSelection5 } from "prosemirror-state";
+function createDiagramStatePlugin() {
+  return new Plugin7({
+    key: stateKey,
+    view: (view) => ({ update: () => {
+      for (const check of attachmentChecks.get(view) ?? []) check();
+    } }),
+    state: {
+      init: () => /* @__PURE__ */ new Map(),
+      apply(tr, previous) {
+        if (!tr.docChanged) return previous;
+        const next = /* @__PURE__ */ new Map();
+        for (const [pos, snapshot] of previous) {
+          const mapped = tr.mapping.mapResult(pos, 1);
+          const node = tr.doc.nodeAt(mapped.pos);
+          if (!mapped.deleted && node?.type.name === "code_block" && node.textContent === snapshot.source && node.attrs.language === snapshot.language) next.set(mapped.pos, snapshot);
+        }
+        return next;
+      }
+    }
+  });
+}
+function diagramSnapshot(view, pos, source, language) {
+  let snapshots = stateKey.getState(view.state);
+  if (!snapshots) {
+    snapshots = fallbackSnapshots.get(view);
+    if (!snapshots) fallbackSnapshots.set(view, snapshots = /* @__PURE__ */ new Map());
+  }
+  const existing = snapshots.get(pos);
+  if (existing?.source === source && existing.language === language) return existing;
+  const snapshot = { source, language, scale: 1, x: 0, y: 0 };
+  snapshots.set(pos, snapshot);
+  return snapshot;
+}
+function scrollRoot(el) {
+  let parent = el.parentElement;
+  while (parent) {
+    if (/(auto|scroll)/.test(getComputedStyle(parent).overflowY)) return parent;
+    parent = parent.parentElement;
+  }
+  return el.parentElement ?? el;
+}
+function hit(el, e) {
+  const r2 = el.getBoundingClientRect();
+  return r2.width > 0 && r2.height > 0 && e.clientX >= r2.left && e.clientX < r2.right && e.clientY >= r2.top && e.clientY < r2.bottom;
+}
+function registerWheel(root, target) {
+  let router = routers.get(root);
+  if (!router) {
+    router = { targets: /* @__PURE__ */ new Set(), last: -Infinity, owner: null, handler: () => {
+    }, dispose: () => {
+    } };
+    const current = router;
+    let gestureActive = false, gestureOwner = null, gestureTail = 0;
+    const gestureStart = (e) => {
+      gestureActive = true;
+      gestureOwner = [...current.targets].find((t) => hit(t.viewport, e) || t.viewport.contains(e.target)) ?? null;
+      if (gestureOwner && e.cancelable) {
+        e.preventDefault();
+        gestureOwner.gestureStart(e);
+      } else gestureOwner = null;
+    };
+    const gestureChange = (e) => {
+      if (!gestureActive || !gestureOwner || !e.cancelable) return;
+      e.preventDefault();
+      gestureOwner.gestureChange(e);
+    };
+    const gestureEnd = (e) => {
+      if (!gestureActive) return;
+      if (gestureOwner) {
+        if (e.cancelable) e.preventDefault();
+        gestureOwner.gestureEnd(e);
+      }
+      gestureActive = false;
+      gestureTail = performance.now() + 150;
+    };
+    const blur = () => {
+      gestureActive = false;
+      gestureOwner = null;
+      gestureTail = 0;
+      current.last = -Infinity;
+      current.owner = null;
+    };
+    root.addEventListener("gesturestart", gestureStart, { capture: true, passive: false });
+    root.addEventListener("gesturechange", gestureChange, { capture: true, passive: false });
+    root.addEventListener("gestureend", gestureEnd, { capture: true, passive: false });
+    window.addEventListener("blur", blur);
+    router.dispose = () => {
+      root.removeEventListener("gesturestart", gestureStart, true);
+      root.removeEventListener("gesturechange", gestureChange, true);
+      root.removeEventListener("gestureend", gestureEnd, true);
+      window.removeEventListener("blur", blur);
+    };
+    router.handler = (e) => {
+      if (!e.deltaY) return;
+      const now = performance.now();
+      if (gestureActive || now < gestureTail) {
+        if (gestureOwner && e.cancelable) e.preventDefault();
+        return;
+      }
+      if (now - current.last > 150) current.owner = [...current.targets].find((t) => hit(t.viewport, e)) ?? null;
+      current.last = now;
+      const owner = current.owner;
+      if (!owner) return;
+      if (!e.cancelable) return;
+      e.preventDefault();
+      if (current.targets.has(owner) && hit(owner.viewport, e) && !owner.nativeActive()) owner.wheel(e);
+    };
+    root.addEventListener("wheel", router.handler, { capture: true, passive: false });
+    routers.set(root, router);
+  }
+  router.targets.add(target);
+  return () => {
+    router.targets.delete(target);
+    if (!router.targets.size) {
+      root.removeEventListener("wheel", router.handler, true);
+      router.dispose();
+      routers.delete(root);
+    }
+  };
+}
+function createDiagramController(args) {
+  const { preview, wrapper, toolbar, toolbarRight, view, getPos, snapshot, labels } = args;
+  const originalStyle = preview.getAttribute("style");
+  const layer = document.createElement("div");
+  layer.className = "diagram-transform";
+  while (preview.firstChild) layer.appendChild(preview.firstChild);
+  preview.appendChild(layer);
+  preview.classList.add("diagram-viewport");
+  preview.dataset.diagramInteraction = "";
+  preview.tabIndex = 0;
+  preview.setAttribute("role", "region");
+  preview.setAttribute("aria-label", labels.region);
+  preview.title = labels.hint;
+  Object.assign(preview.style, { display: "block", position: "relative", overflow: "hidden", padding: "0", marginLeft: "24px", marginRight: "24px", touchAction: "none", minHeight: "0" });
+  Object.assign(layer.style, { position: "absolute", left: "0", top: "0", transformOrigin: "0 0" });
+  wrapper.classList.add("diagram-interactive");
+  const controls = document.createElement("div");
+  controls.className = "diagram-controls";
+  controls.dataset.diagramInteraction = "";
+  controls.setAttribute("role", "group");
+  controls.setAttribute("aria-label", labels.region);
+  toolbarRight.prepend(controls);
+  const status = document.createElement("span");
+  status.className = "diagram-status";
+  status.setAttribute("aria-live", "polite");
+  Object.assign(status.style, { position: "absolute", width: "1px", height: "1px", overflow: "hidden", clipPath: "inset(50%)" });
+  controls.appendChild(status);
+  let dead = false, frame = 0, activeTimer;
+  let width = snapshot.width ?? 0, height = snapshot.height ?? 0, naturalWidth = snapshot.naturalWidth ?? 0, naturalHeight = snapshot.naturalHeight ?? 0, fit = 1;
+  let native = false, nativeUntil = 0, nativeScale = 1;
+  let pointer;
+  let suppressClick = false;
+  let lastPoint;
+  const cleanup = [];
+  function on(el, event, handler, options) {
+    el.addEventListener(event, handler, options);
+    cleanup.push(() => el.removeEventListener(event, handler, options));
+  }
+  const buttons = {};
+  function button(key, text2, label, action) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = `diagram-control diagram-${key}`;
+    b.textContent = text2;
+    b.title = label;
+    b.setAttribute("aria-label", label);
+    b.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      action();
+    });
+    controls.appendChild(b);
+    buttons[key] = b;
+  }
+  const minimum = () => Math.min(0.5, fit);
+  function constrain() {
+    snapshot.scale = Math.max(minimum(), Math.min(4, snapshot.scale));
+    const w = naturalWidth * snapshot.scale, h = naturalHeight * snapshot.scale;
+    snapshot.x = w <= width ? (width - w) / 2 : Math.min(0, Math.max(width - w, snapshot.x));
+    snapshot.y = h <= height ? (height - h) / 2 : Math.min(0, Math.max(height - h, snapshot.y));
+  }
+  function draw() {
+    frame = 0;
+    if (dead) return;
+    constrain();
+    layer.style.transform = `translate(${snapshot.x}px, ${snapshot.y}px) scale(${snapshot.scale})`;
+    const percent = `${Math.round(snapshot.scale * 100)}%`;
+    buttons["zoom-reset"].textContent = percent;
+    buttons["zoom-reset"].setAttribute("aria-label", `${labels.reset}: ${percent}`);
+    buttons["zoom-out"].disabled = snapshot.scale <= minimum() + 1e-6;
+    buttons["zoom-in"].disabled = snapshot.scale >= 4 - 1e-6;
+    buttons["pan-left"].disabled = snapshot.x >= 0;
+    buttons["pan-right"].disabled = snapshot.x <= width - naturalWidth * snapshot.scale;
+    buttons["pan-up"].disabled = snapshot.y >= 0;
+    buttons["pan-down"].disabled = snapshot.y <= height - naturalHeight * snapshot.scale;
+    preview.style.cursor = pointer?.dragged ? "grabbing" : naturalWidth * snapshot.scale > width || naturalHeight * snapshot.scale > height ? "grab" : "";
+  }
+  function schedule() {
+    if (!frame) frame = requestAnimationFrame(draw);
+  }
+  function activity() {
+    wrapper.classList.add("diagram-gesture-active");
+    clearTimeout(activeTimer);
+    activeTimer = setTimeout(() => {
+      if (!dead) {
+        wrapper.classList.remove("diagram-gesture-active");
+        status.textContent = `${Math.round(snapshot.scale * 100)}%`;
+      }
+    }, 250);
+  }
+  function zoom(next, x = width / 2, y = height / 2) {
+    next = Math.max(minimum(), Math.min(4, next));
+    const ratio = next / snapshot.scale;
+    snapshot.x = x - (x - snapshot.x) * ratio;
+    snapshot.y = y - (y - snapshot.y) * ratio;
+    snapshot.scale = next;
+    constrain();
+    schedule();
+    activity();
+  }
+  function reset(scale) {
+    snapshot.scale = scale;
+    snapshot.x = (width - naturalWidth * scale) / 2;
+    snapshot.y = scale === 1 && naturalHeight > height ? 0 : (height - naturalHeight * scale) / 2;
+    constrain();
+    schedule();
+    activity();
+  }
+  function pan(x, y) {
+    snapshot.x += x;
+    snapshot.y += y;
+    constrain();
+    schedule();
+    activity();
+  }
+  button("zoom-out", "\u2212", labels.zoomOut, () => zoom(snapshot.scale / 1.25));
+  button("zoom-reset", "100%", labels.reset, () => reset(1));
+  button("zoom-in", "+", labels.zoomIn, () => zoom(snapshot.scale * 1.25));
+  button("zoom-fit", "\u2922", labels.fit, () => reset(fit));
+  button("pan-left", "\u2190", labels.panLeft, () => pan(40, 0));
+  button("pan-right", "\u2192", labels.panRight, () => pan(-40, 0));
+  button("pan-up", "\u2191", labels.panUp, () => pan(0, 40));
+  button("pan-down", "\u2193", labels.panDown, () => pan(0, -40));
+  let root = scrollRoot(view.dom);
+  let unregisterWheel;
+  function refresh() {
+    if (dead) return;
+    if (!preview.isConnected) {
+      finishPointer();
+      native = false;
+      unregisterWheel?.();
+      unregisterWheel = void 0;
+      return;
+    }
+    const nextRoot = scrollRoot(view.dom);
+    if (nextRoot !== root || !unregisterWheel) {
+      unregisterWheel?.();
+      observer?.unobserve(root);
+      root = nextRoot;
+      unregisterWheel = registerWheel(root, wheelTarget);
+      observer?.observe(root);
+    }
+    const previousW = width, previousH = height, previousNaturalW = naturalWidth, previousNaturalH = naturalHeight;
+    width = preview.clientWidth || Math.max(1, wrapper.clientWidth - 48);
+    layer.style.transform = "none";
+    layer.style.width = `${width}px`;
+    const svg = layer.querySelector("svg");
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    naturalWidth = rect.width || svg.viewBox?.baseVal?.width || Number(svg.getAttribute("width")) || width;
+    naturalHeight = rect.height || svg.viewBox?.baseVal?.height || Number(svg.getAttribute("height")) || 60;
+    layer.style.width = `${naturalWidth}px`;
+    const rootRect = root.getBoundingClientRect();
+    const visible = Math.max(1, Math.min(rootRect.bottom || innerHeight, innerHeight) - Math.max(0, rootRect.top));
+    height = Math.max(1, Math.min(naturalHeight, Math.min(560, visible * 0.7) - toolbar.getBoundingClientRect().height));
+    preview.style.height = `${height}px`;
+    fit = Math.min(1, width / naturalWidth, height / naturalHeight);
+    if (previousW > 0 && previousNaturalW > 0) {
+      snapshot.x = width / 2 - (previousW / 2 - snapshot.x) / (previousNaturalW * snapshot.scale) * naturalWidth * snapshot.scale;
+      snapshot.y = height / 2 - (previousH / 2 - snapshot.y) / (previousNaturalH * snapshot.scale) * naturalHeight * snapshot.scale;
+    } else if (snapshot.scale === 1 && snapshot.x === 0 && snapshot.y === 0) {
+      snapshot.x = (width - naturalWidth) / 2;
+      snapshot.y = naturalHeight > height ? 0 : (height - naturalHeight) / 2;
+    }
+    snapshot.width = width;
+    snapshot.height = height;
+    snapshot.naturalWidth = naturalWidth;
+    snapshot.naturalHeight = naturalHeight;
+    draw();
+  }
+  function point(e) {
+    const r2 = preview.getBoundingClientRect();
+    return { x: e.clientX - r2.left, y: e.clientY - r2.top };
+  }
+  const wheelTarget = {
+    viewport: preview,
+    nativeActive: () => native || performance.now() < nativeUntil,
+    wheel(e) {
+      const p = point(e);
+      lastPoint = p;
+      const delta = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? height : 1);
+      zoom(snapshot.scale * Math.exp(-Math.max(-120, Math.min(120, delta)) * 2e-3), p.x, p.y);
+    },
+    gestureStart,
+    gestureChange,
+    gestureEnd
+  };
+  function finishPointer() {
+    if (pointer) {
+      const ended = pointer;
+      suppressClick = ended.dragged;
+      pointer = void 0;
+      if (preview.hasPointerCapture?.(ended.id)) preview.releasePointerCapture(ended.id);
+      schedule();
+    }
+  }
+  on(preview, "focus", () => {
+    const pos = getPos();
+    if (view.editable && pos !== void 0) view.dispatch(view.state.tr.setSelection(TextSelection5.create(view.state.doc, pos + 1)).setMeta("addToHistory", false));
+  });
+  on(preview, "pointerdown", ((event) => {
+    const e = event;
+    if (e.button !== 0) return;
+    suppressClick = false;
+    preview.focus({ preventScroll: true });
+    pointer = { id: e.pointerId, x: e.clientX, y: e.clientY, startX: e.clientX, startY: e.clientY, dragged: false };
+  }));
+  on(preview, "pointermove", ((event) => {
+    const e = event;
+    lastPoint = point(e);
+    if (!pointer || pointer.id !== e.pointerId) return;
+    if (!pointer.dragged && Math.hypot(e.clientX - pointer.startX, e.clientY - pointer.startY) > 4 && (naturalWidth * snapshot.scale > width || naturalHeight * snapshot.scale > height)) {
+      pointer.dragged = true;
+      preview.setPointerCapture?.(e.pointerId);
+    }
+    if (pointer.dragged) {
+      e.preventDefault();
+      pan(e.clientX - pointer.x, e.clientY - pointer.y);
+    }
+    pointer.x = e.clientX;
+    pointer.y = e.clientY;
+  }));
+  on(window, "pointerup", finishPointer);
+  on(window, "pointercancel", finishPointer);
+  on(window, "blur", () => {
+    finishPointer();
+    native = false;
+  });
+  on(preview, "lostpointercapture", finishPointer);
+  on(preview, "click", ((event) => {
+    if (suppressClick) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      suppressClick = false;
+    }
+  }), { capture: true });
+  on(preview, "dragstart", (e) => e.preventDefault());
+  on(preview, "mousedown", (e) => e.preventDefault());
+  function exitViewer() {
+    finishPointer();
+    native = false;
+    const pos = getPos(), node = pos === void 0 ? void 0 : view.state.doc.nodeAt(pos);
+    if (view.editable && pos !== void 0 && node) {
+      const after = TextSelection5.findFrom(view.state.doc.resolve(pos + node.nodeSize), 1, true);
+      const before = TextSelection5.findFrom(view.state.doc.resolve(pos), -1, true);
+      view.dispatch(view.state.tr.setSelection(after || before || TextSelection5.create(view.state.doc, pos + 1)).setMeta("addToHistory", false));
+    }
+    view.focus();
+  }
+  on(toolbar, "keydown", ((event) => {
+    const e = event;
+    if (e.key === "Escape" && !e.isComposing && e.keyCode !== 229 && !view.composing && !e.defaultPrevented) {
+      e.preventDefault();
+      e.stopPropagation();
+      exitViewer();
+    }
+  }));
+  on(preview, "keydown", ((event) => {
+    const e = event;
+    if (e.target !== preview || e.defaultPrevented || e.isComposing || e.keyCode === 229 || view.composing || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === "+" || e.key === "=") zoom(snapshot.scale * 1.25);
+    else if (e.key === "-") zoom(snapshot.scale / 1.25);
+    else if (e.key === "0") reset(1);
+    else if (e.key === "ArrowLeft") pan(40, 0);
+    else if (e.key === "ArrowRight") pan(-40, 0);
+    else if (e.key === "ArrowUp") pan(0, 40);
+    else if (e.key === "ArrowDown") pan(0, -40);
+    else if (e.key === "Escape") {
+      exitViewer();
+    } else return;
+    e.preventDefault();
+    e.stopPropagation();
+  }));
+  function gestureStart(_event) {
+    native = true;
+    nativeScale = snapshot.scale;
+    activity();
+  }
+  function gestureChange(event) {
+    if (!native) return;
+    const e = event;
+    const r2 = preview.getBoundingClientRect();
+    const x = typeof e.clientX === "number" && e.clientX >= r2.left && e.clientX <= r2.right ? e.clientX - r2.left : lastPoint?.x ?? width / 2;
+    const y = typeof e.clientY === "number" && e.clientY >= r2.top && e.clientY <= r2.bottom ? e.clientY - r2.top : lastPoint?.y ?? height / 2;
+    if (e.scale > 0 && Number.isFinite(e.scale)) zoom(nativeScale * e.scale, x, y);
+  }
+  function gestureEnd(_event) {
+    native = false;
+    nativeUntil = performance.now() + 150;
+    activity();
+  }
+  let observer;
+  if (typeof ResizeObserver !== "undefined") {
+    observer = new ResizeObserver(() => refresh());
+    observer.observe(wrapper);
+    observer.observe(toolbar);
+    observer.observe(root);
+  }
+  on(window, "resize", refresh);
+  let checks = attachmentChecks.get(view);
+  if (!checks) attachmentChecks.set(view, checks = /* @__PURE__ */ new Set());
+  const checkAttachment = () => {
+    if (!preview.isConnected || root !== scrollRoot(view.dom) || !unregisterWheel) refresh();
+  };
+  checks.add(checkAttachment);
+  cleanup.push(() => {
+    checks.delete(checkAttachment);
+    if (!checks.size) attachmentChecks.delete(view);
+  });
+  refresh();
+  return {
+    refresh,
+    originalSize(svg) {
+      if (!layer.contains(svg)) return;
+      return { width: naturalWidth, height: naturalHeight };
+    },
+    destroy() {
+      dead = true;
+      finishPointer();
+      unregisterWheel?.();
+      cancelAnimationFrame(frame);
+      clearTimeout(activeTimer);
+      observer?.disconnect();
+      for (const clean of cleanup) clean();
+      controls.remove();
+      wrapper.classList.remove("diagram-interactive", "diagram-gesture-active");
+      preview.classList.remove("diagram-viewport");
+      delete preview.dataset.diagramInteraction;
+      preview.removeAttribute("tabindex");
+      preview.removeAttribute("role");
+      preview.removeAttribute("aria-label");
+      preview.removeAttribute("title");
+      if (originalStyle === null) preview.removeAttribute("style");
+      else preview.setAttribute("style", originalStyle);
+      while (layer.firstChild) preview.insertBefore(layer.firstChild, layer);
+      layer.remove();
+    }
+  };
+}
+var diagramLabels, stateKey, attachmentChecks, fallbackSnapshots, routers;
+var init_diagram_interaction = __esm({
+  "src/plugins/diagram-interaction.ts"() {
+    "use strict";
+    diagramLabels = {
+      zoomIn: "Zoom in",
+      zoomOut: "Zoom out",
+      reset: "Restore default size (100%)",
+      fit: "Fit diagram",
+      panLeft: "Move left",
+      panRight: "Move right",
+      panUp: "Move up",
+      panDown: "Move down",
+      region: "Diagram viewer",
+      hint: "Scroll or pinch to zoom; drag to move",
+      preview: "Preview",
+      edit: "Code",
+      copy: "Copy"
+    };
+    stateKey = new PluginKey7("moraya-diagram-view");
+    attachmentChecks = /* @__PURE__ */ new WeakMap();
+    fallbackSnapshots = /* @__PURE__ */ new WeakMap();
+    routers = /* @__PURE__ */ new WeakMap();
+  }
+});
+
 // src/plugins/highlight.ts
 var highlight_exports = {};
 __export(highlight_exports, {
   createHighlightPlugin: () => createHighlightPlugin
 });
-import { Plugin as Plugin7, PluginKey as PluginKey7 } from "prosemirror-state";
+import { Plugin as Plugin8, PluginKey as PluginKey8 } from "prosemirror-state";
 import { Decoration as Decoration4, DecorationSet as DecorationSet4 } from "prosemirror-view";
 import hljs from "highlight.js/lib/core";
 import javascript from "highlight.js/lib/languages/javascript";
@@ -141,7 +628,7 @@ function createHighlightPlugin() {
   let debounceTimer = null;
   let needsRefresh = false;
   let currentView = null;
-  return new Plugin7({
+  return new Plugin8({
     key: highlightPluginKey,
     state: {
       init(_, state) {
@@ -292,7 +779,7 @@ var init_highlight = __esm({
     hljs.registerLanguage("nginx", nginx);
     hljs.registerLanguage("nginxconf", nginx);
     hljs.registerLanguage("shell", shell);
-    highlightPluginKey = new PluginKey7("moraya-syntax-highlight");
+    highlightPluginKey = new PluginKey8("moraya-syntax-highlight");
     HLJS_CACHE_MAX = 100;
     hljsCache = /* @__PURE__ */ new Map();
   }
@@ -303,10 +790,10 @@ var emoji_exports = {};
 __export(emoji_exports, {
   createEmojiPlugin: () => createEmojiPlugin
 });
-import { Plugin as Plugin8, PluginKey as PluginKey8 } from "prosemirror-state";
+import { Plugin as Plugin9, PluginKey as PluginKey9 } from "prosemirror-state";
 import { get as getEmoji } from "node-emoji";
 function createEmojiPlugin() {
-  return new Plugin8({
+  return new Plugin9({
     key: emojiPluginKey,
     props: {
       handleTextInput(view, from, to, text2) {
@@ -343,7 +830,7 @@ var emojiPluginKey;
 var init_emoji = __esm({
   "src/plugins/emoji.ts"() {
     "use strict";
-    emojiPluginKey = new PluginKey8("moraya-emoji");
+    emojiPluginKey = new PluginKey9("moraya-emoji");
   }
 });
 
@@ -352,6 +839,7 @@ var code_block_view_exports = {};
 __export(code_block_view_exports, {
   createCodeBlockNodeViewFactory: () => createCodeBlockNodeViewFactory
 });
+import { TextSelection as TextSelection6 } from "prosemirror-state";
 function loadMermaidApi(loader) {
   const cached = mermaidLoads.get(loader);
   if (cached) return cached;
@@ -605,7 +1093,7 @@ function resolveBackground(el) {
   }
   return bg;
 }
-async function svgToPngBlob(svg, background) {
+async function svgToPngBlob(svg, background, originalSize) {
   const scale = 2;
   let w = 0;
   let h = 0;
@@ -614,7 +1102,7 @@ async function svgToPngBlob(svg, background) {
     w = vb.width;
     h = vb.height;
   } else {
-    const rect = svg.getBoundingClientRect();
+    const rect = originalSize ?? svg.getBoundingClientRect();
     w = rect.width;
     h = rect.height;
   }
@@ -642,18 +1130,19 @@ async function svgToPngBlob(svg, background) {
     canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("toBlob returned null")), "image/png");
   });
 }
-function copyPreviewAsImage(btn, preview, codeEl) {
+function copyPreviewAsImage(btn, preview, codeEl, controller) {
   const svg = preview.querySelector("svg");
   const canWriteImage = typeof ClipboardItem !== "undefined" && !!navigator.clipboard && typeof navigator.clipboard.write === "function";
   if (!svg || !canWriteImage) {
     handleCopy(btn, codeEl);
     return;
   }
-  const blobPromise = svgToPngBlob(svg, resolveBackground(preview));
+  const blobPromise = svgToPngBlob(svg, resolveBackground(preview), controller?.originalSize(svg));
   navigator.clipboard.write([new ClipboardItem({ "image/png": blobPromise })]).then(() => markCopied(btn)).catch(() => handleCopy(btn, codeEl));
 }
 function createCodeBlockNodeViewFactory(opts = {}) {
-  const { rendererRegistry, mermaidLoader } = opts;
+  const { rendererRegistry, mermaidLoader, diagramInteraction } = opts;
+  const labels = { ...diagramLabels, ...typeof diagramInteraction === "object" ? diagramInteraction.labels : {} };
   const langLists = buildLanguageLists(rendererRegistry);
   const { rendererLangIds, all: allLanguages } = langLists;
   return function createCodeBlockNodeView(nodeArg, view, getPos) {
@@ -672,7 +1161,8 @@ function createCodeBlockNodeViewFactory(opts = {}) {
     toggleBtn.type = "button";
     const copyBtn = document.createElement("button");
     copyBtn.className = "code-copy-btn";
-    copyBtn.title = "Copy";
+    copyBtn.title = diagramInteraction ? labels.copy : "Copy";
+    copyBtn.setAttribute("aria-label", copyBtn.title);
     copyBtn.type = "button";
     copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg><svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>';
     const toolbarRight = document.createElement("div");
@@ -711,6 +1201,72 @@ function createCodeBlockNodeViewFactory(opts = {}) {
     let lastRendererCode = "";
     let rendererTimer = null;
     let currentRendererModule = null;
+    let currentRendererContainer = null;
+    let rendererGeneration = 0;
+    const pendingRenderers = /* @__PURE__ */ new Set();
+    function disposePendingRenderer(pending, settled = false) {
+      if (pending.finalized || pending.disposed && !settled) return;
+      pending.disposed = true;
+      pending.finalized = settled;
+      if (pending.started) {
+        try {
+          pending.module?.destroy?.(pending.output);
+        } catch {
+        }
+      }
+      pending.staging.remove();
+      pendingRenderers.delete(pending);
+    }
+    function disposePendingRenderers() {
+      for (const pending of pendingRenderers) disposePendingRenderer(pending);
+    }
+    let diagram;
+    let focusPreviewAfterRender = false;
+    const canInteract = () => Boolean(diagramInteraction) && (isMermaid || ["dot", "graphviz"].includes(String(node.attrs.language)));
+    function clearDiagram() {
+      diagram?.destroy();
+      diagram = void 0;
+    }
+    function bindDiagram(preview) {
+      if (!canInteract() || destroyed || !preview.querySelector("svg")) return;
+      clearDiagram();
+      const pos = getPos();
+      if (pos === void 0) return;
+      diagram = createDiagramController({
+        preview,
+        wrapper,
+        toolbar,
+        toolbarRight,
+        view,
+        getPos,
+        snapshot: diagramSnapshot(view, pos, node.textContent, String(node.attrs.language)),
+        labels
+      });
+      if (focusPreviewAfterRender) {
+        focusPreviewAfterRender = false;
+        if (document.activeElement === toggleBtn) preview.focus({ preventScroll: true });
+      }
+    }
+    function focusCode() {
+      const pos = getPos();
+      if (view.editable && pos !== void 0) view.dispatch(view.state.tr.setSelection(TextSelection6.create(view.state.doc, pos + 1)).setMeta("addToHistory", false));
+      view.focus();
+    }
+    function disposeRenderer() {
+      if (currentRendererContainer) {
+        try {
+          currentRendererModule?.destroy?.(currentRendererContainer);
+        } catch {
+        }
+      }
+      currentRendererModule = null;
+      currentRendererContainer = null;
+    }
+    toolbar.addEventListener("focusin", () => {
+      if (!diagram || !view.editable) return;
+      const pos = getPos();
+      if (pos !== void 0) view.dispatch(view.state.tr.setSelection(TextSelection6.create(view.state.doc, pos + 1)).setMeta("addToHistory", false));
+    });
     function disconnectMermaidResize() {
       resizeObserver?.disconnect();
       resizeObserver = void 0;
@@ -731,24 +1287,30 @@ function createCodeBlockNodeViewFactory(opts = {}) {
       resizeObserver.observe(wrapper);
     }
     function syncMermaidMode() {
+      if (canInteract()) toolbar.dataset.diagramInteraction = "";
+      else delete toolbar.dataset.diagramInteraction;
       const showPreview = isMermaid && !isEditing;
-      if (!showPreview) disconnectMermaidResize();
+      if (!showPreview) {
+        clearDiagram();
+        disconnectMermaidResize();
+      }
       pre.style.display = showPreview || isRenderer && !rendererEditing ? "none" : "";
-      mermaidPreview.style.display = showPreview ? "flex" : "none";
+      mermaidPreview.style.display = showPreview ? diagram ? "block" : "flex" : "none";
       toggleBtn.style.display = isMermaid || isRenderer ? "inline-flex" : "none";
       wrapper.classList.toggle("mermaid-preview-mode", showPreview);
       if (isMermaid) {
-        toggleBtn.textContent = isEditing ? "\u{1F441} Preview" : "\u270F\uFE0F Edit";
+        toggleBtn.textContent = diagramInteraction ? isEditing ? labels.preview : labels.edit : isEditing ? "\u{1F441} Preview" : "\u270F\uFE0F Edit";
         if (showPreview) triggerMermaidRender();
       }
     }
     function failMermaid(message) {
+      clearDiagram();
       disconnectMermaidResize();
       lastRenderedCode = "";
       isEditing = true;
       pre.style.display = "";
       wrapper.classList.remove("mermaid-preview-mode");
-      toggleBtn.textContent = "\u{1F441} Preview";
+      toggleBtn.textContent = diagramInteraction ? labels.preview : "\u{1F441} Preview";
       mermaidPreview.style.display = "flex";
       mermaidPreview.innerHTML = `<div class="mermaid-error">${escapeText(message)}</div>`;
     }
@@ -759,6 +1321,7 @@ function createCodeBlockNodeViewFactory(opts = {}) {
       const generation = ++renderGeneration;
       if (renderTimer) clearTimeout(renderTimer);
       if (!codeText.trim()) {
+        clearDiagram();
         mermaidPreview.innerHTML = '<div class="mermaid-empty">Empty diagram</div>';
         lastRenderedCode = "";
         return;
@@ -767,6 +1330,7 @@ function createCodeBlockNodeViewFactory(opts = {}) {
       const valid = () => !destroyed && isMermaid && !isEditing && generation === renderGeneration && node.textContent === codeText;
       renderTimer = setTimeout(async () => {
         if (!valid()) return;
+        clearDiagram();
         mermaidPreview.innerHTML = '<div class="mermaid-loading"><div class="mermaid-spinner"></div>Loading diagram...</div>';
         try {
           const api = await loadMermaidApi(mermaidLoader);
@@ -782,55 +1346,86 @@ function createCodeBlockNodeViewFactory(opts = {}) {
           }
           const result = responsive ? await api.renderMermaid(codeText, { maxWidth: contentWidth, container: mermaidPreview }) : await api.renderMermaid(codeText);
           if (!valid()) return;
-          if ("svg" in result) mermaidPreview.innerHTML = result.svg;
-          else failMermaid(result.error);
+          if ("svg" in result) {
+            mermaidPreview.innerHTML = result.svg;
+            bindDiagram(mermaidPreview);
+          } else failMermaid(result.error);
         } catch {
           if (valid()) failMermaid("Render failed \u2014 try Preview again");
         }
       }, 150);
     }
     function syncRendererMode() {
+      if (canInteract()) toolbar.dataset.diagramInteraction = "";
+      else delete toolbar.dataset.diagramInteraction;
       const showPreview = isRenderer && !rendererEditing;
+      if (!showPreview) clearDiagram();
       pre.style.display = showPreview || isMermaid && !isEditing ? "none" : "";
       rendererPreview.style.display = showPreview ? "block" : "none";
       toggleBtn.style.display = isMermaid || isRenderer ? "inline-flex" : "none";
       wrapper.classList.toggle("renderer-preview-mode", showPreview);
       if (isRenderer) {
-        toggleBtn.textContent = rendererEditing ? "\u{1F441} Preview" : "\u270F\uFE0F Edit";
+        toggleBtn.textContent = diagramInteraction ? rendererEditing ? labels.preview : labels.edit : rendererEditing ? "\u{1F441} Preview" : "\u270F\uFE0F Edit";
         if (showPreview) triggerRendererRender();
       }
     }
     function triggerRendererRender() {
-      const source = code2.textContent || "";
+      const source = node.textContent;
       const lang = node.attrs.language || "";
-      if (!rendererRegistry || !rendererRegistry.has(lang)) return;
+      if (destroyed || rendererEditing || !rendererRegistry || !rendererRegistry.has(lang)) return;
+      if (source === lastRendererCode && source.trim()) {
+        if (!diagram && currentRendererContainer) bindDiagram(rendererPreview);
+        return;
+      }
+      const generation = ++rendererGeneration;
+      disposePendingRenderers();
+      if (rendererTimer) clearTimeout(rendererTimer);
       if (!source.trim()) {
+        clearDiagram();
+        disposeRenderer();
         rendererPreview.innerHTML = '<div class="renderer-empty">Empty block</div>';
         lastRendererCode = "";
         return;
       }
-      if (source === lastRendererCode) return;
       lastRendererCode = source;
-      if (rendererTimer) clearTimeout(rendererTimer);
+      const valid = () => !destroyed && !rendererEditing && isRenderer && generation === rendererGeneration && node.attrs.language === lang && node.textContent === source;
       rendererTimer = setTimeout(async () => {
+        if (!valid()) return;
+        clearDiagram();
+        disposeRenderer();
         rendererPreview.innerHTML = '<div class="renderer-loading"><div class="renderer-spinner"></div>Rendering...</div>';
+        let module;
+        const staging = document.createElement("div");
+        const output = document.createElement("div");
+        staging.appendChild(output);
+        const pending = { output, staging, started: false, disposed: false, finalized: false };
+        pendingRenderers.add(pending);
+        output.className = "renderer-content";
         try {
-          const module = await rendererRegistry.load(lang);
-          if (code2.textContent !== source) return;
-          if (currentRendererModule?.destroy) {
-            try {
-              currentRendererModule.destroy(rendererPreview);
-            } catch {
-            }
+          module = await rendererRegistry.load(lang);
+          if (!valid() || pending.disposed) {
+            disposePendingRenderer(pending, true);
+            return;
           }
+          pending.module = module;
+          Object.assign(staging.style, { position: "absolute", left: "0", top: "0", visibility: "hidden", pointerEvents: "none", width: `${rendererPreview.clientWidth || wrapper.clientWidth}px` });
+          wrapper.appendChild(staging);
+          pending.started = true;
+          await module.render(source, output);
+          if (!valid() || pending.disposed) {
+            disposePendingRenderer(pending, true);
+            return;
+          }
+          pendingRenderers.delete(pending);
+          rendererPreview.replaceChildren(output);
+          staging.remove();
           currentRendererModule = module;
-          rendererPreview.innerHTML = "";
-          try {
-            await module.render(source, rendererPreview);
-          } catch (e) {
-            rendererPreview.innerHTML = `<div class="renderer-error" data-language="${escapeText(lang)}" data-error="${escapeText(String(e))}">[Renderer ${escapeText(lang)} failed]</div>`;
-          }
+          currentRendererContainer = output;
+          bindDiagram(rendererPreview);
         } catch (e) {
+          disposePendingRenderer(pending, true);
+          if (!valid()) return;
+          lastRendererCode = "";
           rendererPreview.innerHTML = `<div class="renderer-error" data-language="${escapeText(lang)}" data-error="${escapeText(String(e))}">[Renderer ${escapeText(lang)} failed]</div>`;
         }
       }, 150);
@@ -851,12 +1446,15 @@ function createCodeBlockNodeViewFactory(opts = {}) {
       });
     } else if (isRenderer) {
       syncRendererMode();
-      requestAnimationFrame(() => syncRendererMode());
+      requestAnimationFrame(() => {
+        if (!destroyed) syncRendererMode();
+      });
     } else {
       syncMermaidMode();
     }
     let activePicker = null;
     langLabel.addEventListener("mousedown", (e) => {
+      if (!view.editable) return;
       e.preventDefault();
       e.stopPropagation();
       if (activePicker) {
@@ -893,11 +1491,14 @@ function createCodeBlockNodeViewFactory(opts = {}) {
         }
       );
     });
-    toggleBtn.addEventListener("mousedown", (e) => {
+    toggleBtn.addEventListener("mousedown", (e) => e.preventDefault());
+    toggleBtn.addEventListener(diagramInteraction ? "click" : "mousedown", (e) => {
       e.preventDefault();
       e.stopPropagation();
       if (isMermaid) {
         isEditing = !isEditing;
+        focusPreviewAfterRender = Boolean(diagramInteraction) && !isEditing;
+        if (focusPreviewAfterRender) toggleBtn.focus({ preventScroll: true });
         if (isEditing) {
           renderGeneration++;
           lastRenderedCode = "";
@@ -905,11 +1506,22 @@ function createCodeBlockNodeViewFactory(opts = {}) {
         syncMermaidMode();
       } else if (isRenderer) {
         rendererEditing = !rendererEditing;
+        focusPreviewAfterRender = Boolean(diagramInteraction) && !rendererEditing;
+        if (focusPreviewAfterRender) toggleBtn.focus({ preventScroll: true });
+        if (rendererEditing) {
+          rendererGeneration++;
+          disposePendingRenderers();
+          if (!currentRendererContainer) lastRendererCode = "";
+        }
         syncRendererMode();
       }
-      if (isEditing || rendererEditing) view.focus();
+      if (isEditing || rendererEditing) {
+        if (diagramInteraction) focusCode();
+        else view.focus();
+      }
     });
     mermaidPreview.addEventListener("mousedown", (e) => {
+      if (canInteract()) return;
       e.preventDefault();
       e.stopPropagation();
       isEditing = true;
@@ -918,13 +1530,14 @@ function createCodeBlockNodeViewFactory(opts = {}) {
       syncMermaidMode();
       view.focus();
     });
-    copyBtn.addEventListener("mousedown", (e) => {
+    copyBtn.addEventListener("mousedown", (e) => e.preventDefault());
+    copyBtn.addEventListener(diagramInteraction ? "click" : "mousedown", (e) => {
       e.preventDefault();
       e.stopPropagation();
       if (isMermaid && !isEditing) {
-        copyPreviewAsImage(copyBtn, mermaidPreview, code2);
+        copyPreviewAsImage(copyBtn, mermaidPreview, code2, diagram);
       } else if (isRenderer && !rendererEditing) {
-        copyPreviewAsImage(copyBtn, rendererPreview, code2);
+        copyPreviewAsImage(copyBtn, rendererPreview, code2, diagram);
       } else {
         handleCopy(copyBtn, code2);
       }
@@ -941,6 +1554,16 @@ function createCodeBlockNodeViewFactory(opts = {}) {
       },
       update(updatedNode) {
         if (updatedNode.type.name !== "code_block") return false;
+        const languageChanged = node.attrs.language !== updatedNode.attrs.language;
+        const sourceChanged = node.textContent !== updatedNode.textContent;
+        if (languageChanged || sourceChanged) {
+          clearDiagram();
+          rendererGeneration++;
+          disposePendingRenderers();
+          renderGeneration++;
+          lastRendererCode = "";
+          lastRenderedCode = "";
+        }
         node = updatedNode;
         langLabel.textContent = findLanguageLabel(updatedNode.attrs.language || "", allLanguages);
         const wasMermaid = isMermaid;
@@ -959,17 +1582,11 @@ function createCodeBlockNodeViewFactory(opts = {}) {
         }
         const wasRenderer = isRenderer;
         isRenderer = updatedNode.attrs.language !== "mermaid" && rendererLangIds.has(updatedNode.attrs.language || "");
-        if (isRenderer !== wasRenderer) {
+        if (isRenderer !== wasRenderer || languageChanged) {
           rendererEditing = false;
           lastRendererCode = "";
           rendererPreview.innerHTML = "";
-          if (!isRenderer && currentRendererModule?.destroy) {
-            try {
-              currentRendererModule.destroy(rendererPreview);
-            } catch {
-            }
-            currentRendererModule = null;
-          }
+          disposeRenderer();
         }
         if (isRenderer) {
           syncRendererMode();
@@ -989,6 +1606,9 @@ function createCodeBlockNodeViewFactory(opts = {}) {
       destroy() {
         destroyed = true;
         renderGeneration++;
+        rendererGeneration++;
+        disposePendingRenderers();
+        clearDiagram();
         disconnectMermaidResize();
         if (activePicker) {
           activePicker.destroy();
@@ -996,13 +1616,7 @@ function createCodeBlockNodeViewFactory(opts = {}) {
         }
         if (renderTimer) clearTimeout(renderTimer);
         if (rendererTimer) clearTimeout(rendererTimer);
-        if (currentRendererModule?.destroy) {
-          try {
-            currentRendererModule.destroy(rendererPreview);
-          } catch {
-          }
-        }
-        currentRendererModule = null;
+        disposeRenderer();
         mermaidReRenderCallbacks.delete(onThemeChange);
       }
     };
@@ -1012,6 +1626,7 @@ var mermaidLoads, themeObserverInstalled, mermaidReRenderCallbacks, POPULAR_LANG
 var init_code_block_view = __esm({
   "src/plugins/code-block-view.ts"() {
     "use strict";
+    init_diagram_interaction();
     mermaidLoads = /* @__PURE__ */ new WeakMap();
     themeObserverInstalled = false;
     mermaidReRenderCallbacks = /* @__PURE__ */ new Set();
@@ -1196,10 +1811,10 @@ import {
   AllSelection as AllSelection3,
   EditorState,
   NodeSelection as NodeSelection2,
-  Plugin as Plugin9,
-  PluginKey as PluginKey9,
+  Plugin as Plugin10,
+  PluginKey as PluginKey10,
   Selection,
-  TextSelection as TextSelection5
+  TextSelection as TextSelection7
 } from "prosemirror-state";
 import { Decoration as Decoration5, DecorationSet as DecorationSet5, EditorView } from "prosemirror-view";
 import { keymap } from "prosemirror-keymap";
@@ -6839,34 +7454,34 @@ function createEditorPropsPlugin(opts) {
 import { Plugin as Plugin6, PluginKey as PluginKey6 } from "prosemirror-state";
 var footnotePluginKey = new PluginKey6("moraya-footnote");
 function findDefinition(doc2, label) {
-  let hit = null;
+  let hit2 = null;
   doc2.descendants((node, pos) => {
-    if (hit) return false;
+    if (hit2) return false;
     if (node.type.name === "footnote_definition" && node.attrs.label === label) {
-      hit = { node, pos };
+      hit2 = { node, pos };
       return false;
     }
     return true;
   });
-  return hit;
+  return hit2;
 }
 function findFirstRef(doc2, label) {
-  let hit = null;
+  let hit2 = null;
   doc2.descendants((node, pos) => {
-    if (hit) return false;
+    if (hit2) return false;
     if (node.type.name === "footnote_ref" && node.attrs.label === label) {
-      hit = { node, pos };
+      hit2 = { node, pos };
       return false;
     }
     return true;
   });
-  return hit;
+  return hit2;
 }
 function definitionText(doc2, label) {
-  const hit = findDefinition(doc2, label);
-  if (!hit) return "";
+  const hit2 = findDefinition(doc2, label);
+  if (!hit2) return "";
   const parts = [];
-  hit.node.forEach((child) => {
+  hit2.node.forEach((child) => {
     parts.push(child.textContent);
   });
   return parts.join(" ").trim();
@@ -6901,17 +7516,17 @@ function createFootnotePlugin() {
           const refEl = el?.closest?.("[data-footnote-ref]");
           const defEl = el?.closest?.("[data-footnote-def]");
           if (refEl instanceof HTMLElement) {
-            const hit = findDefinition(view.state.doc, refEl.dataset.label ?? "");
-            if (!hit) return false;
+            const hit2 = findDefinition(view.state.doc, refEl.dataset.label ?? "");
+            if (!hit2) return false;
             event.preventDefault();
-            scrollToAndFlash(view, hit.pos);
+            scrollToAndFlash(view, hit2.pos);
             return true;
           }
           if (defEl instanceof HTMLElement && el === defEl) {
-            const hit = findFirstRef(view.state.doc, defEl.dataset.label ?? "");
-            if (!hit) return false;
+            const hit2 = findFirstRef(view.state.doc, defEl.dataset.label ?? "");
+            if (!hit2) return false;
             event.preventDefault();
-            scrollToAndFlash(view, hit.pos);
+            scrollToAndFlash(view, hit2.pos);
             return true;
           }
           return false;
@@ -6961,13 +7576,14 @@ function createDocCache(maxEntries = 10) {
 }
 
 // src/setup.ts
+init_diagram_interaction();
 var tier1Cache = null;
 var tier1Loading = null;
 function sameTier1Key(a, b) {
-  return a.schema === b.schema && a.rendererRegistry === b.rendererRegistry && a.mermaidLoader === b.mermaidLoader;
+  return a.schema === b.schema && a.rendererRegistry === b.rendererRegistry && a.mermaidLoader === b.mermaidLoader && a.diagramInteraction === b.diagramInteraction;
 }
-function preloadEnhancementPlugins(schema, rendererRegistry, mermaidLoader) {
-  const key = { schema, ...rendererRegistry ? { rendererRegistry } : {}, ...mermaidLoader ? { mermaidLoader } : {} };
+function preloadEnhancementPlugins(schema, rendererRegistry, mermaidLoader, diagramInteraction) {
+  const key = { schema, ...diagramInteraction !== void 0 ? { diagramInteraction } : {}, ...rendererRegistry ? { rendererRegistry } : {}, ...mermaidLoader ? { mermaidLoader } : {} };
   if (tier1Cache && sameTier1Key(tier1Cache.key, key)) return Promise.resolve(tier1Cache.plugins);
   if (tier1Loading && sameTier1Key(tier1Loading.key, key)) return tier1Loading.promise;
   const promise = Promise.allSettled([
@@ -6984,6 +7600,7 @@ function preloadEnhancementPlugins(schema, rendererRegistry, mermaidLoader) {
     }
     if (cbv.status === "fulfilled") {
       plugins.codeBlockView = cbv.value.createCodeBlockNodeViewFactory({
+        ...diagramInteraction !== void 0 ? { diagramInteraction } : {},
         ...rendererRegistry ? { rendererRegistry } : {},
         ...mermaidLoader ? { mermaidLoader } : {}
       });
@@ -6998,8 +7615,8 @@ function preloadEnhancementPlugins(schema, rendererRegistry, mermaidLoader) {
   return promise;
 }
 function createImageSelectionPlugin() {
-  return new Plugin9({
-    key: new PluginKey9("moraya-image-selection"),
+  return new Plugin10({
+    key: new PluginKey10("moraya-image-selection"),
     props: {
       decorations(state) {
         const { from, to } = state.selection;
@@ -7254,7 +7871,7 @@ function buildKeymap(schema) {
     for (let d = $from.depth; d > 0; d--) {
       if ($from.node(d).type.name === "code_block") {
         if (dispatch) {
-          dispatch(state.tr.setSelection(TextSelection5.create(state.doc, $from.start(d), $from.end(d))));
+          dispatch(state.tr.setSelection(TextSelection7.create(state.doc, $from.start(d), $from.end(d))));
         }
         return true;
       }
@@ -7282,7 +7899,7 @@ function buildKeymap(schema) {
         if (!paragraphType) return false;
         const emptyParagraph = paragraphType.create();
         const tr = state.tr.replaceWith(0, docSize, emptyParagraph);
-        tr.setSelection(TextSelection5.create(tr.doc, 1));
+        tr.setSelection(TextSelection7.create(tr.doc, 1));
         tr.setMeta("full-delete", true);
         dispatch(tr);
         return true;
@@ -7296,7 +7913,7 @@ function buildKeymap(schema) {
       }
       return true;
     }
-    if (!sel.empty || !(sel instanceof TextSelection5)) return false;
+    if (!sel.empty || !(sel instanceof TextSelection7)) return false;
     const $cursor = sel.$cursor;
     if (!$cursor) return false;
     const { parent, parentOffset } = $cursor;
@@ -7369,7 +7986,7 @@ function buildKeymap(schema) {
       }
       return true;
     }
-    if (sel.empty && sel instanceof TextSelection5 && sel.$cursor) {
+    if (sel.empty && sel instanceof TextSelection7 && sel.$cursor) {
       const $c = sel.$cursor;
       if ($c.parent.isTextblock && $c.parentOffset === $c.parent.content.size) {
         const ap = $c.after();
@@ -7386,8 +8003,8 @@ function buildKeymap(schema) {
   return keymap(bindings);
 }
 function createDirtyTrackPlugin(onDocChanged) {
-  return new Plugin9({
-    key: new PluginKey9("moraya-dirty-track"),
+  return new Plugin10({
+    key: new PluginKey10("moraya-dirty-track"),
     view: () => ({
       update: (view, prevState) => {
         if (!prevState || view.state.doc.eq(prevState.doc)) return;
@@ -7398,8 +8015,8 @@ function createDirtyTrackPlugin(onDocChanged) {
 }
 function createLazyChangePlugin(onChange, debounceMs = 500) {
   let changeTimer = null;
-  return new Plugin9({
-    key: new PluginKey9("moraya-lazy-change"),
+  return new Plugin10({
+    key: new PluginKey10("moraya-lazy-change"),
     view: () => ({
       update: (view, prevState) => {
         if (!prevState || view.state.doc.eq(prevState.doc)) return;
@@ -7448,13 +8065,14 @@ async function createEditorPlugins(opts, schemaArg) {
       }
     }
   };
-  const tier1 = await preloadEnhancementPlugins(schema, opts.rendererRegistry, opts.enableMermaid === false ? void 0 : opts.mermaidLoader);
+  const tier1 = await preloadEnhancementPlugins(schema, opts.rendererRegistry, opts.enableMermaid === false ? void 0 : opts.mermaidLoader, opts.diagramInteraction);
   const plugins = [
+    ...opts.diagramInteraction ? [createDiagramStatePlugin()] : [],
     // List shortcuts using event.code (reliable on macOS where Option+key
     // produces special chars). Must come before keymap so this handler has
     // highest priority.
-    new Plugin9({
-      key: new PluginKey9("moraya-list-shortcuts"),
+    new Plugin10({
+      key: new PluginKey10("moraya-list-shortcuts"),
       props: {
         handleKeyDown(view, event) {
           const mod = event.metaKey || event.ctrlKey;
@@ -7521,7 +8139,7 @@ async function createEditor(opts) {
   const docCache = opts.docCache ?? createDocCache(10);
   void docCache;
   const plugins = await createEditorPlugins(opts, schema);
-  const tier1 = await preloadEnhancementPlugins(schema, opts.rendererRegistry, opts.enableMermaid === false ? void 0 : opts.mermaidLoader);
+  const tier1 = await preloadEnhancementPlugins(schema, opts.rendererRegistry, opts.enableMermaid === false ? void 0 : opts.mermaidLoader, opts.diagramInteraction);
   const nodeViews = {};
   if (tier1.codeBlockView) {
     nodeViews.code_block = tier1.codeBlockView;
