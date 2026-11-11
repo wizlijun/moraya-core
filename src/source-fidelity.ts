@@ -478,7 +478,7 @@ function prepareBodyClearEdits(base:SourceSession,tr:Transaction):SourceEdit[]|u
  if(step.slice.size&&!(step.slice.content.childCount===1&&step.slice.content.firstChild!.eq(paragraph)))return
  let sourceFrom=0,eol=base.source.match(/\r\n|\r|\n/)?.[0]??'\n'
  if(retained){
-  const root=base.roots.find(r=>r.tokenType==='front_matter'&&r.childFrom===0&&r.childTo===1&&r.pmFrom===0&&r.pmTo===start&&r.sourceFrom===0)
+  const root=base.roots.find(r=>r.tokenType==='front_matter'&&r.childFrom===0&&r.childTo===1&&r.pmFrom===0&&r.pmTo===start&&r.sourceFrom===(base.source.charCodeAt(0)===0xFEFF?1:0))
   if(!root)return
   sourceFrom=root.sourceTo;eol=base.source.slice(root.tailFrom,root.sourceTo).match(/\r\n|\r|\n/)?.[0]??eol
  }

@@ -11141,7 +11141,7 @@ function prepareBodyClearEdits(base, tr) {
   if (step.slice.size && !(step.slice.content.childCount === 1 && step.slice.content.firstChild.eq(paragraph2))) return;
   let sourceFrom = 0, eol = base.source.match(/\r\n|\r|\n/)?.[0] ?? "\n";
   if (retained) {
-    const root = base.roots.find((r2) => r2.tokenType === "front_matter" && r2.childFrom === 0 && r2.childTo === 1 && r2.pmFrom === 0 && r2.pmTo === start && r2.sourceFrom === 0);
+    const root = base.roots.find((r2) => r2.tokenType === "front_matter" && r2.childFrom === 0 && r2.childTo === 1 && r2.pmFrom === 0 && r2.pmTo === start && r2.sourceFrom === (base.source.charCodeAt(0) === 65279 ? 1 : 0));
     if (!root) return;
     sourceFrom = root.sourceTo;
     eol = base.source.slice(root.tailFrom, root.sourceTo).match(/\r\n|\r|\n/)?.[0] ?? eol;

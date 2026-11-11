@@ -58,3 +58,23 @@ it('complete deletion at a definition EOF produces invertible source history',()
  expect(apply(r.session.source,undo.deltas[0]!.edits)).toBe(base.source)
  expect(apply(base.source,undo.invert().deltas[0]!.edits)).toBe(r.session.source)
 })
+
+it('BOM CRLF text-selection body clear preserves metadata and invertible history',()=>{
+ const prefix='\ufeff---\r\n# comment\r\ntitle: "changed"\r\nnested:\r\n  value: 7\r\n---\r\n\r\n',base=open(prefix+'正文\r\n')
+ const state=EditorState.create({doc:base.doc}),start=base.doc.firstChild!.nodeSize
+ const tr=state.tr.setSelection(TextSelection.create(base.doc,start+1,base.doc.content.size-1)).deleteSelection()
+ const r=applySourceBlockTransaction(base,tr)
+ expect(r.ok,r.ok?undefined:r.reason).toBe(true);if(!r.ok)throw Error(r.reason)
+ expect(r.session.source).toBe(prefix);expect(r.session.doc.eq(tr.doc)).toBe(true)
+ expect(r.session.doc.firstChild!.eq(base.doc.firstChild!)).toBe(true)
+ const edits=SourceHistoryStep.canonicalEdits(r.edits.map(edit=>({...edit,removed:base.source.slice(edit.from,edit.to)})))
+ const apply=(source:string,changes:readonly RawEdit[])=>{
+  let at=0,output=''
+  for(const edit of changes){expect(source.slice(edit.from,edit.to)).toBe(edit.removed);output+=source.slice(at,edit.from)+edit.text;at=edit.to}
+  return output+source.slice(at)
+ }
+ const undo=SourceHistoryStep.invertEdits(edits)
+ expect(apply(base.source,edits)).toBe(prefix)
+ expect(apply(prefix,undo)).toBe(base.source)
+ expect(apply(base.source,SourceHistoryStep.invertEdits(undo))).toBe(prefix)
+})
